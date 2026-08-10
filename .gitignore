@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 
 # Rust
+cli/target/
 rust/target/
 
 # Editors and OS

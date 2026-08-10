@@ -24,9 +24,9 @@ Completion is derived from a passing attempt whose revision matches the global p
 
 ## Execution
 
-`practice_tool.database.resolve_problem` resolves either a global slug or an exact set slug/index. `practice_tool.runner.plan_execution` produces the runner and solution paths. `execute_plan` invokes the set-agnostic language protocol, and `record_execution` writes one central attempt. Language-local wrappers suppress their compatibility recorder during central execution.
+`practice_cli::database::resolve_problem` resolves either a global slug or an exact set slug/index. `practice_cli::runner::plan_execution` produces the runner and solution paths. `execute_plan` invokes the set-agnostic language protocol, and `record_execution` writes one central attempt. Language-local wrappers suppress their compatibility recorder during central execution.
 
-This plan/result boundary is the integration point for the future TUI. A TUI can load statement Markdown and solution paths from the database, edit the selected source, stream the language subprocess in a bounded output pane, and submit without parsing human CLI tables.
+This plan/result boundary is the integration point for the future TUI. A Rust TUI can reuse the CLI crate modules to load statement Markdown and solution paths from the database, edit the selected source, stream the language subprocess in a bounded output pane, and submit without parsing human CLI tables.
 
 ## Extension path
 

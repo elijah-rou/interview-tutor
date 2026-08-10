@@ -1,6 +1,6 @@
 # Local algorithm practice harness
 
-A language-independent local judge with a global problem catalog, reusable ordered problem sets, and shared progress. Blind 75 is the first seeded set, not the application boundary.
+A language-independent local judge with a Rust control plane, a global problem catalog, reusable ordered problem sets, and shared progress. Blind 75 is the first seeded set, not the application boundary.
 
 Problems have one global identity. A problem can appear in Blind 75, NeetCode 150, NeetCode 250, and custom sets without duplicating solutions or completion state.
 
@@ -76,15 +76,15 @@ A metadata-only problem is valid and can belong to sets, but cannot run until a 
 ```text
 catalog/problems.json       global shipped problem metadata and adapter paths
 problem_sets/blind75.json   ordered references to global problem slugs
-practice_tool/              reusable catalog, database, selector, and runner internals
-practice                    administration/progress CLI
-run                         terse root execution CLI
+cli/                        standalone Rust control-plane crate
+practice                    Rust CLI launcher
+run                         terse Rust execution launcher
 python/problems/            Python solution starters
 rust/src/problems/          Rust solution starters
 .turso/progress.db          local runtime database
 ```
 
-Checked-in catalogs seed a new database once per catalog revision. SQLite is then the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. These `practice_tool` APIs are intended to be reused by the future TUI instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
+Checked-in catalogs seed a new database once per catalog revision. SQLite is then the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
 
 The database is SQLite/libSQL-compatible. The Turso server is optional:
 

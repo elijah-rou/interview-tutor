@@ -317,6 +317,23 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertIn("1/1", favorite_stats.stdout)
         self.assertIn("1/75", global_stats.stdout)
 
+    def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:
+        result = self.run_command(str(ROOT / "run"), "rust", "two-sum")
+        self.assertNotEqual(result.returncode, 0)
+        with sqlite3.connect(self.database) as connection:
+            attempt = connection.execute(
+                """
+                SELECT a.result, a.exit_code
+                FROM attempts AS a
+                JOIN problems AS p ON p.id = a.problem_id
+                WHERE p.slug = 'two-sum'
+                ORDER BY a.id DESC LIMIT 1
+                """
+            ).fetchone()
+        self.assertIsNotNone(attempt)
+        self.assertEqual(attempt[0], "fail")
+        self.assertNotEqual(attempt[1], 0)
+
     def test_root_run_resolves_problem_set_index_before_dispatch(self) -> None:
         result = self.run_command(str(ROOT / "run"), "python", "blind75", "16")
         self.assertEqual(result.returncode, 1)
@@ -357,6 +374,21 @@ class GeneralizedCliTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM attempts"
             ).fetchone()[0]
         self.assertEqual(attempt_count, 1)
+
+    def test_cli_is_a_self_hosted_rust_executable(self) -> None:
+        version = self.run_command(str(ROOT / "practice"), "--version")
+        self.assertEqual(version.returncode, 0, version.stderr)
+        self.assertEqual(version.stdout.strip(), "practice 0.1.0")
+
+        binary_directory = Path(self.temporary_directory.name) / "no-python"
+        binary_directory.mkdir()
+        python = binary_directory / "python3"
+        python.write_text("#!/bin/sh\nexit 93\n", encoding="utf-8")
+        python.chmod(0o755)
+        self.environment["PATH"] = f"{binary_directory}:{self.environment['PATH']}"
+        result = self.run_command(str(ROOT / "practice"), "sets", "list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("blind75", result.stdout)
 
     def test_root_run_accepts_a_global_problem_slug_without_a_set(self) -> None:
         result = self.run_command(str(ROOT / "run"), "python", "two-sum")

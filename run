@@ -1,30 +1,27 @@
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import argparse
-
-from practice_tool.cli import main
-
-
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="run",
-        description="Run a global problem slug or a problem-set slug/index.",
-    )
-    parser.add_argument("--db", help="database file or file: URL")
-    parser.add_argument("language")
-    parser.add_argument("problem_set_or_problem")
-    parser.add_argument("problem_or_index", nargs="?")
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    arguments = parse_arguments()
-    selectors = [arguments.problem_set_or_problem]
-    if arguments.problem_or_index is not None:
-        selectors.append(arguments.problem_or_index)
-    cli_arguments = []
-    if arguments.db:
-        cli_arguments.extend(("--db", arguments.db))
-    cli_arguments.extend(("run", arguments.language, *selectors))
-    raise SystemExit(main(cli_arguments))
+#!/usr/bin/env bash
+set -euo pipefail
+script=$(readlink -f -- "$0")
+root=$(cd -- "$(dirname -- "$script")" && pwd)
+database=()
+arguments=()
+while (($#)); do
+    case $1 in
+        --db)
+            if (($# < 2)); then
+                printf '%s\n' 'error: --db requires a value' >&2
+                exit 2
+            fi
+            database=(--db "$2")
+            shift 2
+            ;;
+        --db=*)
+            database=("$1")
+            shift
+            ;;
+        *)
+            arguments+=("$1")
+            shift
+            ;;
+    esac
+done
+exec "$root/practice" "${database[@]}" run "${arguments[@]}"

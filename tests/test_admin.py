@@ -245,6 +245,32 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(external_id_result.returncode, 2)
             self.assertIn("LeetCode ids conflict", external_id_result.stderr)
 
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "DELETE FROM problems WHERE slug IN ('alpha', 'beta')"
+                )
+                connection.execute(
+                    "UPDATE problems SET external_id = 1 WHERE slug = 'shared'"
+                )
+            catalog_conflict = self.run_command(
+                str(ROOT / "practice"), "sets", "list", env=environment
+            )
+            self.assertEqual(catalog_conflict.returncode, 2)
+            self.assertIn(
+                "shipped catalog LeetCode id conflicts", catalog_conflict.stderr
+            )
+            with sqlite3.connect(database) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            self.assertEqual(version, 0)
+            self.assertIn("problems", tables)
+            self.assertNotIn("legacy_problems", tables)
+
     def test_progress_is_derived_from_a_current_passing_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             environment = os.environ.copy()
