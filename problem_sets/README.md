@@ -1,12 +1,5 @@
-# Problem-set catalogs
+# Problem sets
 
-Each subdirectory contains one catalog conforming to `schema.json`. `problems.json` is the authoritative inventory and ordering; language registries add only dispatch and interface metadata. Each problem exposes both `source_url` for LeetCode and a checked `neetcode_url`.
+A problem set is metadata plus an ordered list of global problem slugs. It never copies titles, difficulty, tests, source paths, or completion. `blind75.json` is the first shipped set.
 
-A new set needs a unique lowercase `id`, contiguous 1-based `order` values, and a stable `slug` for every problem. Increment `test_revision` whenever that problem's acceptance suite changes materially. Current-revision passes count as complete; older attempts remain in history but no longer satisfy completion.
-
-```console
-./practice --set <id> list
-./practice --set <id> stats
-```
-
-Language runners must expose the same ordered slugs before root dispatch can support the new set.
+Create and compose local sets through `practice sets create/add/move/remove`. Local sets live in the runtime database. Checked-in JSON files are versioned distribution seeds validated against the global catalog.

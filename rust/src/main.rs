@@ -1,7 +1,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use blind_75::{run, PROBLEMS};
+use local_judge::{run, PROBLEMS};
 
 fn usage(program: &str) {
     eprintln!("Usage: {program} <slug>");
@@ -10,7 +10,9 @@ fn usage(program: &str) {
 
 fn main() -> ExitCode {
     let mut arguments = env::args();
-    let program = arguments.next().unwrap_or_else(|| "blind-75".into());
+    let program = arguments
+        .next()
+        .unwrap_or_else(|| "local-judge-rust".into());
     let Some(argument) = arguments.next() else {
         usage(&program);
         return ExitCode::from(2);
@@ -22,10 +24,7 @@ fn main() -> ExitCode {
 
     if argument == "--list" {
         for problem in PROBLEMS {
-            println!(
-                "{:<6}  {:<62}  {}",
-                problem.difficulty, problem.slug, problem.title
-            );
+            println!("{}", problem.slug);
         }
         return ExitCode::SUCCESS;
     }

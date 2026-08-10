@@ -3,7 +3,7 @@
 pub mod problems;
 pub mod types;
 
-pub use problems::{Difficulty, Problem, PROBLEMS};
+pub use problems::{Problem, PROBLEMS};
 
 /// Executes the representative correctness case for one exact slug.
 ///

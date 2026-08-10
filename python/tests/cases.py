@@ -4,7 +4,7 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
-from blind75.structures import (
+from local_judge.structures import (
     graph,
     linked,
     linked_values,

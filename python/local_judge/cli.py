@@ -6,8 +6,8 @@ import traceback
 from pathlib import Path
 from types import ModuleType
 
-from blind75.manifest import BY_SLUG, PROBLEMS, Problem
-from blind75.structures import ListNode, Node, TreeNode
+from local_judge.registry import BY_SLUG, PROBLEMS, Problem
+from local_judge.structures import ListNode, Node, TreeNode
 from tests.cases import CUSTOM_TESTS, SIMPLE_CASES, test_simple
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def load_problem(problem: Problem) -> ModuleType:
     path = ROOT / problem.path
-    spec = importlib.util.spec_from_file_location(f"blind75_starter_{problem.slug}", path)
+    spec = importlib.util.spec_from_file_location(f"local_judge_starter_{problem.slug}", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load {path}")
     module = importlib.util.module_from_spec(spec)
@@ -29,7 +29,7 @@ def load_problem(problem: Problem) -> ModuleType:
 
 def print_problems() -> None:
     for problem in PROBLEMS:
-        print(f"{problem.order:02d}  {problem.difficulty:<6}  {problem.slug}")
+        print(problem.slug)
 
 
 def run(problem: Problem) -> None:

@@ -1,7 +1,7 @@
 [project]
-name = "blind75-starters"
+name = "local-practice-python"
 version = "0.1.0"
-description = "Dependency-free Blind 75 execution framework"
+description = "Dependency-free local problem execution framework"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -10,4 +10,4 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint.per-file-ignores]
-"blind75/problems/**/*.py" = ["F821"] # Judge-supplied ListNode, TreeNode, and Node.
+"problems/**/*.py" = ["F821"] # Judge-supplied ListNode, TreeNode, and Node.

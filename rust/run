@@ -3,24 +3,43 @@ set -uo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ $# -eq 1 && $1 == all ]]; then
+exact_problem=0
+if [[ $# -eq 2 && $1 == --problem ]]; then
+    exact_problem=1
+    set -- "$2"
+fi
+
+if [[ $exact_problem -eq 0 && $# -eq 1 && $1 == all ]]; then
+    slugs=$(cargo run --quiet --manifest-path "$root/Cargo.toml" --bin local-judge-rust -- --list) || exit $?
+    if [[ -z $slugs ]]; then
+        printf '%s
+' 'error: Rust adapter registry is empty' >&2
+        exit 2
+    fi
     status=0
     while read -r slug; do
         "$root/run" "$slug" || status=1
-    done < <(cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- --list | awk '{print $2}')
+    done <<< "$slugs"
     exit "$status"
 fi
 
 if [[ $# -ne 1 || $1 == --list ]]; then
-    exec cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- "$@"
+    exec cargo run --quiet --manifest-path "$root/Cargo.toml" --bin local-judge-rust -- "$@"
 fi
 
 start_ms=$(date +%s%3N)
-cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- "$@"
+cargo run --quiet --manifest-path "$root/Cargo.toml" --bin local-judge-rust -- "$@"
 status=$?
 end_ms=$(date +%s%3N)
-result=fail
-if [[ $status -eq 0 ]]; then result=pass; fi
-"$root/../practice" _record rust "$1" "$result" "$((end_ms - start_ms))" ||     printf '%s
+if [[ ${PRACTICE_NO_RECORD:-0} != 1 ]]; then
+    result=fail
+    if [[ $status -eq 0 ]]; then result=pass; fi
+    if [[ -n ${PRACTICE_PROBLEM_SET:-} ]]; then
+        "$root/../practice" _record rust "$1" "$result" "$((end_ms - start_ms))"             --exit-code "$status" --problem-set "$PRACTICE_PROBLEM_SET" ||             printf '%s
 ' 'warning: could not record progress' >&2
+    else
+        "$root/../practice" _record rust "$1" "$result" "$((end_ms - start_ms))"             --exit-code "$status" || printf '%s
+' 'warning: could not record progress' >&2
+    fi
+fi
 exit "$status"

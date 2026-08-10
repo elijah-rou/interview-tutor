@@ -1,86 +1,104 @@
-# Blind 75 local practice harness
+# Local algorithm practice harness
 
-A local, language-independent practice environment for NeetCode's current Blind 75 set. Problems are ordered by current LeetCode difficulty (Easy, Medium, Hard), then alphabetically within each difficulty tier. Every catalog entry links to both its LeetCode statement and NeetCode lesson.
+A language-independent local judge with a global problem catalog, reusable ordered problem sets, and shared progress. Blind 75 is the first seeded set, not the application boundary.
 
-Every solution file already contains the judge-facing class or method signature and the supplied data structures. Edit only the selected solution. The checked-in tests use the public LeetCode contract and representative published examples. LeetCode's private hidden test corpus is not public and is therefore not copied here.
+Problems have one global identity. A problem can appear in Blind 75, NeetCode 150, NeetCode 250, and custom sets without duplicating solutions or completion state.
 
-## Quick start
+## Run problems
 
-List the problems:
+Use a global problem slug:
 
 ```console
-./practice list
-./practice list --difficulty easy
-./practice list --topic graph
-./practice show two-sum
+./run python two-sum
+./run rust two-sum
 ```
 
-Solve and check a Python problem:
+Or qualify the problem by set and select it by slug or 1-based set index:
 
 ```console
-cd python
-$EDITOR blind75/problems/easy/two_sum.py
-./run two-sum
+./run python blind75 two-sum
+./run rust blind75 16
 ```
 
-Solve and check a Rust problem:
+The two-argument form is always a global slug. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`, so resolution does not guess based on collisions. A zero exit status means the local suite passed. The root runner records exactly one attempt.
+
+The language-local wrappers remain available for direct adapter work:
 
 ```console
-cd rust
-$EDITOR src/problems/two_sum.rs
-./run two-sum
+cd python && ./run two-sum
+cd rust && ./run two-sum
 ```
 
-A run executes the complete local suite for that problem. Its exit status is zero only when every case passes. `./run all` evaluates the full set. You can also launch either runner from the project root:
+## Browse sets and progress
 
 ```console
-./practice test python two-sum
-./practice test rust two-sum
+./practice sets list
+./practice --set blind75 list
+./practice --set blind75 show 16
+./practice --set blind75 stats
+./practice --set blind75 stats --language python
+./practice stats --global --language python
 ```
 
-No Python packages are required. Rust uses the stable toolchain and Cargo.
+Completion belongs to the global problem and language at its current test revision. Passing `two-sum` once immediately counts in every set containing it. Set indexes are only selectors; attempts retain the stable problem identity.
 
-## Progress
+## Add problems and compose sets
 
-Successful and failed practice runs are recorded in `.turso/progress.db`:
+Problem metadata is independent of membership:
 
 ```console
-./practice stats
-./practice stats --language python
-./practice stats --language rust
+./practice problems add custom-pair-sum \
+  --title "Custom Pair Sum" \
+  --difficulty Easy \
+  --topic "Arrays & Hashing" \
+  --statement-file ./custom-pair-sum.md
+./practice problems update custom-pair-sum --test-revision 2
+
+./practice sets create favorites --name "Favorites"
+./practice sets update favorites --description "Problems to revisit"
+./practice sets add favorites two-sum
+./practice sets add favorites custom-pair-sum --index 1
+./practice sets move favorites two-sum --index 1
+./practice sets remove favorites custom-pair-sum
+./practice --set favorites list
+```
+
+A metadata-only problem is valid and can belong to sets, but cannot run until a language adapter and local test dispatch exist. Register the source path after adding that adapter:
+
+```console
+./practice problems adapter custom-pair-sum python python/problems/easy/custom_pair_sum.py
+```
+
+`problems` and `sets` provide list, show, update, and guarded delete operations. Delete requires `--yes`; a problem with membership or attempt history cannot be deleted. Checked-in problems and sets are read-only through local CRUD, while custom resources remain editable.
+
+## Catalog and database ownership
+
+```text
+catalog/problems.json       global shipped problem metadata and adapter paths
+problem_sets/blind75.json   ordered references to global problem slugs
+practice_tool/              reusable catalog, database, selector, and runner internals
+practice                    administration/progress CLI
+run                         terse root execution CLI
+python/problems/            Python solution starters
+rust/src/problems/          Rust solution starters
+.turso/progress.db          local runtime database
+```
+
+Checked-in catalogs seed a new database once per catalog revision. SQLite is then the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. These `practice_tool` APIs are intended to be reused by the future TUI instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
+
+The database is SQLite/libSQL-compatible. The Turso server is optional:
+
+```console
 ./practice db
-```
-
-`stats` reports overall completion and breakdowns by difficulty and DSA topic. A problem is complete after its current test revision passes. A later test revision does not silently inherit an older pass.
-
-The database is a local SQLite/libSQL file and can be opened directly by Turso. To expose it through Turso's local development server:
-
-```console
 turso dev --db-file .turso/progress.db
 ```
 
-The runners use the embedded file directly, so the server is optional. Override the location with `BLIND75_DATABASE_URL=file:/path/to/progress.db` or `BLIND75_DB_PATH=/path/to/progress.db`.
+Database precedence is `--db`, then `PRACTICE_DATABASE_URL`, then `PRACTICE_DB_PATH`, then the legacy Blind 75 environment names, then `.turso/progress.db`.
 
-## Layout
+Existing v1 databases migrate automatically to the global v2 schema. Historical attempts and stale removed problems are retained. Parked legacy problems are archived, remain visible with `problems list --all`, and do not inflate active global progress.
 
-```text
-problem_sets/blind75/problems.json  authoritative ordered catalog
-practice                            root progress and dispatch CLI
-python/                             Python starter solutions and runner
-rust/                               Rust starter solutions and runner
-.turso/progress.db                  local progress, created on demand
-```
+## Interface and test policy
 
-The catalog stores stable slugs, NeetCode DSA topics, verified LeetCode and NeetCode source links, and a `test_revision`. Language runners map each catalog slug to its language-specific adapter. This keeps the problem set independent of an execution framework and leaves room for new languages or sets.
+Starter APIs follow LeetCode. Premium and Rust APIs without official templates use their conventional NeetCode/LintCode-compatible representation. Tests use public contracts and representative examples; LeetCode's private hidden corpus is not available locally.
 
-To add a problem set, add a versioned catalog under `problem_sets/<set-id>/`, select it with `./practice --set <set-id> ...`, then provide the corresponding solution stubs and test adapters in each supported language. Do not infer the inventory by scanning solution files: the catalog is the source of truth.
-
-## Interface policy
-
-Method names, argument conventions, return values, in-place behavior, and supplied structures follow LeetCode. Python uses LeetCode's camelCase API; Rust uses its snake_case API. Premium problems use their conventional LeetCode/NeetCode-compatible interfaces. LeetCode does not publish Rust templates for a few cyclic or graph APIs, so those files document the local representation explicitly.
-
-Tests intentionally validate outcomes rather than a particular implementation. Outputs with multiple valid orderings are normalized where the LeetCode contract permits it.
-
-## Later: CLI hints
-
-LLM hints are intentionally not wired into the first version. A future `hint` command can use GPT-5.6-Luna-xhigh behind an explicit API configuration, keep the current solution local by default, and record no completion attempt. The core harness and progress database do not depend on an LLM.
+LLM hints, populated statements for the shipped catalog, and the split-pane TUI remain later layers. The schema supports statement Markdown and per-language source paths, and the central runner streams child process output, so those frontends do not require another catalog redesign.

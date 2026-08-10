@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "blind-75"
+name = "local-practice-rust"
 version = "0.1.0"

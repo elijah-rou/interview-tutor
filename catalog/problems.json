@@ -1,0 +1,1656 @@
+{
+  "schema_version": 2,
+  "problems": [
+    {
+      "slug": "3sum",
+      "title": "3Sum",
+      "difficulty": "Medium",
+      "topic": "Two Pointers",
+      "leetcode_id": 15,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/3sum/",
+      "neetcode_url": "https://neetcode.io/problems/three-integer-sum/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/3sum.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/three_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "alien-dictionary",
+      "title": "Alien Dictionary",
+      "difficulty": "Hard",
+      "topic": "Advanced Graphs",
+      "leetcode_id": 269,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/alien-dictionary/",
+      "neetcode_url": "https://neetcode.io/problems/foreign-dictionary/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/alien_dictionary.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/alien_dictionary.rs"
+        }
+      ]
+    },
+    {
+      "slug": "best-time-to-buy-and-sell-stock",
+      "title": "Best Time to Buy and Sell Stock",
+      "difficulty": "Easy",
+      "topic": "Sliding Window",
+      "leetcode_id": 121,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/best-time-to-buy-and-sell-stock/",
+      "neetcode_url": "https://neetcode.io/problems/buy-and-sell-crypto/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/best_time_to_buy_and_sell_stock.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/best_time_to_buy_and_sell_stock.rs"
+        }
+      ]
+    },
+    {
+      "slug": "binary-tree-level-order-traversal",
+      "title": "Binary Tree Level Order Traversal",
+      "difficulty": "Medium",
+      "topic": "Trees",
+      "leetcode_id": 102,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/binary-tree-level-order-traversal/",
+      "neetcode_url": "https://neetcode.io/problems/level-order-traversal-of-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/binary_tree_level_order_traversal.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/binary_tree_level_order_traversal.rs"
+        }
+      ]
+    },
+    {
+      "slug": "binary-tree-maximum-path-sum",
+      "title": "Binary Tree Maximum Path Sum",
+      "difficulty": "Hard",
+      "topic": "Trees",
+      "leetcode_id": 124,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/binary-tree-maximum-path-sum/",
+      "neetcode_url": "https://neetcode.io/problems/binary-tree-maximum-path-sum/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/binary_tree_maximum_path_sum.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/binary_tree_maximum_path_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "climbing-stairs",
+      "title": "Climbing Stairs",
+      "difficulty": "Easy",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 70,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/climbing-stairs/",
+      "neetcode_url": "https://neetcode.io/problems/climbing-stairs/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/climbing_stairs.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/climbing_stairs.rs"
+        }
+      ]
+    },
+    {
+      "slug": "clone-graph",
+      "title": "Clone Graph",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 133,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/clone-graph/",
+      "neetcode_url": "https://neetcode.io/problems/clone-graph/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/clone_graph.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/clone_graph.rs"
+        }
+      ]
+    },
+    {
+      "slug": "coin-change",
+      "title": "Coin Change",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 322,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/coin-change/",
+      "neetcode_url": "https://neetcode.io/problems/coin-change/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/coin_change.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/coin_change.rs"
+        }
+      ]
+    },
+    {
+      "slug": "combination-sum",
+      "title": "Combination Sum",
+      "difficulty": "Medium",
+      "topic": "Backtracking",
+      "leetcode_id": 39,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/combination-sum/",
+      "neetcode_url": "https://neetcode.io/problems/combination-target-sum/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/combination_sum.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/combination_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "construct-binary-tree-from-preorder-and-inorder-traversal",
+      "title": "Construct Binary Tree from Preorder and Inorder Traversal",
+      "difficulty": "Medium",
+      "topic": "Trees",
+      "leetcode_id": 105,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/",
+      "neetcode_url": "https://neetcode.io/problems/binary-tree-from-preorder-and-inorder-traversal/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/construct_binary_tree_from_preorder_and_inorder_traversal.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/construct_binary_tree_from_preorder_and_inorder_traversal.rs"
+        }
+      ]
+    },
+    {
+      "slug": "container-with-most-water",
+      "title": "Container With Most Water",
+      "difficulty": "Medium",
+      "topic": "Two Pointers",
+      "leetcode_id": 11,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/container-with-most-water/",
+      "neetcode_url": "https://neetcode.io/problems/max-water-container/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/container_with_most_water.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/container_with_most_water.rs"
+        }
+      ]
+    },
+    {
+      "slug": "contains-duplicate",
+      "title": "Contains Duplicate",
+      "difficulty": "Easy",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 217,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/contains-duplicate/",
+      "neetcode_url": "https://neetcode.io/problems/duplicate-integer/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/contains_duplicate.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/contains_duplicate.rs"
+        }
+      ]
+    },
+    {
+      "slug": "counting-bits",
+      "title": "Counting Bits",
+      "difficulty": "Easy",
+      "topic": "Bit Manipulation",
+      "leetcode_id": 338,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/counting-bits/",
+      "neetcode_url": "https://neetcode.io/problems/counting-bits/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/counting_bits.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/counting_bits.rs"
+        }
+      ]
+    },
+    {
+      "slug": "course-schedule",
+      "title": "Course Schedule",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 207,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/course-schedule/",
+      "neetcode_url": "https://neetcode.io/problems/course-schedule/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/course_schedule.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/course_schedule.rs"
+        }
+      ]
+    },
+    {
+      "slug": "decode-ways",
+      "title": "Decode Ways",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 91,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/decode-ways/",
+      "neetcode_url": "https://neetcode.io/problems/decode-ways/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/decode_ways.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/decode_ways.rs"
+        }
+      ]
+    },
+    {
+      "slug": "design-add-and-search-words-data-structure",
+      "title": "Design Add and Search Words Data Structure",
+      "difficulty": "Medium",
+      "topic": "Tries",
+      "leetcode_id": 211,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/design-add-and-search-words-data-structure/",
+      "neetcode_url": "https://neetcode.io/problems/design-word-search-data-structure/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/design_add_and_search_words_data_structure.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/design_add_and_search_words_data_structure.rs"
+        }
+      ]
+    },
+    {
+      "slug": "encode-and-decode-strings",
+      "title": "Encode and Decode Strings",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 271,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/encode-and-decode-strings/",
+      "neetcode_url": "https://neetcode.io/problems/string-encode-and-decode/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/encode_and_decode_strings.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/encode_and_decode_strings.rs"
+        }
+      ]
+    },
+    {
+      "slug": "find-median-from-data-stream",
+      "title": "Find Median from Data Stream",
+      "difficulty": "Hard",
+      "topic": "Heap / Priority Queue",
+      "leetcode_id": 295,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/find-median-from-data-stream/",
+      "neetcode_url": "https://neetcode.io/problems/find-median-in-a-data-stream/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/find_median_from_data_stream.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/find_median_from_data_stream.rs"
+        }
+      ]
+    },
+    {
+      "slug": "find-minimum-in-rotated-sorted-array",
+      "title": "Find Minimum in Rotated Sorted Array",
+      "difficulty": "Medium",
+      "topic": "Binary Search",
+      "leetcode_id": 153,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/find-minimum-in-rotated-sorted-array/",
+      "neetcode_url": "https://neetcode.io/problems/find-minimum-in-rotated-sorted-array/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/find_minimum_in_rotated_sorted_array.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/find_minimum_in_rotated_sorted_array.rs"
+        }
+      ]
+    },
+    {
+      "slug": "graph-valid-tree",
+      "title": "Graph Valid Tree",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 261,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/graph-valid-tree/",
+      "neetcode_url": "https://neetcode.io/problems/valid-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/graph_valid_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/graph_valid_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "group-anagrams",
+      "title": "Group Anagrams",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 49,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/group-anagrams/",
+      "neetcode_url": "https://neetcode.io/problems/anagram-groups/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/group_anagrams.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/group_anagrams.rs"
+        }
+      ]
+    },
+    {
+      "slug": "house-robber",
+      "title": "House Robber",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 198,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/house-robber/",
+      "neetcode_url": "https://neetcode.io/problems/house-robber/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/house_robber.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/house_robber.rs"
+        }
+      ]
+    },
+    {
+      "slug": "house-robber-ii",
+      "title": "House Robber II",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 213,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/house-robber-ii/",
+      "neetcode_url": "https://neetcode.io/problems/house-robber-ii/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/house_robber_ii.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/house_robber_ii.rs"
+        }
+      ]
+    },
+    {
+      "slug": "implement-trie-prefix-tree",
+      "title": "Implement Trie (Prefix Tree)",
+      "difficulty": "Medium",
+      "topic": "Tries",
+      "leetcode_id": 208,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/implement-trie-prefix-tree/",
+      "neetcode_url": "https://neetcode.io/problems/implement-prefix-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/implement_trie_prefix_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/implement_trie_prefix_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "insert-interval",
+      "title": "Insert Interval",
+      "difficulty": "Medium",
+      "topic": "Intervals",
+      "leetcode_id": 57,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/insert-interval/",
+      "neetcode_url": "https://neetcode.io/problems/insert-new-interval/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/insert_interval.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/insert_interval.rs"
+        }
+      ]
+    },
+    {
+      "slug": "invert-binary-tree",
+      "title": "Invert Binary Tree",
+      "difficulty": "Easy",
+      "topic": "Trees",
+      "leetcode_id": 226,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/invert-binary-tree/",
+      "neetcode_url": "https://neetcode.io/problems/invert-a-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/invert_binary_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/invert_binary_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "jump-game",
+      "title": "Jump Game",
+      "difficulty": "Medium",
+      "topic": "Greedy",
+      "leetcode_id": 55,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/jump-game/",
+      "neetcode_url": "https://neetcode.io/problems/jump-game/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/jump_game.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/jump_game.rs"
+        }
+      ]
+    },
+    {
+      "slug": "kth-smallest-element-in-a-bst",
+      "title": "Kth Smallest Element in a BST",
+      "difficulty": "Medium",
+      "topic": "Trees",
+      "leetcode_id": 230,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/kth-smallest-element-in-a-bst/",
+      "neetcode_url": "https://neetcode.io/problems/kth-smallest-integer-in-bst/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/kth_smallest_element_in_a_bst.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/kth_smallest_element_in_a_bst.rs"
+        }
+      ]
+    },
+    {
+      "slug": "linked-list-cycle",
+      "title": "Linked List Cycle",
+      "difficulty": "Easy",
+      "topic": "Linked List",
+      "leetcode_id": 141,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/linked-list-cycle/",
+      "neetcode_url": "https://neetcode.io/problems/linked-list-cycle-detection/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/linked_list_cycle.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/linked_list_cycle.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-common-subsequence",
+      "title": "Longest Common Subsequence",
+      "difficulty": "Medium",
+      "topic": "2-D Dynamic Programming",
+      "leetcode_id": 1143,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-common-subsequence/",
+      "neetcode_url": "https://neetcode.io/problems/longest-common-subsequence/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_common_subsequence.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_common_subsequence.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-consecutive-sequence",
+      "title": "Longest Consecutive Sequence",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 128,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-consecutive-sequence/",
+      "neetcode_url": "https://neetcode.io/problems/longest-consecutive-sequence/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_consecutive_sequence.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_consecutive_sequence.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-increasing-subsequence",
+      "title": "Longest Increasing Subsequence",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 300,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-increasing-subsequence/",
+      "neetcode_url": "https://neetcode.io/problems/longest-increasing-subsequence/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_increasing_subsequence.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_increasing_subsequence.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-palindromic-substring",
+      "title": "Longest Palindromic Substring",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 5,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-palindromic-substring/",
+      "neetcode_url": "https://neetcode.io/problems/longest-palindromic-substring/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_palindromic_substring.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_palindromic_substring.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-repeating-character-replacement",
+      "title": "Longest Repeating Character Replacement",
+      "difficulty": "Medium",
+      "topic": "Sliding Window",
+      "leetcode_id": 424,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-repeating-character-replacement/",
+      "neetcode_url": "https://neetcode.io/problems/longest-repeating-substring-with-replacement/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_repeating_character_replacement.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_repeating_character_replacement.rs"
+        }
+      ]
+    },
+    {
+      "slug": "longest-substring-without-repeating-characters",
+      "title": "Longest Substring Without Repeating Characters",
+      "difficulty": "Medium",
+      "topic": "Sliding Window",
+      "leetcode_id": 3,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/longest-substring-without-repeating-characters/",
+      "neetcode_url": "https://neetcode.io/problems/longest-substring-without-duplicates/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/longest_substring_without_repeating_characters.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/longest_substring_without_repeating_characters.rs"
+        }
+      ]
+    },
+    {
+      "slug": "lowest-common-ancestor-of-a-binary-search-tree",
+      "title": "Lowest Common Ancestor of a Binary Search Tree",
+      "difficulty": "Medium",
+      "topic": "Trees",
+      "leetcode_id": 235,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/lowest-common-ancestor-of-a-binary-search-tree/",
+      "neetcode_url": "https://neetcode.io/problems/lowest-common-ancestor-in-binary-search-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/lowest_common_ancestor_of_a_binary_search_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/lowest_common_ancestor_of_a_binary_search_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "maximum-depth-of-binary-tree",
+      "title": "Maximum Depth of Binary Tree",
+      "difficulty": "Easy",
+      "topic": "Trees",
+      "leetcode_id": 104,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/maximum-depth-of-binary-tree/",
+      "neetcode_url": "https://neetcode.io/problems/depth-of-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/binary_tree_maximum_depth.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/maximum_depth_of_binary_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "maximum-product-subarray",
+      "title": "Maximum Product Subarray",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 152,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/maximum-product-subarray/",
+      "neetcode_url": "https://neetcode.io/problems/maximum-product-subarray/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/maximum_product_subarray.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/maximum_product_subarray.rs"
+        }
+      ]
+    },
+    {
+      "slug": "maximum-subarray",
+      "title": "Maximum Subarray",
+      "difficulty": "Medium",
+      "topic": "Greedy",
+      "leetcode_id": 53,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/maximum-subarray/",
+      "neetcode_url": "https://neetcode.io/problems/maximum-subarray/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/maximum_subarray.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/maximum_subarray.rs"
+        }
+      ]
+    },
+    {
+      "slug": "meeting-rooms",
+      "title": "Meeting Rooms",
+      "difficulty": "Easy",
+      "topic": "Intervals",
+      "leetcode_id": 252,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/meeting-rooms/",
+      "neetcode_url": "https://neetcode.io/problems/meeting-schedule/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/meeting_rooms.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/meeting_rooms.rs"
+        }
+      ]
+    },
+    {
+      "slug": "meeting-rooms-ii",
+      "title": "Meeting Rooms II",
+      "difficulty": "Medium",
+      "topic": "Intervals",
+      "leetcode_id": 253,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/meeting-rooms-ii/",
+      "neetcode_url": "https://neetcode.io/problems/meeting-schedule-ii/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/meeting_rooms_ii.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/meeting_rooms_ii.rs"
+        }
+      ]
+    },
+    {
+      "slug": "merge-intervals",
+      "title": "Merge Intervals",
+      "difficulty": "Medium",
+      "topic": "Intervals",
+      "leetcode_id": 56,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/merge-intervals/",
+      "neetcode_url": "https://neetcode.io/problems/merge-intervals/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/merge_intervals.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/merge_intervals.rs"
+        }
+      ]
+    },
+    {
+      "slug": "merge-k-sorted-lists",
+      "title": "Merge k Sorted Lists",
+      "difficulty": "Hard",
+      "topic": "Linked List",
+      "leetcode_id": 23,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/merge-k-sorted-lists/",
+      "neetcode_url": "https://neetcode.io/problems/merge-k-sorted-linked-lists/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/merge_k_sorted_lists.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/merge_k_sorted_lists.rs"
+        }
+      ]
+    },
+    {
+      "slug": "merge-two-sorted-lists",
+      "title": "Merge Two Sorted Lists",
+      "difficulty": "Easy",
+      "topic": "Linked List",
+      "leetcode_id": 21,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/merge-two-sorted-lists/",
+      "neetcode_url": "https://neetcode.io/problems/merge-two-sorted-linked-lists/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/merge_two_sorted_lists.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/merge_two_sorted_lists.rs"
+        }
+      ]
+    },
+    {
+      "slug": "minimum-window-substring",
+      "title": "Minimum Window Substring",
+      "difficulty": "Hard",
+      "topic": "Sliding Window",
+      "leetcode_id": 76,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/minimum-window-substring/",
+      "neetcode_url": "https://neetcode.io/problems/minimum-window-with-characters/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/minimum_window_substring.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/minimum_window_substring.rs"
+        }
+      ]
+    },
+    {
+      "slug": "missing-number",
+      "title": "Missing Number",
+      "difficulty": "Easy",
+      "topic": "Bit Manipulation",
+      "leetcode_id": 268,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/missing-number/",
+      "neetcode_url": "https://neetcode.io/problems/missing-number/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/missing_number.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/missing_number.rs"
+        }
+      ]
+    },
+    {
+      "slug": "non-overlapping-intervals",
+      "title": "Non-overlapping Intervals",
+      "difficulty": "Medium",
+      "topic": "Intervals",
+      "leetcode_id": 435,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/non-overlapping-intervals/",
+      "neetcode_url": "https://neetcode.io/problems/non-overlapping-intervals/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/non_overlapping_intervals.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/non_overlapping_intervals.rs"
+        }
+      ]
+    },
+    {
+      "slug": "number-of-1-bits",
+      "title": "Number of 1 Bits",
+      "difficulty": "Easy",
+      "topic": "Bit Manipulation",
+      "leetcode_id": 191,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/number-of-1-bits/",
+      "neetcode_url": "https://neetcode.io/problems/number-of-one-bits/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/number_of_1_bits.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/number_of_1_bits.rs"
+        }
+      ]
+    },
+    {
+      "slug": "number-of-connected-components-in-an-undirected-graph",
+      "title": "Number of Connected Components in an Undirected Graph",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 323,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/number-of-connected-components-in-an-undirected-graph/",
+      "neetcode_url": "https://neetcode.io/problems/count-connected-components/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/number_of_connected_components_in_an_undirected_graph.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/number_of_connected_components_in_an_undirected_graph.rs"
+        }
+      ]
+    },
+    {
+      "slug": "number-of-islands",
+      "title": "Number of Islands",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 200,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/number-of-islands/",
+      "neetcode_url": "https://neetcode.io/problems/count-number-of-islands/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/number_of_islands.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/number_of_islands.rs"
+        }
+      ]
+    },
+    {
+      "slug": "pacific-atlantic-water-flow",
+      "title": "Pacific Atlantic Water Flow",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 417,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/pacific-atlantic-water-flow/",
+      "neetcode_url": "https://neetcode.io/problems/pacific-atlantic-water-flow/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/pacific_atlantic_water_flow.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/pacific_atlantic_water_flow.rs"
+        }
+      ]
+    },
+    {
+      "slug": "palindromic-substrings",
+      "title": "Palindromic Substrings",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 647,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/palindromic-substrings/",
+      "neetcode_url": "https://neetcode.io/problems/palindromic-substrings/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/palindromic_substrings.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/palindromic_substrings.rs"
+        }
+      ]
+    },
+    {
+      "slug": "product-of-array-except-self",
+      "title": "Product of Array Except Self",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 238,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/product-of-array-except-self/",
+      "neetcode_url": "https://neetcode.io/problems/products-of-array-discluding-self/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/product_of_array_except_self.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/product_of_array_except_self.rs"
+        }
+      ]
+    },
+    {
+      "slug": "remove-nth-node-from-end-of-list",
+      "title": "Remove Nth Node From End of List",
+      "difficulty": "Medium",
+      "topic": "Linked List",
+      "leetcode_id": 19,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/remove-nth-node-from-end-of-list/",
+      "neetcode_url": "https://neetcode.io/problems/remove-node-from-end-of-linked-list/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/remove_nth_node_from_end_of_list.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/remove_nth_node_from_end_of_list.rs"
+        }
+      ]
+    },
+    {
+      "slug": "reorder-list",
+      "title": "Reorder List",
+      "difficulty": "Medium",
+      "topic": "Linked List",
+      "leetcode_id": 143,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/reorder-list/",
+      "neetcode_url": "https://neetcode.io/problems/reorder-linked-list/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/reorder_list.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/reorder_list.rs"
+        }
+      ]
+    },
+    {
+      "slug": "reverse-bits",
+      "title": "Reverse Bits",
+      "difficulty": "Easy",
+      "topic": "Bit Manipulation",
+      "leetcode_id": 190,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/reverse-bits/",
+      "neetcode_url": "https://neetcode.io/problems/reverse-bits/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/reverse_bits.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/reverse_bits.rs"
+        }
+      ]
+    },
+    {
+      "slug": "reverse-linked-list",
+      "title": "Reverse Linked List",
+      "difficulty": "Easy",
+      "topic": "Linked List",
+      "leetcode_id": 206,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/reverse-linked-list/",
+      "neetcode_url": "https://neetcode.io/problems/reverse-a-linked-list/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/reverse_linked_list.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/reverse_linked_list.rs"
+        }
+      ]
+    },
+    {
+      "slug": "rotate-image",
+      "title": "Rotate Image",
+      "difficulty": "Medium",
+      "topic": "Math & Geometry",
+      "leetcode_id": 48,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/rotate-image/",
+      "neetcode_url": "https://neetcode.io/problems/rotate-matrix/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/rotate_image.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/rotate_image.rs"
+        }
+      ]
+    },
+    {
+      "slug": "same-tree",
+      "title": "Same Tree",
+      "difficulty": "Easy",
+      "topic": "Trees",
+      "leetcode_id": 100,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/same-tree/",
+      "neetcode_url": "https://neetcode.io/problems/same-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/same_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/same_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "search-in-rotated-sorted-array",
+      "title": "Search in Rotated Sorted Array",
+      "difficulty": "Medium",
+      "topic": "Binary Search",
+      "leetcode_id": 33,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/search-in-rotated-sorted-array/",
+      "neetcode_url": "https://neetcode.io/problems/find-target-in-rotated-sorted-array/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/search_in_rotated_sorted_array.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/search_in_rotated_sorted_array.rs"
+        }
+      ]
+    },
+    {
+      "slug": "serialize-and-deserialize-binary-tree",
+      "title": "Serialize and Deserialize Binary Tree",
+      "difficulty": "Hard",
+      "topic": "Trees",
+      "leetcode_id": 297,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/serialize-and-deserialize-binary-tree/",
+      "neetcode_url": "https://neetcode.io/problems/serialize-and-deserialize-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/serialize_and_deserialize_binary_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/serialize_and_deserialize_binary_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "set-matrix-zeroes",
+      "title": "Set Matrix Zeroes",
+      "difficulty": "Medium",
+      "topic": "Math & Geometry",
+      "leetcode_id": 73,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/set-matrix-zeroes/",
+      "neetcode_url": "https://neetcode.io/problems/set-zeroes-in-matrix/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/set_matrix_zeroes.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/set_matrix_zeroes.rs"
+        }
+      ]
+    },
+    {
+      "slug": "spiral-matrix",
+      "title": "Spiral Matrix",
+      "difficulty": "Medium",
+      "topic": "Math & Geometry",
+      "leetcode_id": 54,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/spiral-matrix/",
+      "neetcode_url": "https://neetcode.io/problems/spiral-matrix/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/spiral_matrix.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/spiral_matrix.rs"
+        }
+      ]
+    },
+    {
+      "slug": "subtree-of-another-tree",
+      "title": "Subtree of Another Tree",
+      "difficulty": "Easy",
+      "topic": "Trees",
+      "leetcode_id": 572,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/subtree-of-another-tree/",
+      "neetcode_url": "https://neetcode.io/problems/subtree-of-a-binary-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/subtree_of_another_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/subtree_of_another_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "sum-of-two-integers",
+      "title": "Sum of Two Integers",
+      "difficulty": "Medium",
+      "topic": "Bit Manipulation",
+      "leetcode_id": 371,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/sum-of-two-integers/",
+      "neetcode_url": "https://neetcode.io/problems/sum-of-two-integers/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/sum_of_two_integers.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/sum_of_two_integers.rs"
+        }
+      ]
+    },
+    {
+      "slug": "top-k-frequent-elements",
+      "title": "Top K Frequent Elements",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 347,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/top-k-frequent-elements/",
+      "neetcode_url": "https://neetcode.io/problems/top-k-elements-in-list/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/top_k_frequent_elements.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/top_k_frequent_elements.rs"
+        }
+      ]
+    },
+    {
+      "slug": "two-sum",
+      "title": "Two Sum",
+      "difficulty": "Easy",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 1,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/two-sum/",
+      "neetcode_url": "https://neetcode.io/problems/two-integer-sum/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/two_sum.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/two_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "unique-paths",
+      "title": "Unique Paths",
+      "difficulty": "Medium",
+      "topic": "2-D Dynamic Programming",
+      "leetcode_id": 62,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/unique-paths/",
+      "neetcode_url": "https://neetcode.io/problems/count-paths/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/unique_paths.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/unique_paths.rs"
+        }
+      ]
+    },
+    {
+      "slug": "valid-anagram",
+      "title": "Valid Anagram",
+      "difficulty": "Easy",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 242,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/valid-anagram/",
+      "neetcode_url": "https://neetcode.io/problems/is-anagram/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/valid_anagram.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/valid_anagram.rs"
+        }
+      ]
+    },
+    {
+      "slug": "valid-palindrome",
+      "title": "Valid Palindrome",
+      "difficulty": "Easy",
+      "topic": "Two Pointers",
+      "leetcode_id": 125,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/valid-palindrome/",
+      "neetcode_url": "https://neetcode.io/problems/is-palindrome/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/valid_palindrome.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/valid_palindrome.rs"
+        }
+      ]
+    },
+    {
+      "slug": "valid-parentheses",
+      "title": "Valid Parentheses",
+      "difficulty": "Easy",
+      "topic": "Stack",
+      "leetcode_id": 20,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/valid-parentheses/",
+      "neetcode_url": "https://neetcode.io/problems/validate-parentheses/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/valid_parentheses.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/valid_parentheses.rs"
+        }
+      ]
+    },
+    {
+      "slug": "validate-binary-search-tree",
+      "title": "Validate Binary Search Tree",
+      "difficulty": "Medium",
+      "topic": "Trees",
+      "leetcode_id": 98,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/validate-binary-search-tree/",
+      "neetcode_url": "https://neetcode.io/problems/valid-binary-search-tree/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/validate_binary_search_tree.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/validate_binary_search_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "word-break",
+      "title": "Word Break",
+      "difficulty": "Medium",
+      "topic": "1-D Dynamic Programming",
+      "leetcode_id": 139,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/word-break/",
+      "neetcode_url": "https://neetcode.io/problems/word-break/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/word_break.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/word_break.rs"
+        }
+      ]
+    },
+    {
+      "slug": "word-search",
+      "title": "Word Search",
+      "difficulty": "Medium",
+      "topic": "Backtracking",
+      "leetcode_id": 79,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/word-search/",
+      "neetcode_url": "https://neetcode.io/problems/search-for-word/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/word_search.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/word_search.rs"
+        }
+      ]
+    },
+    {
+      "slug": "word-search-ii",
+      "title": "Word Search II",
+      "difficulty": "Hard",
+      "topic": "Tries",
+      "leetcode_id": 212,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/word-search-ii/",
+      "neetcode_url": "https://neetcode.io/problems/search-for-word-ii/question",
+      "statement_markdown": "",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/word_search_ii.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/word_search_ii.rs"
+        }
+      ]
+    }
+  ],
+  "catalog_revision": 1
+}
