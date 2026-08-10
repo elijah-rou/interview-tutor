@@ -181,11 +181,11 @@ PROBLEMS = (
     ),
     Problem(
         24,
-        "combination-sum-iv",
+        "combination-sum",
         "Medium",
-        "blind75/problems/medium/combination_sum_iv.py",
+        "blind75/problems/medium/combination_sum.py",
         "Solution",
-        "combinationSum4",
+        "combinationSum",
     ),
     Problem(
         25,

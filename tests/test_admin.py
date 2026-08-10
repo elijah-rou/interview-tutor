@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import tempfile
@@ -37,6 +38,69 @@ class ProjectCliTests(unittest.TestCase):
         self.assertEqual(rust_result.returncode, 0, rust_result.stderr)
         rust_slugs = [line.split()[1] for line in rust_result.stdout.splitlines()]
         self.assertEqual(rust_slugs, expected)
+
+    def test_catalog_includes_verified_neetcode_sources(self) -> None:
+        catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+        external_ids = {problem["leetcode_id"] for problem in catalog["problems"]}
+        self.assertIn(39, external_ids)
+        self.assertNotIn(377, external_ids)
+        self.assertTrue(
+            all(
+                problem["neetcode_url"].startswith("https://neetcode.io/problems/")
+                for problem in catalog["problems"]
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["BLIND75_DB_PATH"] = str(Path(directory) / "progress.db")
+            shown = self.run_command(
+                str(ROOT / "practice"), "show", "combination-sum", env=environment
+            )
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(
+            "https://neetcode.io/problems/combination-target-sum/question", shown.stdout
+        )
+
+    def test_catalog_rename_preserves_legacy_database_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "progress.db"
+            environment = os.environ.copy()
+            environment["BLIND75_DB_PATH"] = str(database)
+            initialized = self.run_command(
+                str(ROOT / "practice"), "db", env=environment
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE problems SET slug = 'combination-sum-iv' "
+                    "WHERE problem_set_id = 'blind75' AND slug = 'combination-sum'"
+                )
+                connection.execute(
+                    "INSERT INTO attempts(problem_set_id, problem_slug, language, passed, "
+                    "test_revision, duration_ms, run_at) "
+                    "VALUES ('blind75', 'combination-sum-iv', 'python', 1, 1, 5, "
+                    "'2026-08-10T00:00:00+00:00')"
+                )
+                connection.execute(
+                    "CREATE UNIQUE INDEX legacy_problem_ordinal "
+                    "ON problems(problem_set_id, ordinal)"
+                )
+            shown = self.run_command(
+                str(ROOT / "practice"), "show", "combination-sum", env=environment
+            )
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            with sqlite3.connect(database) as connection:
+                rows = connection.execute(
+                    "SELECT slug, ordinal FROM problems "
+                    "WHERE slug IN ('combination-sum', 'combination-sum-iv')"
+                ).fetchall()
+                retained_attempts = connection.execute(
+                    "SELECT COUNT(*) FROM attempts WHERE problem_slug = 'combination-sum-iv'"
+                ).fetchone()[0]
+            self.assertEqual(retained_attempts, 1)
+            ordinals = dict(rows)
+            self.assertEqual(ordinals["combination-sum"], 24)
+            self.assertGreaterEqual(ordinals["combination-sum-iv"], 1_000_000)
 
     def test_progress_is_derived_from_a_current_passing_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

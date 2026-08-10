@@ -1,6 +1,6 @@
 # Blind 75 local practice harness
 
-A local, language-independent practice environment for the canonical Blind 75 set. Problems are ordered by current LeetCode difficulty (Easy, Medium, Hard), then alphabetically within each difficulty tier.
+A local, language-independent practice environment for NeetCode's current Blind 75 set. Problems are ordered by current LeetCode difficulty (Easy, Medium, Hard), then alphabetically within each difficulty tier. Every catalog entry links to both its LeetCode statement and NeetCode lesson.
 
 Every solution file already contains the judge-facing class or method signature and the supplied data structures. Edit only the selected solution. The checked-in tests use the public LeetCode contract and representative published examples. LeetCode's private hidden test corpus is not public and is therefore not copied here.
 
@@ -12,6 +12,7 @@ List the problems:
 ./practice list
 ./practice list --difficulty easy
 ./practice list --topic graph
+./practice show two-sum
 ```
 
 Solve and check a Python problem:
@@ -70,7 +71,7 @@ rust/                               Rust starter solutions and runner
 .turso/progress.db                  local progress, created on demand
 ```
 
-The catalog stores stable slugs, display metadata, source links, and a `test_revision`. Language runners map each catalog slug to its language-specific adapter. This keeps the problem set independent of an execution framework and leaves room for new languages or sets.
+The catalog stores stable slugs, NeetCode DSA topics, verified LeetCode and NeetCode source links, and a `test_revision`. Language runners map each catalog slug to its language-specific adapter. This keeps the problem set independent of an execution framework and leaves room for new languages or sets.
 
 To add a problem set, add a versioned catalog under `problem_sets/<set-id>/`, select it with `./practice --set <set-id> ...`, then provide the corresponding solution stubs and test adapters in each supported language. Do not infer the inventory by scanning solution files: the catalog is the source of truth.
 

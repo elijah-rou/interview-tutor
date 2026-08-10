@@ -7,7 +7,7 @@ pub mod binary_tree_maximum_path_sum;
 pub mod climbing_stairs;
 pub mod clone_graph;
 pub mod coin_change;
-pub mod combination_sum_iv;
+pub mod combination_sum;
 pub mod construct_binary_tree_from_preorder_and_inorder_traversal;
 pub mod container_with_most_water;
 pub mod contains_duplicate;
@@ -289,11 +289,11 @@ pub static PROBLEMS: &[Problem] = &[
         coin_change::run_case,
     ),
     Problem::new(
-        "combination-sum-iv",
-        "Combination Sum IV",
+        "combination-sum",
+        "Combination Sum",
         Difficulty::Medium,
         "Dynamic Programming",
-        combination_sum_iv::run_case,
+        combination_sum::run_case,
     ),
     Problem::new(
         "construct-binary-tree-from-preorder-and-inorder-traversal",

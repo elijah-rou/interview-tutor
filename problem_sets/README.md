@@ -1,6 +1,6 @@
 # Problem-set catalogs
 
-Each subdirectory contains one catalog conforming to `schema.json`. `problems.json` is the authoritative inventory and ordering; language registries add only dispatch and interface metadata.
+Each subdirectory contains one catalog conforming to `schema.json`. `problems.json` is the authoritative inventory and ordering; language registries add only dispatch and interface metadata. Each problem exposes both `source_url` for LeetCode and a checked `neetcode_url`.
 
 A new set needs a unique lowercase `id`, contiguous 1-based `order` values, and a stable `slug` for every problem. Increment `test_revision` whenever that problem's acceptance suite changes materially. Current-revision passes count as complete; older attempts remain in history but no longer satisfy completion.
 

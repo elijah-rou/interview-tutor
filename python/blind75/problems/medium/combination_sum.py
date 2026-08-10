@@ -2,5 +2,5 @@ from __future__ import annotations
 
 
 class Solution:
-    def combinationSum4(self, nums: list[int], target: int) -> int:
+    def combinationSum(self, candidates: list[int], target: int) -> list[list[int]]:
         raise NotImplementedError

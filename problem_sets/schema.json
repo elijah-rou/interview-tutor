@@ -41,6 +41,7 @@
           "leetcode_id",
           "premium",
           "source_url",
+          "neetcode_url",
           "test_revision"
         ],
         "properties": {
@@ -80,6 +81,11 @@
           "source_url": {
             "type": "string",
             "format": "uri"
+          },
+          "neetcode_url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://neetcode\\.io/problems/"
           },
           "test_revision": {
             "type": "integer",

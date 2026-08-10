@@ -73,8 +73,7 @@ def connect_database(catalog: dict) -> sqlite3.Connection:
             external_id INTEGER,
             premium INTEGER NOT NULL CHECK (premium IN (0, 1)),
             test_revision INTEGER NOT NULL CHECK (test_revision > 0),
-            PRIMARY KEY (problem_set_id, slug),
-            UNIQUE (problem_set_id, ordinal)
+            PRIMARY KEY (problem_set_id, slug)
         ) STRICT;
         CREATE TABLE IF NOT EXISTS attempts (
             id INTEGER PRIMARY KEY,
@@ -97,6 +96,15 @@ def connect_database(catalog: dict) -> sqlite3.Connection:
             "INSERT INTO problem_sets(id, name) VALUES (?, ?) "
             "ON CONFLICT(id) DO UPDATE SET name = excluded.name",
             (catalog["id"], catalog["name"]),
+        )
+        # Move active ordinals out of the way before upserting. Older database
+        # versions enforced unique ordinals, so this also permits catalog renames
+        # and reordering without discarding attempt history.
+        assert len(catalog["problems"]) < 1_000_000
+        connection.execute(
+            "UPDATE problems SET ordinal = 1000000 + rowid "
+            "WHERE problem_set_id = ? AND ordinal < 1000000",
+            (catalog["id"],),
         )
         for problem in catalog["problems"]:
             connection.execute(
@@ -183,6 +191,22 @@ def command_list(
             ]
         )
     print_table(["#", "Difficulty", "Topic", "Python", "Rust", "Problem"], rows)
+    return 0
+
+
+def command_show(args: argparse.Namespace, catalog: dict, _: sqlite3.Connection) -> int:
+    problem = next(
+        (problem for problem in catalog["problems"] if problem["slug"] == args.problem),
+        None,
+    )
+    if problem is None:
+        raise SystemExit(f"unknown problem slug: {args.problem}")
+    print(problem["title"])
+    print(f"Problem set: {catalog['name']} #{problem['order']}")
+    print(f"Difficulty: {problem['difficulty']}")
+    print(f"Topic: {problem['topic']}")
+    print(f"LeetCode: {problem['source_url']}")
+    print(f"NeetCode: {problem['neetcode_url']}")
     return 0
 
 
@@ -314,6 +338,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--difficulty", choices=("easy", "medium", "hard"))
     list_parser.add_argument("--topic", help="case-insensitive topic substring")
     list_parser.set_defaults(handler=command_list)
+
+    show_parser = subparsers.add_parser(
+        "show", help="show problem metadata and source links"
+    )
+    show_parser.add_argument("problem", help="problem slug")
+    show_parser.set_defaults(handler=command_show)
 
     stats_parser = subparsers.add_parser("stats", help="show completion statistics")
     stats_parser.add_argument(

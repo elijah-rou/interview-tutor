@@ -19,7 +19,6 @@ SIMPLE_CASES: dict[str, tuple[tuple[Any, ...], Any]] = {
     "best-time-to-buy-and-sell-stock": (([7, 1, 5, 3, 6, 4],), 5),
     "climbing-stairs": ((5,), 8),
     "coin-change": (([1, 2, 5], 11), 3),
-    "combination-sum-iv": (([1, 2, 3], 4), 7),
     "container-with-most-water": (([1, 8, 6, 2, 5, 4, 8, 3, 7],), 49),
     "contains-duplicate": (([1, 2, 3, 1],), True),
     "counting-bits": ((5,), [0, 1, 1, 2, 1, 2]),
@@ -143,6 +142,12 @@ def test_clone_graph(module: ModuleType) -> None:
         id(node) for node, _ in cloned_nodes.values()
     }:
         raise AssertionError("clone must not reuse any original node")
+
+
+def test_combination_sum(module: ModuleType) -> None:
+    actual = call_solution(module, "combinationSum", [2, 3, 6, 7], 7)
+    normalized = sorted(sorted(combination) for combination in actual)
+    assert_equal(normalized, [[2, 2, 3], [7]])
 
 
 def test_construct_tree(module: ModuleType) -> None:
@@ -317,6 +322,7 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "maximum-depth-of-binary-tree": test_binary_tree_maximum_depth,
     "binary-tree-maximum-path-sum": test_binary_tree_maximum_path_sum,
     "clone-graph": test_clone_graph,
+    "combination-sum": test_combination_sum,
     "construct-binary-tree-from-preorder-and-inorder-traversal": test_construct_tree,
     "design-add-and-search-words-data-structure": test_word_dictionary,
     "encode-and-decode-strings": test_encode_decode,
