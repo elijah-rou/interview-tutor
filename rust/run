@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $# -eq 1 && $1 == all ]]; then
+    status=0
+    while read -r slug; do
+        "$root/run" "$slug" || status=1
+    done < <(cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- --list | awk '{print $2}')
+    exit "$status"
+fi
+
+if [[ $# -ne 1 || $1 == --list ]]; then
+    exec cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- "$@"
+fi
+
+start_ms=$(date +%s%3N)
+cargo run --quiet --manifest-path "$root/Cargo.toml" --bin blind-75 -- "$@"
+status=$?
+end_ms=$(date +%s%3N)
+result=fail
+if [[ $status -eq 0 ]]; then result=pass; fi
+"$root/../practice" _record rust "$1" "$result" "$((end_ms - start_ms))" ||     printf '%s
+' 'warning: could not record progress' >&2
+exit "$status"

@@ -1,0 +1,15 @@
+[package]
+name = "blind-75"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "blind_75"
+path = "src/lib.rs"
+
+[[bin]]
+name = "blind-75"
+path = "src/main.rs"
+
+[dependencies]

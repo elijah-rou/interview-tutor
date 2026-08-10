@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "$#" -eq 1 ] && [ "$1" = "all" ]; then
+    status=0
+    for slug in $(python3 "$ROOT/runner.py" --list | awk '{print $3}'); do
+        "$ROOT/run" "$slug" || status=1
+    done
+    exit "$status"
+fi
+
+if [ "$#" -ne 1 ] || [ "$1" = "--list" ]; then
+    exec python3 "$ROOT/runner.py" "$@"
+fi
+
+start_ms=$(date +%s%3N)
+python3 "$ROOT/runner.py" "$@"
+status=$?
+end_ms=$(date +%s%3N)
+result=fail
+if [ "$status" -eq 0 ]; then result=pass; fi
+"$ROOT/../practice" _record python "$1" "$result" "$((end_ms - start_ms))" ||     printf '%s
+' 'warning: could not record progress' >&2
+exit "$status"

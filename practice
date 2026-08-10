@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Blind 75 project administration and progress CLI."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent
+PROBLEM_SETS_PATH = ROOT / "problem_sets"
+DEFAULT_DATABASE_PATH = ROOT / ".turso" / "progress.db"
+LANGUAGE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+
+def load_catalog(problem_set: str) -> dict:
+    if not LANGUAGE_PATTERN.fullmatch(problem_set):
+        raise SystemExit(f"invalid problem-set identifier: {problem_set}")
+    catalog_path = PROBLEM_SETS_PATH / problem_set / "problems.json"
+    if not catalog_path.is_file():
+        raise SystemExit(f"problem set is not installed: {problem_set}")
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert catalog["schema_version"] == 1
+    assert catalog["id"] == problem_set
+    problems = catalog["problems"]
+    assert problems
+    assert [problem["order"] for problem in problems] == list(
+        range(1, len(problems) + 1)
+    )
+    assert len({problem["slug"] for problem in problems}) == len(problems)
+    return catalog
+
+
+def database_path() -> Path:
+    configured = os.environ.get("BLIND75_DATABASE_URL") or os.environ.get(
+        "BLIND75_DB_PATH"
+    )
+    if not configured:
+        return DEFAULT_DATABASE_PATH
+    if configured.startswith("file:"):
+        configured = configured.removeprefix("file:")
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def connect_database(catalog: dict) -> sqlite3.Connection:
+    path = database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS problem_sets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS problems (
+            problem_set_id TEXT NOT NULL REFERENCES problem_sets(id),
+            slug TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+            title TEXT NOT NULL,
+            difficulty TEXT NOT NULL CHECK (difficulty IN ('Easy', 'Medium', 'Hard')),
+            topic TEXT NOT NULL,
+            external_id INTEGER,
+            premium INTEGER NOT NULL CHECK (premium IN (0, 1)),
+            test_revision INTEGER NOT NULL CHECK (test_revision > 0),
+            PRIMARY KEY (problem_set_id, slug),
+            UNIQUE (problem_set_id, ordinal)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS attempts (
+            id INTEGER PRIMARY KEY,
+            problem_set_id TEXT NOT NULL,
+            problem_slug TEXT NOT NULL,
+            language TEXT NOT NULL,
+            passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
+            test_revision INTEGER NOT NULL CHECK (test_revision > 0),
+            duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+            run_at TEXT NOT NULL,
+            FOREIGN KEY (problem_set_id, problem_slug)
+                REFERENCES problems(problem_set_id, slug)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS attempts_problem_language
+            ON attempts(problem_set_id, problem_slug, language, passed);
+        """
+    )
+    with connection:
+        connection.execute(
+            "INSERT INTO problem_sets(id, name) VALUES (?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+            (catalog["id"], catalog["name"]),
+        )
+        for problem in catalog["problems"]:
+            connection.execute(
+                """
+                INSERT INTO problems(
+                    problem_set_id, slug, ordinal, title, difficulty, topic,
+                    external_id, premium, test_revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(problem_set_id, slug) DO UPDATE SET
+                    ordinal = excluded.ordinal,
+                    title = excluded.title,
+                    difficulty = excluded.difficulty,
+                    topic = excluded.topic,
+                    external_id = excluded.external_id,
+                    premium = excluded.premium,
+                    test_revision = excluded.test_revision
+                """,
+                (
+                    catalog["id"],
+                    problem["slug"],
+                    problem["order"],
+                    problem["title"],
+                    problem["difficulty"],
+                    problem["topic"],
+                    problem["leetcode_id"],
+                    int(problem["premium"]),
+                    problem["test_revision"],
+                ),
+            )
+    return connection
+
+
+def completed_slugs(
+    connection: sqlite3.Connection, language: str | None, problem_set_id: str
+) -> set[str]:
+    parameters: list[object] = [problem_set_id]
+    language_clause = ""
+    if language:
+        language_clause = " AND a.language = ?"
+        parameters.append(language)
+    rows = connection.execute(
+        "SELECT DISTINCT a.problem_slug FROM attempts AS a "
+        "JOIN problems AS p ON p.problem_set_id = a.problem_set_id "
+        "AND p.slug = a.problem_slug AND p.test_revision = a.test_revision "
+        "WHERE a.problem_set_id = ? AND a.passed = 1" + language_clause,
+        parameters,
+    )
+    return {row["problem_slug"] for row in rows}
+
+
+def print_table(headers: list[str], rows: list[list[object]]) -> None:
+    text_rows = [[str(cell) for cell in row] for row in rows]
+    widths = [len(header) for header in headers]
+    for row in text_rows:
+        assert len(row) == len(headers)
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+    print("  ".join(header.ljust(width) for header, width in zip(headers, widths)))
+    print("  ".join("-" * width for width in widths))
+    for row in text_rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)))
+
+
+def command_list(
+    args: argparse.Namespace, catalog: dict, connection: sqlite3.Connection
+) -> int:
+    passed_by_language = {
+        language: completed_slugs(connection, language, catalog["id"])
+        for language in ("python", "rust")
+    }
+    rows: list[list[object]] = []
+    for problem in catalog["problems"]:
+        if args.difficulty and problem["difficulty"].lower() != args.difficulty:
+            continue
+        if args.topic and args.topic.lower() not in problem["topic"].lower():
+            continue
+        rows.append(
+            [
+                f"{problem['order']:02d}",
+                problem["difficulty"],
+                problem["topic"],
+                "yes" if problem["slug"] in passed_by_language["python"] else "-",
+                "yes" if problem["slug"] in passed_by_language["rust"] else "-",
+                problem["slug"],
+            ]
+        )
+    print_table(["#", "Difficulty", "Topic", "Python", "Rust", "Problem"], rows)
+    return 0
+
+
+def command_stats(
+    args: argparse.Namespace, catalog: dict, connection: sqlite3.Connection
+) -> int:
+    language = None if args.language == "any" else args.language
+    completed = completed_slugs(connection, language, catalog["id"])
+    label = "any language" if language is None else language
+    total = len(catalog["problems"])
+    print(
+        f"{catalog['name']} progress ({label}): "
+        f"{len(completed)}/{total} ({len(completed) / total:.1%})"
+    )
+
+    for field, heading in (("difficulty", "By difficulty"), ("topic", "By topic")):
+        groups: dict[str, list[str]] = {}
+        for problem in catalog["problems"]:
+            groups.setdefault(problem[field], []).append(problem["slug"])
+        ordered_names = list(groups)
+        if field == "difficulty":
+            ordered_names = ["Easy", "Medium", "Hard"]
+        rows = []
+        for name in ordered_names:
+            slugs = groups[name]
+            done = sum(slug in completed for slug in slugs)
+            rows.append([name, done, len(slugs), f"{done / len(slugs):.1%}"])
+        print(f"\n{heading}")
+        print_table(
+            [heading.removeprefix("By ").title(), "Done", "Total", "Progress"], rows
+        )
+
+    summary = connection.execute(
+        """
+        SELECT language, COUNT(*) AS attempts, SUM(passed) AS passes,
+               MAX(run_at) AS last_run
+        FROM attempts WHERE problem_set_id = ?
+        GROUP BY language ORDER BY language
+        """,
+        (catalog["id"],),
+    ).fetchall()
+    if summary:
+        print("\nAttempts")
+        print_table(
+            ["Language", "Runs", "Passing runs", "Last run (UTC)"],
+            [
+                [row["language"], row["attempts"], row["passes"], row["last_run"]]
+                for row in summary
+            ],
+        )
+    return 0
+
+
+def command_record(
+    args: argparse.Namespace, catalog: dict, connection: sqlite3.Connection
+) -> int:
+    valid_slugs = {problem["slug"] for problem in catalog["problems"]}
+    if args.problem not in valid_slugs:
+        raise SystemExit(f"unknown problem slug: {args.problem}")
+    if not LANGUAGE_PATTERN.fullmatch(args.language):
+        raise SystemExit(f"invalid language identifier: {args.language}")
+    passed = args.result == "pass"
+    timestamp = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    with connection:
+        connection.execute(
+            """
+            INSERT INTO attempts(
+                problem_set_id, problem_slug, language, passed, test_revision,
+                duration_ms, run_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                catalog["id"],
+                args.problem,
+                args.language,
+                int(passed),
+                next(
+                    problem["test_revision"]
+                    for problem in catalog["problems"]
+                    if problem["slug"] == args.problem
+                ),
+                args.duration_ms,
+                timestamp,
+            ),
+        )
+    return 0
+
+
+def command_test(args: argparse.Namespace, catalog: dict) -> int:
+    if catalog["id"] != "blind75":
+        raise SystemExit(
+            f"language adapters are not installed for problem set: {catalog['id']}"
+        )
+    valid_slugs = {problem["slug"] for problem in catalog["problems"]}
+    if args.problem != "all" and args.problem not in valid_slugs:
+        raise SystemExit(f"unknown problem slug: {args.problem}")
+    runner = ROOT / args.language / "run"
+    if not runner.is_file():
+        raise SystemExit(f"runner is not installed: {runner}")
+    return subprocess.run(
+        [str(runner), args.problem], cwd=runner.parent, check=False
+    ).returncode
+
+
+def command_db(_: argparse.Namespace, __: dict, connection: sqlite3.Connection) -> int:
+    path = database_path()
+    connection.execute("SELECT 1").fetchone()
+    print(path)
+    print(f"Turso local server: turso dev --db-file {path}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="practice", description="Local algorithm practice harness"
+    )
+    parser.add_argument(
+        "--set",
+        dest="problem_set",
+        default="blind75",
+        metavar="ID",
+        help="problem set to use (default: blind75)",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser(
+        "list", help="list problems and completion status"
+    )
+    list_parser.add_argument("--difficulty", choices=("easy", "medium", "hard"))
+    list_parser.add_argument("--topic", help="case-insensitive topic substring")
+    list_parser.set_defaults(handler=command_list)
+
+    stats_parser = subparsers.add_parser("stats", help="show completion statistics")
+    stats_parser.add_argument(
+        "--language",
+        choices=("any", "python", "rust"),
+        default="any",
+        help="restrict completion to one language (default: any)",
+    )
+    stats_parser.set_defaults(handler=command_stats)
+
+    test_parser = subparsers.add_parser(
+        "test", help="run one problem (or all) in a language"
+    )
+    test_parser.add_argument("language", choices=("python", "rust"))
+    test_parser.add_argument("problem", help="problem slug or 'all'")
+    test_parser.set_defaults(handler=command_test)
+
+    db_parser = subparsers.add_parser(
+        "db", help="initialize and show the local database"
+    )
+    db_parser.set_defaults(handler=command_db)
+
+    record_parser = subparsers.add_parser("_record", help=argparse.SUPPRESS)
+    record_parser.add_argument("language")
+    record_parser.add_argument("problem")
+    record_parser.add_argument("result", choices=("pass", "fail"))
+    record_parser.add_argument("duration_ms", type=int)
+    record_parser.set_defaults(handler=command_record)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    catalog = load_catalog(args.problem_set)
+    connection = connect_database(catalog)
+    try:
+        if args.command == "test":
+            return args.handler(args, catalog)
+        return args.handler(args, catalog, connection)
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,15 @@
+# Local progress database
+.turso/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Rust
+rust/target/
+
+# Editors and OS
+.DS_Store
+*.swp
