@@ -26,10 +26,10 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("catalog")).unwrap();
         fs::create_dir_all(root.join("problem_sets")).unwrap();
-        fs::create_dir_all(root.join("fixture")).unwrap();
+        fs::create_dir_all(root.join("python")).unwrap();
         fs::write(
             root.join("catalog/problems.json"),
-            r###"{"schema_version":2,"catalog_revision":1,"problems":[{"slug":"tagged","title":"Tagged","difficulty":"Easy","topic":"Testing","leetcode_id":null,"premium":false,"leetcode_url":"","neetcode_url":"","statement_markdown":"## Task\n\nTest.\n\n## Example\n\nInput: x. Output: x.","test_revision":1,"adapters":[{"language":"python","solution_path":"fixture/solution.py"}]}]}"###,
+            r###"{"schema_version":2,"catalog_revision":1,"problems":[{"slug":"tagged","title":"Tagged","difficulty":"Easy","topic":"Testing","leetcode_id":null,"premium":false,"leetcode_url":"https://example.com/tagged","neetcode_url":"https://example.com/tagged","statement_markdown":"## Task\n\nTest.\n\n## Example\n\nInput: x. Output: x.","test_revision":1,"adapters":[{"language":"python","solution_path":"python/solution.py"}]}]}"###,
         )
         .unwrap();
         fs::write(
@@ -37,8 +37,8 @@ impl Fixture {
             r#"{"schema_version":2,"id":"set","name":"Set","description":"","members":[{"ordinal":1,"problem_slug":"tagged"}]}"#,
         )
         .unwrap();
-        fs::write(root.join("fixture/solution.py"), "# fixture\n").unwrap();
-        let runner = root.join("fixture/run");
+        fs::write(root.join("python/solution.py"), "# fixture\n").unwrap();
+        let runner = root.join("python/run");
         fs::copy("tests/fixtures/runner_fixture.sh", &runner).unwrap();
         let mut permissions = fs::metadata(&runner).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -53,8 +53,8 @@ impl Fixture {
             language: "python".to_string(),
             problem_slug: problem.to_string(),
             set_slug: Some("set".to_string()),
-            runner_path: self.root.join("fixture/run"),
-            solution_path: self.root.join("fixture/solution.py"),
+            runner_path: self.root.join("python/run"),
+            solution_path: self.root.join("python/solution.py"),
         }
     }
 }
@@ -106,8 +106,16 @@ fn captures_tagged_output_without_terminal_inheritance() {
     assert_eq!(result.outcome(), AttemptOutcome::Pass);
     assert!(result.display_output.contains("[stdout] stdout-tag"));
     assert!(result.display_output.contains("[stderr] stderr-tag"));
-    assert!(events.iter().any(|event| matches!(event, ExecutionEvent::Stdout(text) if text.contains("stdout-tag"))));
-    assert!(events.iter().any(|event| matches!(event, ExecutionEvent::Stderr(text) if text.contains("stderr-tag"))));
+    assert!(
+        events.iter().any(
+            |event| matches!(event, ExecutionEvent::Stdout(text) if text.contains("stdout-tag"))
+        )
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event, ExecutionEvent::Stderr(text) if text.contains("stderr-tag"))
+        )
+    );
 }
 
 #[test]
@@ -127,14 +135,15 @@ fn bounds_sanitized_output_with_deterministic_omission_marker() {
     assert!(result.display_output.starts_with("[stdout] PREFIX:"));
     assert!(result.display_output.ends_with(":TAIL\n"));
     assert!(result.omitted_bytes > 32_000);
-    assert!(result.display_output.contains(&format!(
-        "[... {} bytes omitted ...]",
-        result.omitted_bytes
-    )));
+    assert!(
+        result
+            .display_output
+            .contains(&format!("[... {} bytes omitted ...]", result.omitted_bytes))
+    );
     assert!(result.display_output.len() <= small.display_output_bytes + 64);
 
     let unsafe_result = execute(&fixture, "unsafe");
-    assert!(unsafe_result.display_output.contains("redsafe\tline"));
+    assert!(unsafe_result.display_output.contains("redsafeline"));
     assert!(!unsafe_result.display_output.contains('\u{1b}'));
     assert!(!unsafe_result.display_output.contains('\0'));
 }
@@ -154,6 +163,33 @@ fn derives_outcomes_from_explicit_termination() {
     let signalled = execute(&fixture, "signal");
     assert_eq!(signalled.termination, Termination::Signalled(15));
     assert_eq!(signalled.outcome(), AttemptOutcome::Error);
+}
+
+#[test]
+fn defaults_are_bounded_and_callback_failure_terminates_execution() {
+    let defaults = ExecutionLimits::default();
+    assert_eq!(defaults.wall_timeout, Duration::from_secs(30));
+    assert_eq!(defaults.term_grace, Duration::from_millis(250));
+    assert_eq!(defaults.display_output_bytes, 256 * 1024);
+    assert_eq!(defaults.read_chunk_bytes, 8 * 1024);
+    assert_eq!(defaults.event_queue_capacity, 64);
+
+    let fixture = Fixture::new();
+    let started = Instant::now();
+    let result = runner::execute(
+        &fixture.plan("descendants"),
+        &fixture.database,
+        &limits(),
+        &CancellationToken::new(),
+        |_| Err("receiver closed".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        result.termination,
+        Termination::EventDeliveryFailed("receiver closed".to_string())
+    );
+    assert_eq!(result.outcome(), AttemptOutcome::Error);
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
@@ -227,10 +263,12 @@ fn cancellation_terminates_and_reaps_process_group_descendants() {
 fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
     let fixture = Fixture::new();
     let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
-    let mut plan = runner::plan_execution(&connection, &fixture.root, "python", "tagged", Some("set")).unwrap();
+    let mut plan =
+        runner::plan_execution(&connection, &fixture.root, "python", "tagged", Some("set"))
+            .unwrap();
     assert_eq!(plan.root, fixture.root);
-    assert_eq!(plan.runner_path, fixture.root.join("fixture/run"));
-    assert_eq!(plan.solution_path, fixture.root.join("fixture/solution.py"));
+    assert_eq!(plan.runner_path, fixture.root.join("python/run"));
+    assert_eq!(plan.solution_path, fixture.root.join("python/solution.py"));
     assert_eq!(plan.problem_slug, "tagged");
     assert_eq!(plan.language, "python");
 
@@ -244,13 +282,17 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
     )
     .unwrap_err();
     assert!(error.contains("runner"));
-    let attempts: i64 = connection.query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0)).unwrap();
+    let attempts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
+        .unwrap();
     assert_eq!(attempts, 0);
 
     let result = execute(&fixture, "exit-0");
     let plan = fixture.plan("tagged");
     runner::record_execution(&connection, &plan, &result).unwrap();
-    let attempts: i64 = connection.query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0)).unwrap();
+    let attempts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
+        .unwrap();
     assert_eq!(attempts, 1);
 }
 
@@ -258,7 +300,7 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
 fn adapter_discovery_is_bounded() {
     let fixture = Fixture::new();
     let adapters = runner::discover_adapters(
-        &fixture.root.join("fixture/run"),
+        &fixture.root.join("python/run"),
         &limits(),
         &CancellationToken::new(),
     )

@@ -23,7 +23,9 @@ case "$mode" in
   sleep) sleep 30 ;;
   descendants)
     (trap '' TERM; sleep 30) &
-    printf '%s\n' "$!"
+    descendant="$!"
+    trap 'kill -KILL "$descendant" 2>/dev/null || true; wait "$descendant" 2>/dev/null || true; exit 143' TERM
+    printf '%s\n' "$descendant"
     wait
     ;;
   signal) kill -TERM $$ ;;

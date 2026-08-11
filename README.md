@@ -20,7 +20,7 @@ Or qualify the problem by set and select it by slug or 1-based set index:
 ./run rust blind75 16
 ```
 
-The two-argument form is always a global slug. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`, so resolution does not guess based on collisions. A zero exit status means the local suite passed. The root runner records exactly one attempt.
+The two-argument form is always a global slug. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`, so resolution does not guess based on collisions. A zero exit status means the local suite passed. The root runner captures and sanitizes output, enforces a 30 second timeout, terminates the runner process group on interruption, and records exactly one attempt after execution.
 
 The language-local wrappers remain available for direct adapter work:
 
@@ -101,4 +101,4 @@ Existing v1 databases migrate automatically to the global v2 schema. Historical 
 
 Starter APIs follow LeetCode. Premium and Rust APIs without official templates use their conventional NeetCode/LintCode-compatible representation. Tests use public contracts and representative examples; LeetCode's private hidden corpus is not available locally.
 
-LLM hints, populated statements for the shipped catalog, and the split-pane TUI remain later layers. The schema already supports statement Markdown and per-language source paths. The current central runner inherits the terminal and waits without an execution timeout; bounded output streaming and cancellation remain a later runner layer.
+LLM hints and the split-pane TUI remain later layers. The schema supports statement Markdown and per-language source paths, and the synchronous bounded runner API is ready for a TUI worker thread. See `docs/architecture.md` for its exact resource limits, termination states, and attempt-outcome mapping.

@@ -21,7 +21,9 @@ cargo test --manifest-path cli/Cargo.toml
 
 - `catalog.rs`: checked-in catalog parsing and invariant validation.
 - `database.rs`: schema v2, atomic v1 migration, seed reconciliation, CRUD, and progress queries.
-- `runner.rs`: execution planning, adapter subprocesses, and attempt recording.
+- `runner.rs`: execution planning, bounded Linux process-group execution and discovery, cancellation, sanitized output events, and explicit attempt recording.
 - `main.rs`: the `clap` command grammar and presentation layer.
 
 The CLI crate is independent of the Python solution environment. Python remains one problem-adapter language alongside Rust.
+
+`runner::execute` is synchronous so callers can place it on a worker thread. Its defaults are one child, a 30 second wall timeout, 250 millisecond TERM grace, 256 KiB retained combined output, 8 KiB reads, and 64 queued events. See `docs/architecture.md` for termination and outcome semantics.
