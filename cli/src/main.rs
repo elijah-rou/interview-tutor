@@ -1,9 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use database::{NewProblem, Problem, ProblemUpdate};
-use practice_cli::{catalog, database, runner};
+use practice_cli::{catalog, config, database, runner};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, HashSet};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -218,53 +217,6 @@ struct Context {
     database_path: PathBuf,
     connection: Connection,
     problem_set: String,
-}
-
-fn resolve_root() -> Result<PathBuf, String> {
-    if let Some(root) = env::var_os("PRACTICE_ROOT") {
-        let root = PathBuf::from(root);
-        if root.is_dir() {
-            return Ok(root);
-        }
-        return Err(format!("project root does not exist: {}", root.display()));
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "CLI manifest has no project parent".to_string())
-}
-
-fn expand_home(value: &str) -> PathBuf {
-    if let Some(remainder) = value.strip_prefix("~/")
-        && let Some(home) = env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(remainder);
-    }
-    PathBuf::from(value)
-}
-
-fn resolve_database_path(root: &Path, cli_path: Option<&str>) -> PathBuf {
-    let configured = cli_path.map(str::to_string).or_else(|| {
-        [
-            "PRACTICE_DATABASE_URL",
-            "PRACTICE_DB_PATH",
-            "BLIND75_DATABASE_URL",
-            "BLIND75_DB_PATH",
-        ]
-        .into_iter()
-        .find_map(|name| env::var(name).ok())
-    });
-    let Some(configured) = configured else {
-        return root.join(".turso/progress.db");
-    };
-    let configured = configured.strip_prefix("file:").unwrap_or(&configured);
-    let path = expand_home(configured);
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }
 }
 
 fn print_table(headers: &[String], rows: &[Vec<String>]) -> Result<(), String> {
@@ -848,8 +800,8 @@ fn command_sets(context: &Context, command: &SetsCommand) -> Result<i32, String>
 }
 
 fn dispatch(cli: Cli) -> Result<i32, String> {
-    let root = resolve_root()?;
-    let database_path = resolve_database_path(&root, cli.db.as_deref());
+    let root = config::resolve_root()?;
+    let database_path = config::resolve_database_path(&root, cli.db.as_deref())?;
     let connection = database::open_database(&database_path, &root)?;
     let context = Context {
         root,

@@ -191,23 +191,31 @@ fn transaction<T>(
 }
 
 pub fn open_database(path: &Path, root: &Path) -> Result<Connection, String> {
+    let catalog = crate::catalog::load_seed_catalog(root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
     let connection = Connection::open(path)
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let schema_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(sql_error)?;
+    if schema_version > SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported database schema version: {schema_version} (maximum {SCHEMA_VERSION})"
+        ));
+    }
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(sql_error)?;
     connection
         .query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
         .map_err(sql_error)?;
-    let catalog = crate::catalog::load_seed_catalog(root)?;
     connection
         .execute_batch("PRAGMA foreign_keys = OFF")
         .map_err(sql_error)?;
-    migrate_if_needed(&connection, &catalog)?;
+    migrate_if_needed(&connection, &catalog, schema_version)?;
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
         .map_err(sql_error)?;
@@ -227,7 +235,13 @@ pub fn open_database(path: &Path, root: &Path) -> Result<Connection, String> {
     Ok(connection)
 }
 
-fn migrate_if_needed(connection: &Connection, catalog: &SeedCatalog) -> Result<(), String> {
+fn migrate_if_needed(
+    connection: &Connection,
+    catalog: &SeedCatalog,
+    schema_version: i64,
+) -> Result<(), String> {
+    assert!(schema_version <= SCHEMA_VERSION);
+    assert!(schema_version >= 0);
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'problems')",
@@ -236,11 +250,21 @@ fn migrate_if_needed(connection: &Connection, catalog: &SeedCatalog) -> Result<(
         )
         .map_err(sql_error)?;
     if !exists {
+        if schema_version != 0 {
+            return Err(format!(
+                "database schema version {schema_version} is missing the problems table"
+            ));
+        }
         return transaction(connection, || {
             connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
             connection
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(sql_error)
+        });
+    }
+    if schema_version == SCHEMA_VERSION {
+        return transaction(connection, || {
+            connection.execute_batch(SCHEMA_SQL).map_err(sql_error)
         });
     }
     let mut statement = connection
@@ -251,14 +275,20 @@ fn migrate_if_needed(connection: &Connection, catalog: &SeedCatalog) -> Result<(
         .map_err(sql_error)?
         .collect::<Result<_, _>>()
         .map_err(sql_error)?;
-    if !columns.contains("problem_set_id") {
+    let legacy_shape = columns.contains("problem_set_id");
+    if schema_version == 1 && !legacy_shape {
+        return Err("database schema version 1 does not have the v1 table shape".to_string());
+    }
+    if legacy_shape {
+        return migrate_v1(connection, catalog);
+    }
+    assert_eq!(schema_version, 0);
+    transaction(connection, || {
         connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(sql_error)?;
-        return Ok(());
-    }
-    migrate_v1(connection, catalog)
+            .map_err(sql_error)
+    })
 }
 
 fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), String> {
@@ -507,6 +537,48 @@ fn sync_seed_catalog(connection: &Connection, catalog: &SeedCatalog) -> Result<(
     }
     transaction(connection, || {
         let now = timestamp(connection)?;
+        connection
+            .execute(
+                "UPDATE problems SET archived = 1, updated_at = ? WHERE managed = 1",
+                params![now],
+            )
+            .map_err(sql_error)?;
+        connection
+            .execute(
+                "UPDATE problem_implementations SET enabled = 0 \
+                 WHERE problem_id IN (SELECT id FROM problems WHERE managed = 1)",
+                [],
+            )
+            .map_err(sql_error)?;
+
+        let current_set_ids: HashSet<&str> = catalog
+            .problem_sets
+            .iter()
+            .map(|problem_set| problem_set.id.as_str())
+            .collect();
+        let retired_set_ids = {
+            let mut statement = connection
+                .prepare("SELECT id, slug FROM problem_sets WHERE managed = 1 ORDER BY id")
+                .map_err(sql_error)?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sql_error)?
+                .filter_map(|row| match row {
+                    Ok((id, slug)) if !current_set_ids.contains(slug.as_str()) => Some(Ok(id)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?
+        };
+        for set_id in retired_set_ids {
+            connection
+                .execute("DELETE FROM problem_sets WHERE id = ?", params![set_id])
+                .map_err(sql_error)?;
+        }
+
         for problem in &catalog.problems {
             sync_problem(connection, problem, current_revision, &now)?;
         }
@@ -1367,6 +1439,9 @@ pub fn add_implementation(
     solution_path: &str,
 ) -> Result<(), String> {
     let problem = resolve_problem(connection, problem_slug, None)?;
+    if problem.managed {
+        return Err(format!("shipped problem is read-only: {problem_slug}"));
+    }
     let language_id: Option<i64> = connection
         .query_row(
             "SELECT id FROM languages WHERE slug = ?",

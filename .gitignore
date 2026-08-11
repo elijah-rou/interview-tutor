@@ -1,5 +1,6 @@
 # Local progress database
 .turso/
+.pi-subagents/
 
 # Python
 __pycache__/

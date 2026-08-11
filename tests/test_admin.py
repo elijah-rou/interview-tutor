@@ -81,9 +81,7 @@ class ProjectCliTests(unittest.TestCase):
                 "id": "managed-retired-set",
                 "name": "Managed Retired Set",
                 "description": "",
-                "members": [
-                    {"ordinal": 1, "problem_slug": "managed-retired"}
-                ],
+                "members": [{"ordinal": 1, "problem_slug": "managed-retired"}],
             },
         }
 
@@ -202,14 +200,47 @@ class ProjectCliTests(unittest.TestCase):
             self.assertFalse(database.exists())
 
             catalog = self.fixture_catalog()
-            catalog["problems"][0]["title"] = "   "  # type: ignore[index]
+            catalog["problems"][0]["adapters"][0]["unexpected"] = True  # type: ignore[index]
+            self.write_fixture_root(root, catalog, self.fixture_sets())
+            nested_unknown = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(nested_unknown.returncode, 2)
+            self.assertIn("unknown field", nested_unknown.stderr)
+            self.assertFalse(database.exists())
+
+            for field in ("title", "topic"):
+                catalog = self.fixture_catalog()
+                catalog["problems"][0][field] = "   "  # type: ignore[index]
+                self.write_fixture_root(root, catalog, self.fixture_sets())
+                blank = self.run_fixture_command(root, database, "sets", "list")
+                self.assertEqual(blank.returncode, 2)
+                self.assertIn("must not be blank", blank.stderr)
+                self.assertFalse(database.exists())
+
             problem_sets = self.fixture_sets()
             problem_sets["managed-set"]["name"] = "\t"
-            self.write_fixture_root(root, catalog, problem_sets)
-            blank = self.run_fixture_command(root, database, "sets", "list")
-            self.assertEqual(blank.returncode, 2)
-            self.assertIn("must not be blank", blank.stderr)
+            self.write_fixture_root(root, self.fixture_catalog(), problem_sets)
+            blank_set = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(blank_set.returncode, 2)
+            self.assertIn("problem-set name must not be blank", blank_set.stderr)
             self.assertFalse(database.exists())
+
+            self.write_fixture_root(root, self.fixture_catalog(), self.fixture_sets())
+            initialized = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            invalid_upgrade = self.fixture_catalog(revision=2)
+            invalid_upgrade["unexpected"] = True
+            self.write_fixture_root(root, invalid_upgrade, self.fixture_sets())
+            rejected_upgrade = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(rejected_upgrade.returncode, 2)
+            with sqlite3.connect(database) as connection:
+                revision = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'catalog_revision'"
+                ).fetchone()
+                managed_count = connection.execute(
+                    "SELECT COUNT(*) FROM problems WHERE managed = 1"
+                ).fetchone()
+            self.assertEqual(revision, ("1",))
+            self.assertEqual(managed_count, (2,))
 
     def test_catalog_rejects_invalid_urls_and_duplicate_positive_leetcode_ids(
         self,
@@ -237,9 +268,7 @@ class ProjectCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "root"
             database = Path(directory) / "progress.db"
-            self.write_fixture_root(
-                root, self.fixture_catalog(), self.fixture_sets()
-            )
+            self.write_fixture_root(root, self.fixture_catalog(), self.fixture_sets())
             initialized = self.run_fixture_command(root, database, "sets", "list")
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             for arguments in (
@@ -270,8 +299,24 @@ class ProjectCliTests(unittest.TestCase):
                 ),
                 ("sets", "create", "custom-set", "--name", "Custom Set"),
                 ("sets", "add", "custom-set", "custom-problem"),
-                ("_record", "python", "custom-problem", "pass", "1", "--problem-set", "custom-set"),
-                ("_record", "python", "managed-retired", "fail", "2", "--problem-set", "managed-retired-set"),
+                (
+                    "_record",
+                    "python",
+                    "custom-problem",
+                    "pass",
+                    "1",
+                    "--problem-set",
+                    "custom-set",
+                ),
+                (
+                    "_record",
+                    "python",
+                    "managed-retired",
+                    "fail",
+                    "2",
+                    "--problem-set",
+                    "managed-retired-set",
+                ),
             ):
                 result = self.run_fixture_command(root, database, *arguments)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -290,9 +335,7 @@ class ProjectCliTests(unittest.TestCase):
                     "id": "managed-set",
                     "name": "Managed Set Revised",
                     "description": "",
-                    "members": [
-                        {"ordinal": 1, "problem_slug": "managed-one"}
-                    ],
+                    "members": [{"ordinal": 1, "problem_slug": "managed-one"}],
                 }
             }
             self.write_fixture_root(root, upgraded_catalog, upgraded_sets)
@@ -357,9 +400,7 @@ class ProjectCliTests(unittest.TestCase):
                     ("managed-retired", "python", 0),
                 ],
             )
-            self.assertEqual(
-                sets, [("custom-set", 0), ("managed-set", 1)]
-            )
+            self.assertEqual(sets, [("custom-set", 0), ("managed-set", 1)])
             self.assertEqual(
                 members,
                 [("custom-set", "custom-problem"), ("managed-set", "managed-one")],

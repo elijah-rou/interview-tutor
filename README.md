@@ -84,7 +84,7 @@ rust/src/problems/          Rust solution starters
 .turso/progress.db          local runtime database
 ```
 
-Checked-in catalogs seed a new database once per catalog revision. SQLite is then the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
+Checked-in catalogs reconcile managed resources once per catalog revision. Managed problems or adapters omitted by a later revision are retired, while custom resources and attempt history remain intact. SQLite is the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
 
 The database is SQLite/libSQL-compatible. The Turso server is optional:
 
@@ -101,4 +101,4 @@ Existing v1 databases migrate automatically to the global v2 schema. Historical 
 
 Starter APIs follow LeetCode. Premium and Rust APIs without official templates use their conventional NeetCode/LintCode-compatible representation. Tests use public contracts and representative examples; LeetCode's private hidden corpus is not available locally.
 
-LLM hints, populated statements for the shipped catalog, and the split-pane TUI remain later layers. The schema supports statement Markdown and per-language source paths, and the central runner streams child process output, so those frontends do not require another catalog redesign.
+LLM hints, populated statements for the shipped catalog, and the split-pane TUI remain later layers. The schema already supports statement Markdown and per-language source paths. The current central runner inherits the terminal and waits without an execution timeout; bounded output streaming and cancellation remain a later runner layer.
