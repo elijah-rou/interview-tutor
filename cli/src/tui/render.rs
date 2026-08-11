@@ -373,10 +373,16 @@ fn solve_interview(state: &AppState) -> Paragraph<'static> {
                 "The selected statement, current source, bounded latest test output,",
             ));
             lines.push(Line::from(
-                "in-memory transcript, and your question may be sent to OpenAI",
+                "in-memory transcript, and your question may be sent to OpenAI.",
             ));
             lines.push(Line::from(
-                "under your Codex account controls. y/Enter accept · n/Esc decline",
+                "Codex may also read local config, MCP, or other sandbox-readable paths.",
+            ));
+            lines.push(Line::from(
+                "Use a dedicated Codex profile/home for stronger isolation.",
+            ));
+            lines.push(Line::from(
+                "Your Codex account controls apply. y/Enter accept · n/Esc decline",
             ));
         }
         crate::app::model::CodexStatus::AuthRequired => lines.push(Line::from(
@@ -812,7 +818,10 @@ mod tests {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         state.codex.status = crate::app::model::CodexStatus::Disclosure;
-        assert!(rendered(&state, 120, 40).contains("Privacy disclosure"));
+        let disclosure = rendered(&state, 120, 40);
+        assert!(disclosure.contains("Privacy disclosure"));
+        assert!(disclosure.contains("Codex may also read local"));
+        assert!(disclosure.contains("Use a dedicated Codex"));
         assert!(rendered(&state, 80, 24).contains("Privacy disclosure"));
         assert!(rendered(&state, 59, 19).contains("Terminal too small"));
         state.codex.status = crate::app::model::CodexStatus::Feedback;

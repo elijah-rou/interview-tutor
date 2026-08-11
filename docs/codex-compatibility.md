@@ -1,26 +1,32 @@
 # Codex app-server compatibility
 
-Interview Tutor uses only the official installed `codex app-server` stdio process and the CLI's ChatGPT login. It does not call OpenAI HTTP APIs, accept API keys, or read Codex authentication files.
+Interview Tutor starts only the official installed `codex app-server --stdio` process and relies on the CLI's existing ChatGPT login. The wrapper does not call OpenAI HTTP APIs, accept API keys, inspect credentials, log prompts, or add tool-use instructions. The official Codex process locates its own account state through `HOME` or `CODEX_HOME`.
 
 ## Tested protocol
 
-Validated for this stack with:
+Validated for this stack with these installed executables:
 
-- executable: `/home/elijahrou/.bun/install/global/node_modules/@openai/codex/bin/codex.js` (canonical path reported by the test host)
-- version: `codex-cli 0.146.0`
-- stable generated schema: `codex_app_server_protocol.v2.schemas.json`, SHA-256 `37def830af431519597165a45a0d25840ff9cbe857d26556aa6b3d14db4cbf7a`
-- compatibility executable: `/home/elijahrou/.npm/_npx/c8ab89660c602c20/node_modules/@openai/codex/bin/codex.js`, version `codex-cli 0.147.0`, stable v2 schema SHA-256 `f3dec1e031d99a420b137b903f02196d4325eece57620c925bb7130b25f168d2`
-- generation: `codex app-server generate-json-schema --out <temporary-directory>` without `--experimental`
-- login inspection: `codex login status` only; Interview Tutor never mutates login
+- `/home/elijahrou/.bun/install/global/node_modules/@openai/codex/bin/codex.js`, exactly `codex-cli 0.146.0`
+- `/home/elijahrou/.npm/_npx/c8ab89660c602c20/node_modules/@openai/codex/bin/codex.js`, exactly `codex-cli 0.147.0`
 
-The supported range is the shared stable subset in Codex CLI 0.146.x and 0.147.x: `initialize`, `initialized`, `account/read` with `refreshToken=false`, `thread/start`, `turn/start`, agent-message delta/item completion, turn completion/error, `turn/interrupt`, and account updates. Messages omit the `jsonrpc` field as required by these versions. Unknown notifications are ignored. Unknown or malformed responses to pending IDs fail closed.
+Schemas were generated into separate temporary directories with `codex app-server generate-json-schema --out <temporary-directory>` without `--experimental`. Because 0.146.0 does not emit definitions in a stable object order, evidence uses canonical `jq -cS` output:
 
-Versions outside 0.146.x and 0.147.x are rejected with an actionable error. This is deliberate: approval and sandbox behavior must not be guessed across protocol changes.
+- 0.146.0 full `codex_app_server_protocol.v2.schemas.json`: SHA-256 `2f402b7d1356adccc1a4785c0656db457578ca9ea5d5b08953487a410c630ce8`
+- 0.147.0 full `codex_app_server_protocol.v2.schemas.json`: SHA-256 `4422f141444d5531e549f4a3e8e7371c82e4dfbc6d5b6d06c8cd3dff8b4a8607`
+- exact shared subset extraction: SHA-256 `d3187a04cbd0e7a46f3dda33934e1cfcb12415371fa2c0543663d216d71bafe5` for both versions, with byte-for-byte `cmp` success
+
+The extracted definitions were `InitializeParams`, `GetAccountParams`, `GetAccountResponse`, `ThreadStartParams`, `ThreadStartResponse`, `TurnStartParams`, `TurnStartResponse`, `AgentMessageDeltaNotification`, `ItemCompletedNotification`, `TurnCompletedNotification`, `ErrorNotification`, `TurnInterruptParams`, and `TurnInterruptResponse`. The implementation additionally follows the generated stable server-request response schemas when it declines command execution, file changes, permission expansion, user input, and MCP elicitation. Unknown server requests fail closed.
+
+Only exact versions 0.146.0 and 0.147.0 are accepted. The version probe has a 10-second wall bound, a combined 64-KiB stdout/stderr capture bound, cancellation polling, process-group TERM/KILL, reader joins, and direct-child reap. Other patch releases are not treated as verified merely because their minor version matches.
+
+Messages omit the `jsonrpc` field as required by these versions. Responses must match a pending numeric request ID, with at most 16 pending IDs. Agent deltas and item completion are accepted only for the active thread, turn, and item. Turn completion and terminal errors must match the active thread and turn; retryable `willRetry` errors and unrelated events are ignored.
 
 ## Security and privacy boundary
 
-Each connection starts one child in a new process group and an empty temporary working directory. Its environment is cleared, then only authentication-location, executable search, locale, proxy, and certificate variables needed by the official client are restored. API-key variables are excluded. Threads are ephemeral, read-only, never-approve, and request disabled web search and no sandbox network access. Effective thread settings are checked before a turn.
+The application payload has an explicit five-field allowlist: selected statement, current source, bounded latest test output, bounded in-memory transcript, and the user's question. Each connection uses a new empty temporary working directory. The child environment is cleared and restores only `HOME`, `CODEX_HOME`, `PATH`, locale, proxy, and certificate variables. `OPENAI_API_KEY` and unrelated environment variables are excluded. Threads request and verify their exact temporary cwd, ephemeral storage with a null path, read-only sandboxing, no sandbox network access, and never-approve policy; web search is requested disabled. The wrapper never accepts approval, permission, user-input, or MCP requests.
 
-These controls prevent local tool/file/network actions through the supported app-server contract. They are not a claim of total isolation from the hosted OpenAI service. Prompt content is sent to that service after visible consent and remains governed by the user's Codex account controls.
+These controls limit what Interview Tutor intentionally sends, but they are not total process isolation. The official Codex process may use read-only tools, configuration, or configured MCP servers and may access other locally readable paths permitted by its sandbox and configuration. In particular, `HOME` and `CODEX_HOME` remain available so the official client can find account and configuration state. Use a dedicated Codex profile/home with minimal configuration for stronger isolation.
 
-Transcripts are memory-only and bounded. They are cleared on reset, solve exit, and application exit. Interviewer and hinter use separate ephemeral threads, and the hinter receives no interviewer transcript.
+Prompt content is sent to OpenAI after visible consent and remains governed by the user's Codex account controls. Interview Tutor does not write prompt logs. Transcripts are memory-only and bounded, then cleared on reset, solve exit, and application exit. Interviewer and hinter use separate ephemeral threads, and the hinter receives no interviewer transcript. Process temporary directories, including any child-created files, are removed on shutdown and before a one-time session restart.
+
+Safe manual smoke is limited to version, initialize, `initialized`, and `account/read` with `refreshToken=false`. It does not start a model turn.

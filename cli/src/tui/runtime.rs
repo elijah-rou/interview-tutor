@@ -64,7 +64,9 @@ struct RunnerServices {
 }
 
 enum CodexWorkerCommand {
-    Connect,
+    Connect {
+        cancellation: CancellationToken,
+    },
     Turn {
         operation: crate::app::model::OperationId,
         revision: u64,
@@ -74,6 +76,7 @@ enum CodexWorkerCommand {
         output: String,
         question: String,
         solved: bool,
+        cancellation: CancellationToken,
     },
     Reset,
     Cancel,
@@ -85,6 +88,7 @@ struct CodexWorker {
     events: Receiver<Event>,
     join: Option<JoinHandle<()>>,
     control_pid: Arc<std::sync::atomic::AtomicI32>,
+    active_cancellation: Arc<std::sync::Mutex<Option<CancellationToken>>>,
 }
 impl CodexWorker {
     fn start() -> Self {
@@ -92,16 +96,22 @@ impl CodexWorker {
         let (event_sender, events) = mpsc::sync_channel(64);
         let control_pid = Arc::new(std::sync::atomic::AtomicI32::new(0));
         let thread_control_pid = control_pid.clone();
+        let active_cancellation = Arc::new(std::sync::Mutex::new(None));
+        let thread_cancellation = Arc::clone(&active_cancellation);
         let join = thread::spawn(move || {
             let mut session: Option<crate::codex::CodexSession> = None;
             while let Ok(command) = commands.recv() {
                 match command {
-                    CodexWorkerCommand::Connect => {
+                    CodexWorkerCommand::Connect { cancellation } => {
                         let control_pid = thread_control_pid.clone();
                         let result = std::panic::catch_unwind(move || {
-                            crate::codex::CodexSession::connect_with_control(control_pid)
+                            crate::codex::CodexSession::connect_with_control_and_cancellation(
+                                control_pid,
+                                &cancellation,
+                            )
                         })
                         .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        *thread_cancellation.lock().expect("Codex cancellation lock") = None;
                         let event = match result {
                             Ok(connected) => {
                                 session = Some(connected);
@@ -122,23 +132,25 @@ impl CodexWorker {
                         output,
                         question,
                         solved,
+                        cancellation,
                     } => {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let session = session.as_mut().ok_or("Codex is not connected")?;
-                            session.ask(crate::codex::InterviewRequest {
-                                mode,
-                                statement: &statement,
-                                source: &source,
-                                latest_output: &output,
-                                question: &question,
-                                source_revision: revision,
-                                solved,
-                            })
+                            session.ask_with_cancellation(
+                                crate::codex::InterviewRequest {
+                                    mode,
+                                    statement: &statement,
+                                    source: &source,
+                                    latest_output: &output,
+                                    question: &question,
+                                    source_revision: revision,
+                                    solved,
+                                },
+                                &cancellation,
+                            )
                         }))
                         .unwrap_or_else(|_| Err("Codex worker panicked".into()));
-                        if result.is_err() {
-                            session = None;
-                        }
+                        *thread_cancellation.lock().expect("Codex cancellation lock") = None;
                         if event_sender
                             .send(Event::CodexFinished(operation, revision, mode, result))
                             .is_err()
@@ -146,7 +158,8 @@ impl CodexWorker {
                             break;
                         }
                     }
-                    CodexWorkerCommand::Reset | CodexWorkerCommand::Cancel => session = None,
+                    CodexWorkerCommand::Reset => session = None,
+                    CodexWorkerCommand::Cancel => {}
                     CodexWorkerCommand::Shutdown => break,
                 }
             }
@@ -156,6 +169,7 @@ impl CodexWorker {
             events,
             join: Some(join),
             control_pid,
+            active_cancellation,
         }
     }
     fn poll(&mut self) -> Vec<Event> {
@@ -166,31 +180,64 @@ impl CodexWorker {
         result
     }
     fn send(&self, command: CodexWorkerCommand) -> Result<(), String> {
-        if matches!(
-            command,
-            CodexWorkerCommand::Cancel | CodexWorkerCommand::Reset
-        ) {
-            let pid = self.control_pid.load(std::sync::atomic::Ordering::SeqCst);
-            if pid > 0 {
-                unsafe {
-                    libc::kill(-pid, libc::SIGTERM);
+        let replacement = match &command {
+            CodexWorkerCommand::Connect { cancellation }
+            | CodexWorkerCommand::Turn { cancellation, .. } => Some(cancellation.clone()),
+            CodexWorkerCommand::Cancel | CodexWorkerCommand::Reset => {
+                if let Some(cancellation) = self
+                    .active_cancellation
+                    .lock()
+                    .expect("Codex cancellation lock")
+                    .as_ref()
+                {
+                    cancellation.cancel();
+                }
+                None
+            }
+            CodexWorkerCommand::Shutdown => None,
+        };
+        let previous = replacement.as_ref().map(|cancellation| {
+            self.active_cancellation
+                .lock()
+                .expect("Codex cancellation lock")
+                .replace(cancellation.clone())
+        });
+        if let Err(error) = self.sender.try_send(command) {
+            if let (Some(replacement), Some(previous)) = (replacement, previous) {
+                let mut active = self
+                    .active_cancellation
+                    .lock()
+                    .expect("Codex cancellation lock");
+                let replacement_flag = replacement.signal_flag();
+                if active
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(&current.signal_flag(), &replacement_flag))
+                {
+                    *active = previous;
                 }
             }
+            return Err(format!("Codex worker is busy or stopped: {error}"));
         }
-        self.sender
-            .try_send(command)
-            .map_err(|_| "Codex worker is busy or stopped".into())
+        Ok(())
     }
     fn shutdown(mut self) {
-        let pid = self.control_pid.load(std::sync::atomic::Ordering::SeqCst);
-        if pid > 0 {
-            unsafe {
-                libc::kill(-pid, libc::SIGTERM);
-            }
+        if let Some(cancellation) = self
+            .active_cancellation
+            .lock()
+            .expect("Codex cancellation lock")
+            .as_ref()
+        {
+            cancellation.cancel();
         }
         let _ = self.sender.send(CodexWorkerCommand::Shutdown);
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+        let pid = self.control_pid.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
         }
     }
 }
@@ -457,7 +504,9 @@ fn apply_effects(
             }
             Effect::CancelRun { operation } => worker.cancel(operation),
             Effect::ConnectCodex => {
-                if let Err(error) = codex_worker.send(CodexWorkerCommand::Connect) {
+                if let Err(error) = codex_worker.send(CodexWorkerCommand::Connect {
+                    cancellation: CancellationToken::new(),
+                }) {
                     effects.extend(reduce(state, Event::CodexConnected(Err(error))));
                 }
             }
@@ -480,6 +529,7 @@ fn apply_effects(
                     output,
                     question,
                     solved,
+                    cancellation: CancellationToken::new(),
                 }) {
                     effects.extend(reduce(
                         state,
@@ -804,6 +854,19 @@ mod tests {
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());
+    }
+
+    #[test]
+    fn codex_cancel_command_sets_active_cancellation_token() {
+        let worker = CodexWorker::start();
+        let cancellation = CancellationToken::new();
+        *worker
+            .active_cancellation
+            .lock()
+            .expect("Codex cancellation lock") = Some(cancellation.clone());
+        worker.send(CodexWorkerCommand::Cancel).unwrap();
+        assert!(cancellation.is_cancelled());
+        worker.shutdown();
     }
 
     #[test]
