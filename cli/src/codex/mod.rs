@@ -70,6 +70,13 @@ impl CodexSession {
         })
     }
 
+    pub fn prepare_next_operation(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), String> {
+        self.ensure_connected(cancellation)
+    }
+
     pub fn ask(&mut self, request: InterviewRequest<'_>) -> Result<String, String> {
         self.ask_with_cancellation(request, &CancellationToken::new())
     }
