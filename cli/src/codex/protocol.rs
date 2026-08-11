@@ -17,6 +17,13 @@ pub struct Notification<'a> {
     pub params: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    Number(u64),
+    String(String),
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Response {
@@ -36,6 +43,14 @@ struct RpcError {
     data: Option<Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerRequest {
+    id: RequestId,
+    method: String,
+    params: Value,
+}
+
 pub enum Incoming {
     Response {
         id: u64,
@@ -46,8 +61,9 @@ pub enum Incoming {
         params: Value,
     },
     ServerRequest {
-        id: Value,
+        id: RequestId,
         method: String,
+        params: Value,
     },
 }
 
@@ -77,17 +93,20 @@ pub fn decode(line: &[u8]) -> Result<Incoming, String> {
             }),
         });
     }
+    if object.contains_key("id") {
+        let request: ServerRequest = serde_json::from_value(value)
+            .map_err(|_| "malformed Codex server request envelope".to_string())?;
+        return Ok(Incoming::ServerRequest {
+            id: request.id,
+            method: request.method,
+            params: request.params,
+        });
+    }
     let method = object
         .get("method")
         .and_then(Value::as_str)
         .ok_or("Codex message has no method")?
         .to_string();
-    if let Some(id) = object.get("id") {
-        return Ok(Incoming::ServerRequest {
-            id: id.clone(),
-            method,
-        });
-    }
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
     if object.keys().any(|key| key != "method" && key != "params") {
         return Err("malformed Codex notification envelope".into());
@@ -100,7 +119,9 @@ pub fn request(id: u64, method: &str, params: Value) -> Result<Vec<u8>, String> 
     let mut bytes = serde_json::to_vec(&Request { id, method, params })
         .map_err(|_| "cannot encode Codex request".to_string())?;
     bytes.push(b'\n');
-    assert!(bytes.len() <= MAX_JSON_LINE_BYTES);
+    if bytes.len() > MAX_JSON_LINE_BYTES {
+        return Err("Codex request exceeds 2 MiB".into());
+    }
     Ok(bytes)
 }
 
@@ -108,7 +129,19 @@ pub fn notification(method: &str, params: Value) -> Result<Vec<u8>, String> {
     let mut bytes = serde_json::to_vec(&Notification { method, params })
         .map_err(|_| "cannot encode Codex notification".to_string())?;
     bytes.push(b'\n');
-    assert!(bytes.len() <= MAX_JSON_LINE_BYTES);
+    if bytes.len() > MAX_JSON_LINE_BYTES {
+        return Err("Codex notification exceeds 2 MiB".into());
+    }
+    Ok(bytes)
+}
+
+pub fn server_response(id: &RequestId, result: Value) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec(&json!({"id":id,"result":result}))
+        .map_err(|_| "cannot encode Codex server response".to_string())?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_JSON_LINE_BYTES {
+        return Err("Codex server response exceeds 2 MiB".into());
+    }
     Ok(bytes)
 }
 
@@ -126,6 +159,22 @@ mod tests {
         ));
         assert!(decode(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).is_err());
         assert!(decode(br#"{"id":1,"result":{},"extra":1}"#).is_err());
+    }
+
+    #[test]
+    fn server_requests_retain_typed_ids_and_params() {
+        let incoming = decode(
+            br#"{"id":"approval-1","method":"item/fileChange/requestApproval","params":{"turnId":"turn-1"}}"#,
+        )
+        .unwrap();
+        let Incoming::ServerRequest { id, method, params } = incoming else {
+            panic!("expected server request")
+        };
+        assert_eq!(id, RequestId::String("approval-1".into()));
+        assert_eq!(method, "item/fileChange/requestApproval");
+        assert_eq!(params["turnId"], "turn-1");
+        assert!(decode(br#"{"id":{},"method":"x","params":{}}"#).is_err());
+        assert!(decode(br#"{"id":1,"method":"x","params":{},"extra":1}"#).is_err());
     }
 
     #[test]
