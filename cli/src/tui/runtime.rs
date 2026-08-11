@@ -136,6 +136,9 @@ impl CodexWorker {
                             })
                         }))
                         .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        if result.is_err() {
+                            session = None;
+                        }
                         if event_sender
                             .send(Event::CodexFinished(operation, revision, mode, result))
                             .is_err()
