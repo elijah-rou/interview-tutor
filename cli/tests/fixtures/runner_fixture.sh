@@ -58,8 +58,17 @@ case "$mode" in
       index=$((index + 1))
     done
     ;;
+  hostile-osc)
+    printf '\033]'
+    head -c 8388608 /dev/zero | tr '\000' x
+    ;;
   signal-exit-race)
     kill -INT "$PPID"
+    exit 0
+    ;;
+  signal-final-drain)
+    (trap 'printf "%s\n" "$$" > "$PRACTICE_DESCENDANT_PID_FILE"; trap "" TERM; sleep 30' TERM
+     while :; do sleep 30; done) &
     exit 0
     ;;
   split-sequences)

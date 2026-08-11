@@ -218,6 +218,52 @@ fn sustained_alternating_output_keeps_results_and_events_bounded() {
 }
 
 #[test]
+fn unterminated_hostile_osc_keeps_execution_and_discovery_bounded() {
+    let fixture = Fixture::new();
+    let mut hostile = limits();
+    hostile.wall_timeout = Duration::from_secs(10);
+    hostile.display_output_bytes = 128;
+    hostile.event_queue_capacity = 4;
+    let (sender, receiver) = mpsc::sync_channel(4);
+
+    let started = Instant::now();
+    let result = runner::execute(
+        &fixture.plan("hostile-osc"),
+        &fixture.database,
+        &hostile,
+        &CancellationToken::new(),
+        Some(&sender),
+    )
+    .unwrap();
+    let execution_elapsed = started.elapsed();
+    drop(sender);
+    let events: Vec<_> = receiver.into_iter().collect();
+
+    assert_eq!(result.termination, Termination::Exited(0));
+    assert!(execution_elapsed < Duration::from_secs(10));
+    assert!(result.display_output.len() <= hostile.display_output_bytes);
+    assert!(result.omitted_bytes > 8 * 1024 * 1024 - 128);
+    assert!(events.len() <= hostile.event_queue_capacity);
+
+    fs::write(
+        fixture.root.join("python/run"),
+        "#!/bin/sh\nprintf '\\033]'\nhead -c 8388608 /dev/zero | tr '\\000' x\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let error = runner::discover_adapters(
+        &fixture.root.join("python/run"),
+        &hostile,
+        &CancellationToken::new(),
+    )
+    .unwrap_err();
+    let discovery_elapsed = started.elapsed();
+
+    assert!(discovery_elapsed < Duration::from_secs(10));
+    assert!(error.contains("exceeded 128 output bytes"));
+}
+
+#[test]
 fn cancellation_and_timeout_return_promptly() {
     let fixture = Fixture::new();
     let cancellation = CancellationToken::new();
