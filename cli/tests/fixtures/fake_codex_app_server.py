@@ -4,12 +4,6 @@ import os
 import sys
 import time
 
-if "--version" in sys.argv:
-    print("codex-cli 0.146.0")
-    raise SystemExit(0)
-if len(sys.argv) != 3 or sys.argv[1:] != ["app-server", "--stdio"]:
-    raise SystemExit(2)
-
 codex_home = os.environ.get("CODEX_HOME")
 mode = "normal"
 capture_path = None
@@ -19,6 +13,25 @@ if codex_home and os.path.isfile(os.path.join(codex_home, "fake-mode")):
     capture_path = os.path.join(codex_home, "fake-capture.jsonl")
 
 
+def spawn_escaped_pipe_holder(pid_name):
+    child = os.fork()
+    if child == 0:
+        os.setsid()
+        while True:
+            time.sleep(60)
+    with open(os.path.join(codex_home, pid_name), "w", encoding="utf-8") as file:
+        file.write(str(child))
+
+
+if "--version" in sys.argv:
+    if mode == "escaped-version-pipes":
+        spawn_escaped_pipe_holder("escaped-version-pid")
+    print("codex-cli 0.146.0")
+    raise SystemExit(0)
+if len(sys.argv) != 3 or sys.argv[1:] != ["app-server", "--stdio"]:
+    raise SystemExit(2)
+
+
 def record(value):
     if capture_path:
         with open(capture_path, "a", encoding="utf-8") as file:
@@ -26,6 +39,8 @@ def record(value):
 
 
 record({"kind": "process", "argv": sys.argv[1:], "cwd": os.getcwd(), "environment_names": sorted(os.environ)})
+if mode == "escaped-session-pipes":
+    spawn_escaped_pipe_holder("escaped-session-pid")
 with open("fake-session-artifact", "w", encoding="utf-8") as file:
     file.write("removed with process cwd")
 if mode == "stderr-flood":
