@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Problem slugs, positive LeetCode IDs, and adapter languages are unique within their runtime scopes; catalog validation enforces these cross-record constraints.",
+  "$comment": "The portable URL pattern rejects ASCII controls and whitespace plus backslashes, while runtime catalog validation rejects all Unicode controls and whitespace. Runtime validation also enforces cross-record uniqueness and adapter path existence because portable JSON Schema regex and cross-record support varies.",
   "type": "object",
   "additionalProperties": false,
   "required": [
