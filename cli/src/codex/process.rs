@@ -1905,7 +1905,7 @@ mod tests {
                     solved: false,
                 })
                 .unwrap(),
-            "What invariant holds?"
+            "What invariant holds? [turn-1]"
         );
         assert_eq!(
             session
@@ -1919,7 +1919,7 @@ mod tests {
                     solved: false,
                 })
                 .unwrap(),
-            "Level 1 invariant"
+            "Level 1 invariant [turn-2]"
         );
         assert_eq!(
             session
@@ -1933,7 +1933,7 @@ mod tests {
                     solved: true,
                 })
                 .unwrap(),
-            "Submission reviewed"
+            "Submission reviewed [turn-3]"
         );
         drop(session);
 
@@ -2071,7 +2071,7 @@ mod tests {
         assert!(session.requires_restart());
         assert_eq!(
             session.ask(request("next-content")).unwrap(),
-            "What invariant holds?"
+            "What invariant holds? [turn-1]"
         );
         drop(session);
         let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
@@ -2118,7 +2118,10 @@ mod tests {
                 .contains("closed stdout")
         );
         assert!(session.requires_restart());
-        assert_eq!(session.ask(request()).unwrap(), "What invariant holds?");
+        assert_eq!(
+            session.ask(request()).unwrap(),
+            "What invariant holds? [turn-1]"
+        );
         assert!(!session.requires_restart());
         drop(session);
 

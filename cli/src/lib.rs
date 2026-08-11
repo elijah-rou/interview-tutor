@@ -5,5 +5,6 @@ pub mod config;
 pub mod database;
 pub mod editor;
 pub mod runner;
+pub mod signals;
 pub mod source;
 pub mod tui;

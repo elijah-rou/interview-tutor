@@ -56,14 +56,21 @@ fn run() -> Result<ExitCode, String> {
     if cli.no_codex {
         state.disable_codex();
     }
-    tui::runtime::run(
+    #[cfg(debug_assertions)]
+    let disposition_probe =
+        practice_cli::signals::test_support::DispositionProbe::from_environment()?;
+    let result = tui::runtime::run(
         state,
         Repository::new(connection),
         cli.problem_set,
         root,
         database_path,
-    )
-    .map(ExitCode::from)
+    );
+    #[cfg(debug_assertions)]
+    if let Some(probe) = disposition_probe {
+        probe.verify()?;
+    }
+    result.map(ExitCode::from)
 }
 
 fn main() -> ExitCode {

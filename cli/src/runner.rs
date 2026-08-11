@@ -77,11 +77,19 @@ impl ExecutionLimits {
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
+    signal_state: Option<crate::signals::SignalState>,
 }
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_signal_state(signal_state: crate::signals::SignalState) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            signal_state: Some(signal_state),
+        }
     }
 
     pub fn cancel(&self) {
@@ -90,6 +98,16 @@ impl CancellationToken {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .signal_state
+                .as_ref()
+                .is_some_and(crate::signals::SignalState::is_cancelled)
+    }
+
+    pub fn signal_exit_code(&self) -> Option<i32> {
+        self.signal_state
+            .as_ref()
+            .and_then(crate::signals::SignalState::exit_code)
     }
 
     pub fn signal_flag(&self) -> Arc<AtomicBool> {
