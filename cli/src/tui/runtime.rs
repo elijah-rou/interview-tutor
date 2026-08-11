@@ -775,6 +775,25 @@ impl CodexWorker {
     }
 }
 
+fn runtime_execution_limits() -> ExecutionLimits {
+    let limits = ExecutionLimits::default();
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var_os("INTERVIEW_TUTOR_TEST_RUN_TIMEOUT_MS") {
+        let milliseconds = milliseconds
+            .to_str()
+            .expect("test runner timeout must be UTF-8")
+            .parse::<u64>()
+            .expect("test runner timeout must be an integer");
+        assert!((50..=20_000).contains(&milliseconds));
+        return ExecutionLimits {
+            wall_timeout: Duration::from_millis(milliseconds),
+            term_grace: Duration::from_millis(100),
+            ..limits
+        };
+    }
+    limits
+}
+
 struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
@@ -790,6 +809,7 @@ impl RunnerWorker {
     fn start(root: PathBuf, database_path: PathBuf) -> Self {
         let save_root = root.clone();
         let execute_database = database_path.clone();
+        let execution_limits = runtime_execution_limits();
         let record_root = root;
         let finalize_root = record_root.clone();
         let record_database = database_path;
@@ -802,7 +822,7 @@ impl RunnerWorker {
                 runner::execute(
                     plan,
                     &execute_database,
-                    &ExecutionLimits::default(),
+                    &execution_limits,
                     cancellation,
                     None,
                 )
