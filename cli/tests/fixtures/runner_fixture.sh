@@ -49,6 +49,19 @@ case "$mode" in
       index=$((index + 1))
     done
     ;;
+  sustained-alternating)
+    payload=$(head -c 4096 /dev/zero | tr '\000' x)
+    index=0
+    while [ "$index" -lt 4096 ]; do
+      printf 'out-%s:%s\n' "$index" "$payload"
+      printf 'err-%s:%s\n' "$index" "$payload" >&2
+      index=$((index + 1))
+    done
+    ;;
+  signal-exit-race)
+    kill -INT "$PPID"
+    exit 0
+    ;;
   split-sequences)
     printf '\342'; sleep 0.02; printf '\202\254'
     printf '\033['; sleep 0.02; printf '31mred\033]0;title'; sleep 0.02; printf '\007safe\033[0m\n'
