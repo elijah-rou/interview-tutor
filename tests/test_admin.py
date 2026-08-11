@@ -268,6 +268,8 @@ class ProjectCliTests(unittest.TestCase):
                 "https://example.com/path?query=bad value",
                 "https://example.com/path\\segment",
                 "https://example.com/path?query=bad\u0007value",
+                "https://example.com/path?query=bad\u0080value",
+                "https://example.com/path?query=bad\u0085value",
             ):
                 with self.subTest(url=repr(invalid_value)):
                     catalog = self.fixture_catalog()
