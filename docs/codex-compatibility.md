@@ -9,6 +9,7 @@ Validated for this stack with:
 - executable: `/home/elijahrou/.bun/install/global/node_modules/@openai/codex/bin/codex.js` (canonical path reported by the test host)
 - version: `codex-cli 0.146.0`
 - stable generated schema: `codex_app_server_protocol.v2.schemas.json`, SHA-256 `37def830af431519597165a45a0d25840ff9cbe857d26556aa6b3d14db4cbf7a`
+- compatibility executable: `/home/elijahrou/.npm/_npx/c8ab89660c602c20/node_modules/@openai/codex/bin/codex.js`, version `codex-cli 0.147.0`, stable v2 schema SHA-256 `f3dec1e031d99a420b137b903f02196d4325eece57620c925bb7130b25f168d2`
 - generation: `codex app-server generate-json-schema --out <temporary-directory>` without `--experimental`
 - login inspection: `codex login status` only; Interview Tutor never mutates login
 
