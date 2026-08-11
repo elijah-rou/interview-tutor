@@ -32,7 +32,7 @@ pub enum Effect {
         operation: OperationId,
         plan: ExecutionPlan,
         source: String,
-        generation: u64,
+        revision: u64,
         write_source: bool,
         intent: RunIntent,
     },
@@ -46,6 +46,7 @@ pub enum Effect {
 pub enum EditorAction {
     Normal(char),
     Insert(char),
+    Paste(String),
     CommandChar(char),
     ExecuteCommand,
     Escape,
@@ -89,7 +90,7 @@ pub enum Event {
         OperationId,
         u64,
         RunIntent,
-        bool,
+        Option<String>,
         Result<ExecutionResult, String>,
     ),
 }

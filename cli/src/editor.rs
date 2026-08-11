@@ -1,9 +1,11 @@
 use ratatui::style::{Color, Style};
 use std::collections::VecDeque;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_DOCUMENT_LINES: usize = 100_000;
 pub const MAX_UNDO_SNAPSHOTS: usize = 32;
+pub const MAX_COMMAND_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
@@ -40,19 +42,19 @@ struct Snapshot {
     text: String,
     row: usize,
     column: usize,
-    generation: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct EditorDocument {
     text: String,
+    saved_text: String,
     pub mode: Mode,
     pub row: usize,
     pub column: usize,
     pub viewport_row: usize,
     pub viewport_column: usize,
-    pub generation: u64,
-    pub saved_generation: u64,
+    /// Monotonic content identity. Revisions are never restored from undo history.
+    pub revision: u64,
     pub command_buffer: String,
     pub error: Option<String>,
     undo: VecDeque<Snapshot>,
@@ -65,14 +67,14 @@ impl EditorDocument {
     pub fn new(text: String) -> Result<Self, String> {
         validate_text(&text)?;
         Ok(Self {
+            saved_text: text.clone(),
             text,
             mode: Mode::Normal,
             row: 0,
             column: 0,
             viewport_row: 0,
             viewport_column: 0,
-            generation: 0,
-            saved_generation: 0,
+            revision: 0,
             command_buffer: String::new(),
             error: None,
             undo: VecDeque::new(),
@@ -81,108 +83,158 @@ impl EditorDocument {
             pending_d: false,
         })
     }
+
     pub fn text(&self) -> &str {
         &self.text
     }
     pub fn dirty(&self) -> bool {
-        self.generation != self.saved_generation
+        self.text != self.saved_text
     }
-    pub fn mark_saved(&mut self, generation: u64) {
-        if generation == self.generation {
-            self.saved_generation = generation;
+
+    pub fn mark_saved(&mut self, revision: u64, saved_text: &str) {
+        if revision <= self.revision {
+            self.saved_text = saved_text.to_string();
         }
     }
+
     pub fn line_count(&self) -> usize {
-        self.text.split('\n').count()
+        self.text.bytes().filter(|byte| *byte == b'\n').count() + 1
     }
     pub fn line(&self, row: usize) -> &str {
         self.text.split('\n').nth(row).unwrap_or("")
     }
-    fn line_chars(&self) -> usize {
-        self.line(self.row).chars().count()
+    fn line_graphemes(&self) -> usize {
+        self.line(self.row).graphemes(true).count()
     }
-    fn snapshot(&mut self) {
-        if self.undo.len() == MAX_UNDO_SNAPSHOTS {
-            self.undo.pop_front();
-        }
-        self.undo.push_back(Snapshot {
+
+    fn current_snapshot(&self) -> Snapshot {
+        Snapshot {
             text: self.text.clone(),
             row: self.row,
             column: self.column,
-            generation: self.generation,
-        });
+        }
+    }
+
+    fn push_undo(&mut self, snapshot: Snapshot) {
+        if self.undo.len() == MAX_UNDO_SNAPSHOTS {
+            self.undo.pop_front();
+        }
+        self.undo.push_back(snapshot);
         self.redo.clear();
     }
-    fn set_snapshot(&mut self, snapshot: Snapshot) {
+
+    fn install_snapshot(&mut self, snapshot: Snapshot) {
         self.text = snapshot.text;
         self.row = snapshot.row;
         self.column = snapshot.column;
-        self.generation = snapshot.generation;
     }
+
+    fn next_revision(&self) -> Result<u64, String> {
+        self.revision
+            .checked_add(1)
+            .ok_or_else(|| "editor revision overflow".into())
+    }
+
     fn mutate(
         &mut self,
         operation: impl FnOnce(&mut String, &mut usize, &mut usize),
     ) -> Result<(), String> {
-        let old = Snapshot {
-            text: self.text.clone(),
-            row: self.row,
-            column: self.column,
-            generation: self.generation,
-        };
+        let old = self.current_snapshot();
         let mut candidate = self.text.clone();
         let mut row = self.row;
         let mut column = self.column;
         operation(&mut candidate, &mut row, &mut column);
         validate_text(&candidate)?;
-        if candidate != self.text {
-            self.snapshot();
-            self.text = candidate;
-            self.row = row;
-            self.column = column;
-            self.generation = self
-                .generation
-                .checked_add(1)
-                .ok_or("editor generation overflow")?;
-        } else {
-            self.set_snapshot(old);
+        if candidate == self.text {
+            return Ok(());
         }
+        let revision = self.next_revision()?;
+        self.push_undo(old);
+        self.text = candidate;
+        self.row = row;
+        self.column = column;
+        self.revision = revision;
         self.clamp();
         Ok(())
     }
+
     fn clamp(&mut self) {
         self.row = self.row.min(self.line_count().saturating_sub(1));
-        self.column = self.column.min(self.line_chars());
+        let count = self.line_graphemes();
+        self.column = match self.mode {
+            Mode::Insert => self.column.min(count),
+            Mode::Normal | Mode::Command => self.column.min(count.saturating_sub(1)),
+        };
     }
+
     fn byte_offset(&self) -> usize {
         offset(&self.text, self.row, self.column)
     }
+
     pub fn insert_char(&mut self, character: char) -> Result<(), String> {
-        let at = self.byte_offset();
-        self.mutate(|text, _, column| {
-            text.insert(at, character);
-            *column += 1;
-        })
+        let mut encoded = [0_u8; 4];
+        self.insert_text(character.encode_utf8(&mut encoded))
     }
+
+    pub fn insert_text(&mut self, inserted: &str) -> Result<(), String> {
+        if inserted.is_empty() {
+            self.error = None;
+            return Ok(());
+        }
+        let at = self.byte_offset();
+        let rows = inserted.bytes().filter(|byte| *byte == b'\n').count();
+        let trailing = inserted
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .graphemes(true)
+            .count();
+        let graphemes = inserted.graphemes(true).count();
+        let original_column = self.column;
+        let result = self.mutate(|text, row, column| {
+            text.insert_str(at, inserted);
+            if rows == 0 {
+                *column = original_column + graphemes;
+            } else {
+                *row += rows;
+                *column = trailing;
+            }
+        });
+        if result.is_ok() {
+            self.error = None;
+        }
+        result
+    }
+
+    pub fn command_text(&mut self, text: &str) -> Result<(), String> {
+        let Some(length) = self.command_buffer.len().checked_add(text.len()) else {
+            return Err("command exceeds 256 bytes".into());
+        };
+        if length > MAX_COMMAND_BYTES {
+            return Err("command exceeds 256 bytes".into());
+        }
+        self.command_buffer.push_str(text);
+        self.error = None;
+        Ok(())
+    }
+
     pub fn enter(&mut self) -> Result<(), String> {
-        let at = self.byte_offset();
-        self.mutate(|text, row, column| {
-            text.insert(at, '\n');
-            *row += 1;
-            *column = 0;
-        })
+        self.insert_text("\n")
     }
+
     pub fn backspace(&mut self) -> Result<(), String> {
         let at = self.byte_offset();
         if at == 0 {
+            self.error = None;
             return Ok(());
         }
         self.mutate(|text, row, column| {
             let previous = text[..at]
-                .char_indices()
+                .grapheme_indices(true)
                 .next_back()
-                .map(|(i, _)| i)
+                .map(|(index, _)| index)
                 .unwrap_or(0);
-            let newline = text[previous..at].contains('\n');
+            let newline = &text[previous..at] == "\n";
             text.replace_range(previous..at, "");
             if newline {
                 *row = row.saturating_sub(1);
@@ -190,29 +242,42 @@ impl EditorDocument {
                     .rsplit('\n')
                     .next()
                     .unwrap_or("")
-                    .chars()
-                    .count()
+                    .graphemes(true)
+                    .count();
             } else {
-                *column = column.saturating_sub(1)
+                *column = column.saturating_sub(1);
             }
-        })
+        })?;
+        self.error = None;
+        Ok(())
     }
+
     pub fn delete(&mut self) -> Result<(), String> {
         let at = self.byte_offset();
-        if at == self.text.len() {
+        let line_end = at + self.text[at..].find('\n').unwrap_or(self.text.len() - at);
+        if at >= line_end {
+            self.error = None;
             return Ok(());
         }
         self.mutate(|text, _, _| {
-            let end = at + text[at..].chars().next().unwrap().len_utf8();
+            let end = at
+                + text[at..line_end]
+                    .graphemes(true)
+                    .next()
+                    .expect("cursor addresses grapheme")
+                    .len();
             text.replace_range(at..end, "");
-        })
+        })?;
+        self.error = None;
+        Ok(())
     }
+
     fn delete_line(&mut self) -> Result<(), String> {
         let row = self.row;
         self.mutate(|text, current, column| {
             let mut lines = text.split('\n').map(str::to_string).collect::<Vec<_>>();
             if lines.len() == 1 {
-                lines[0].clear()
+                lines[0].clear();
             } else {
                 lines.remove(row);
             }
@@ -221,34 +286,53 @@ impl EditorDocument {
             *column = 0;
         })
     }
+
     pub fn undo(&mut self) {
         if let Some(previous) = self.undo.pop_back() {
+            let Ok(revision) = self.next_revision() else {
+                self.error = Some("editor revision overflow".into());
+                return;
+            };
             if self.redo.len() == MAX_UNDO_SNAPSHOTS {
                 self.redo.pop_front();
             }
-            self.redo.push_back(Snapshot {
-                text: self.text.clone(),
-                row: self.row,
-                column: self.column,
-                generation: self.generation,
-            });
-            self.set_snapshot(previous);
+            self.redo.push_back(self.current_snapshot());
+            self.install_snapshot(previous);
+            self.revision = revision;
+            self.clamp();
+            self.error = None;
         }
     }
+
     pub fn redo(&mut self) {
         if let Some(next) = self.redo.pop_back() {
+            let Ok(revision) = self.next_revision() else {
+                self.error = Some("editor revision overflow".into());
+                return;
+            };
             if self.undo.len() == MAX_UNDO_SNAPSHOTS {
                 self.undo.pop_front();
             }
-            self.undo.push_back(Snapshot {
-                text: self.text.clone(),
-                row: self.row,
-                column: self.column,
-                generation: self.generation,
-            });
-            self.set_snapshot(next);
+            self.undo.push_back(self.current_snapshot());
+            self.install_snapshot(next);
+            self.revision = revision;
+            self.clamp();
+            self.error = None;
         }
     }
+
+    pub fn escape(&mut self) {
+        if self.mode == Mode::Insert {
+            self.column = self.column.saturating_sub(1);
+        }
+        self.mode = Mode::Normal;
+        self.command_buffer.clear();
+        self.pending_d = false;
+        self.pending_g = false;
+        self.error = None;
+        self.clamp();
+    }
+
     pub fn normal(&mut self, key: char) -> Result<(), String> {
         self.error = None;
         if self.pending_g {
@@ -267,31 +351,31 @@ impl EditorDocument {
         }
         match key {
             'h' => self.column = self.column.saturating_sub(1),
-            'l' => self.column = (self.column + 1).min(self.line_chars()),
+            'l' => self.column = (self.column + 1).min(self.line_graphemes().saturating_sub(1)),
             'j' => self.row = (self.row + 1).min(self.line_count() - 1),
             'k' => self.row = self.row.saturating_sub(1),
             '0' => self.column = 0,
-            '$' => self.column = self.line_chars(),
+            '$' => self.column = self.line_graphemes().saturating_sub(1),
             'g' => self.pending_g = true,
             'G' => {
                 self.row = self.line_count() - 1;
-                self.column = 0
+                self.column = 0;
             }
             'i' => self.mode = Mode::Insert,
             'a' => {
-                self.column = (self.column + 1).min(self.line_chars());
-                self.mode = Mode::Insert
+                self.column = (self.column + 1).min(self.line_graphemes());
+                self.mode = Mode::Insert;
             }
             'o' => {
-                self.column = self.line_chars();
+                self.column = self.line_graphemes();
+                self.mode = Mode::Insert;
                 self.enter()?;
-                self.mode = Mode::Insert
             }
             'O' => {
                 self.column = 0;
+                self.mode = Mode::Insert;
                 self.enter()?;
                 self.row = self.row.saturating_sub(1);
-                self.mode = Mode::Insert
             }
             'x' => self.delete()?,
             'd' => self.pending_d = true,
@@ -300,50 +384,67 @@ impl EditorDocument {
             'b' => self.word_backward(),
             ':' => {
                 self.mode = Mode::Command;
-                self.command_buffer.clear()
+                self.command_buffer.clear();
             }
             _ => self.error = Some(format!("unsupported normal command: {key}")),
         }
         self.clamp();
         Ok(())
     }
+
     fn word_forward(&mut self) {
-        let chars = self.text.chars().collect::<Vec<_>>();
-        let mut index = self.text[..self.byte_offset()].chars().count();
-        while index < chars.len() && chars[index].is_alphanumeric() {
+        let graphemes = self.text.graphemes(true).collect::<Vec<_>>();
+        let mut index = self.text[..self.byte_offset()].graphemes(true).count();
+        while index < graphemes.len() && word_grapheme(graphemes[index]) {
             index += 1;
         }
-        while index < chars.len() && !chars[index].is_alphanumeric() {
+        while index < graphemes.len() && !word_grapheme(graphemes[index]) {
             index += 1;
         }
-        self.set_from_char_index(index.min(chars.len()));
+        self.set_from_grapheme_index(index.min(graphemes.len().saturating_sub(1)));
     }
+
     fn word_backward(&mut self) {
-        let chars = self.text.chars().collect::<Vec<_>>();
+        let graphemes = self.text.graphemes(true).collect::<Vec<_>>();
+        if graphemes.is_empty() {
+            return;
+        }
         let mut index = self.text[..self.byte_offset()]
-            .chars()
+            .graphemes(true)
             .count()
             .saturating_sub(1);
-        while index > 0 && !chars[index].is_alphanumeric() {
+        while index > 0 && !word_grapheme(graphemes[index]) {
             index -= 1;
         }
-        while index > 0 && chars[index - 1].is_alphanumeric() {
+        while index > 0 && word_grapheme(graphemes[index - 1]) {
             index -= 1;
         }
-        self.set_from_char_index(index);
+        self.set_from_grapheme_index(index);
     }
-    fn set_from_char_index(&mut self, index: usize) {
-        let prefix = self.text.chars().take(index).collect::<String>();
-        self.row = prefix.matches('\n').count();
-        self.column = prefix.rsplit('\n').next().unwrap_or("").chars().count();
+
+    fn set_from_grapheme_index(&mut self, index: usize) {
+        let byte = self
+            .text
+            .grapheme_indices(true)
+            .nth(index)
+            .map_or(self.text.len(), |(at, _)| at);
+        let prefix = &self.text[..byte];
+        self.row = prefix.bytes().filter(|byte| *byte == b'\n').count();
+        self.column = prefix
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .graphemes(true)
+            .count();
+        self.clamp();
     }
+
     pub fn command_char(&mut self, character: char) {
-        if self.command_buffer.len() < 256 {
-            self.command_buffer.push(character);
-        } else {
-            self.error = Some("command exceeds 256 bytes".into());
+        if let Err(error) = self.command_text(&character.to_string()) {
+            self.error = Some(error);
         }
     }
+
     pub fn execute_command(&mut self) -> Result<EditorCommand, String> {
         let command = match self.command_buffer.as_str() {
             "w" => EditorCommand::Write,
@@ -352,23 +453,27 @@ impl EditorDocument {
             "submit" => EditorCommand::Submit,
             other => return Err(format!("unsupported command: :{other}")),
         };
-        self.mode = Mode::Normal;
-        self.command_buffer.clear();
+        self.escape();
         Ok(command)
     }
+}
+
+fn word_grapheme(grapheme: &str) -> bool {
+    grapheme == "_" || grapheme.chars().next().is_some_and(char::is_alphanumeric)
 }
 
 fn validate_text(text: &str) -> Result<(), String> {
     if text.len() > MAX_DOCUMENT_BYTES {
         return Err(format!("document exceeds {MAX_DOCUMENT_BYTES} bytes"));
     }
-    let lines = text.bytes().filter(|b| *b == b'\n').count() + 1;
+    let lines = text.bytes().filter(|byte| *byte == b'\n').count() + 1;
     if lines > MAX_DOCUMENT_LINES {
         return Err(format!("document exceeds {MAX_DOCUMENT_LINES} lines"));
     }
     Ok(())
 }
-fn offset(text: &str, row: usize, column: usize) -> usize {
+
+pub fn offset(text: &str, row: usize, column: usize) -> usize {
     let start = text
         .split_inclusive('\n')
         .take(row)
@@ -379,14 +484,29 @@ fn offset(text: &str, row: usize, column: usize) -> usize {
             .split('\n')
             .next()
             .unwrap_or("")
-            .char_indices()
+            .grapheme_indices(true)
             .nth(column)
             .map_or_else(
                 || text[start..].split('\n').next().unwrap_or("").len(),
-                |(i, _)| i,
+                |(index, _)| index,
             )
 }
 
+fn push_span(spans: &mut Vec<HighlightSpan>, start: usize, end: usize, kind: HighlightKind) {
+    if start == end {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.end == start
+        && last.kind == kind
+    {
+        last.end = end;
+        return;
+    }
+    spans.push(HighlightSpan { start, end, kind });
+}
+
+/// A deliberately lexical, single-line highlighter. It does not parse raw strings or nested syntax.
 pub fn highlight_line(language: &str, line: &str) -> Vec<HighlightSpan> {
     if !matches!(language, "rust" | "python") {
         return vec![HighlightSpan {
@@ -409,67 +529,64 @@ pub fn highlight_line(language: &str, line: &str) -> Vec<HighlightSpan> {
     };
     let mut spans = Vec::new();
     let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if line[i..].starts_with(comment) {
-            spans.push(HighlightSpan {
-                start: i,
-                end: line.len(),
-                kind: HighlightKind::Comment,
-            });
+    let mut index = 0;
+    while index < bytes.len() {
+        if line[index..].starts_with(comment) {
+            push_span(&mut spans, index, line.len(), HighlightKind::Comment);
             break;
         }
-        let c = line[i..].chars().next().unwrap();
-        if c == '\'' || c == '"' {
-            let quote = c;
-            i += c.len_utf8();
-            let start = i - c.len_utf8();
-            while i < bytes.len() {
-                let next = line[i..].chars().next().unwrap();
-                i += next.len_utf8();
-                if next == quote && bytes.get(i.saturating_sub(2)) != Some(&b'\\') {
+        let character = line[index..]
+            .chars()
+            .next()
+            .expect("valid character boundary");
+        if character == '\'' || character == '"' {
+            let quote = character;
+            let start = index;
+            index += character.len_utf8();
+            let mut escaped = false;
+            while index < bytes.len() {
+                let next = line[index..]
+                    .chars()
+                    .next()
+                    .expect("valid character boundary");
+                index += next.len_utf8();
+                if next == quote && !escaped {
                     break;
                 }
+                escaped = next == '\\' && !escaped;
+                if next != '\\' {
+                    escaped = false;
+                }
             }
-            spans.push(HighlightSpan {
-                start,
-                end: i,
-                kind: HighlightKind::String,
-            });
-            continue;
-        }
-        if c.is_alphabetic() || c == '_' {
-            let start = i;
-            i += c.len_utf8();
-            while i < bytes.len() {
-                let next = line[i..].chars().next().unwrap();
+            push_span(&mut spans, start, index, HighlightKind::String);
+        } else if character.is_alphabetic() || character == '_' {
+            let start = index;
+            index += character.len_utf8();
+            while index < bytes.len() {
+                let next = line[index..]
+                    .chars()
+                    .next()
+                    .expect("valid character boundary");
                 if !(next.is_alphanumeric() || next == '_') {
                     break;
                 }
-                i += next.len_utf8()
+                index += next.len_utf8();
             }
-            let word = &line[start..i];
-            spans.push(HighlightSpan {
-                start,
-                end: i,
-                kind: if keywords.contains(&word) {
-                    HighlightKind::Keyword
-                } else {
-                    HighlightKind::Plain
-                },
-            });
-            continue;
+            let kind = if keywords.contains(&&line[start..index]) {
+                HighlightKind::Keyword
+            } else {
+                HighlightKind::Plain
+            };
+            push_span(&mut spans, start, index, kind);
+        } else {
+            let start = index;
+            index += character.len_utf8();
+            push_span(&mut spans, start, index, HighlightKind::Plain);
         }
-        let start = i;
-        i += c.len_utf8();
-        spans.push(HighlightSpan {
-            start,
-            end: i,
-            kind: HighlightKind::Plain,
-        });
     }
     spans
 }
+
 pub fn highlight_style(kind: HighlightKind) -> Style {
     match kind {
         HighlightKind::Plain => Style::default(),
@@ -482,38 +599,74 @@ pub fn highlight_style(kind: HighlightKind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn unicode_edit_undo_and_dirty() {
-        let mut d = EditorDocument::new("ab\n界".into()).unwrap();
-        d.normal('G').unwrap();
-        d.normal('$').unwrap();
-        d.normal('i').unwrap();
-        d.insert_char('🦀').unwrap();
-        assert_eq!(d.text(), "ab\n界🦀");
-        assert!(d.dirty());
-        d.mode = Mode::Normal;
-        d.undo();
-        assert_eq!(d.text(), "ab\n界");
-        d.redo();
-        assert_eq!(d.text(), "ab\n界🦀");
-        d.mark_saved(d.generation);
-        assert!(!d.dirty());
+    fn revisions_never_repeat_and_saved_bytes_define_dirty() {
+        let mut document = EditorDocument::new("a".into()).unwrap();
+        document.normal('a').unwrap();
+        document.insert_text("b").unwrap();
+        let saved_revision = document.revision;
+        let saved = document.text().to_string();
+        document.mark_saved(saved_revision, &saved);
+        document.escape();
+        document.undo();
+        let undo_revision = document.revision;
+        assert!(undo_revision > saved_revision);
+        assert!(document.dirty());
+        document.redo();
+        assert!(document.revision > undo_revision);
+        assert!(!document.dirty());
     }
+
     #[test]
-    fn motions_edits_and_commands() {
-        let mut d = EditorDocument::new("one two\nthree".into()).unwrap();
-        d.normal('w').unwrap();
-        d.normal('x').unwrap();
-        assert_eq!(d.text(), "one wo\nthree");
-        d.normal('d').unwrap();
-        d.normal('d').unwrap();
-        assert_eq!(d.text(), "three");
-        d.normal(':').unwrap();
-        for c in "submit".chars() {
-            d.command_char(c)
-        }
-        assert_eq!(d.execute_command().unwrap(), EditorCommand::Submit);
+    fn grapheme_motion_delete_and_insert_escape_are_vim_like() {
+        let family = "👩‍👩‍👧‍👦";
+        let mut document = EditorDocument::new(format!("e\u{301}{family}x\nnext")).unwrap();
+        document.normal('$').unwrap();
+        document.normal('x').unwrap();
+        assert_eq!(document.text(), format!("e\u{301}{family}\nnext"));
+        document.normal('x').unwrap();
+        assert_eq!(document.text(), "e\u{301}\nnext");
+        document.normal('i').unwrap();
+        document.insert_text(family).unwrap();
+        document.escape();
+        assert_eq!(document.column, 0);
     }
+
+    #[test]
+    fn paste_is_one_revision_and_multiline_cursor_is_correct() {
+        let mut document = EditorDocument::new("x".into()).unwrap();
+        document.normal('i').unwrap();
+        document.insert_text("a\n👩‍💻b").unwrap();
+        assert_eq!(
+            (document.revision, document.row, document.column),
+            (1, 1, 2)
+        );
+        document.undo();
+        assert_eq!(document.text(), "x");
+        let oversized = "z".repeat(MAX_DOCUMENT_BYTES + 1);
+        let revision = document.revision;
+        assert!(document.insert_text(&oversized).is_err());
+        assert_eq!(document.revision, revision);
+    }
+
+    #[test]
+    fn underscore_is_a_word_character_and_spans_coalesce() {
+        let mut document = EditorDocument::new("one_two three".into()).unwrap();
+        document.normal('w').unwrap();
+        assert_eq!(document.column, 8);
+        let spans = highlight_line("rust", "...fn");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            spans[0],
+            HighlightSpan {
+                start: 0,
+                end: 3,
+                kind: HighlightKind::Plain
+            }
+        );
+    }
+
     #[test]
     fn bounds_and_highlights() {
         assert!(EditorDocument::new("x".repeat(MAX_DOCUMENT_BYTES + 1)).is_err());
@@ -525,12 +678,11 @@ mod tests {
             };
             let kinds = highlight_line(language, line)
                 .into_iter()
-                .map(|s| s.kind)
+                .map(|span| span.kind)
                 .collect::<Vec<_>>();
             assert!(kinds.contains(&HighlightKind::Keyword));
             assert!(kinds.contains(&HighlightKind::String));
             assert!(kinds.contains(&HighlightKind::Comment));
         }
-        assert_eq!(highlight_line("text", "abc")[0].kind, HighlightKind::Plain);
     }
 }

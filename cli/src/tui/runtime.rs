@@ -39,7 +39,7 @@ impl Drop for TerminalGuard {
 enum WorkerCommand {
     Run {
         operation: crate::app::model::OperationId,
-        generation: u64,
+        revision: u64,
         intent: crate::app::RunIntent,
         plan: runner::ExecutionPlan,
         source: String,
@@ -52,7 +52,12 @@ struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
     join: Option<JoinHandle<()>>,
-    active: Option<(crate::app::model::OperationId, CancellationToken)>,
+    active: Option<(
+        crate::app::model::OperationId,
+        u64,
+        crate::app::RunIntent,
+        CancellationToken,
+    )>,
 }
 impl RunnerWorker {
     fn start(root: PathBuf, database_path: PathBuf) -> Self {
@@ -64,42 +69,54 @@ impl RunnerWorker {
                     WorkerCommand::Shutdown => break,
                     WorkerCommand::Run {
                         operation,
-                        generation,
+                        revision,
                         intent,
                         plan,
                         source,
                         write_source,
                         cancellation,
                     } => {
-                        let save_result = if write_source {
-                            source::atomic_save(&root, &plan.solution_path, &source)
-                        } else {
-                            Ok(())
-                        };
-                        let (saved, result) = match save_result {
-                            Err(error) => (false, Err(error)),
-                            Ok(()) => (
-                                true,
-                                (|| {
-                                    let result = runner::execute(
-                                        &plan,
-                                        &database_path,
-                                        &ExecutionLimits::default(),
-                                        &cancellation,
-                                        None,
-                                    )?;
-                                    if intent == crate::app::RunIntent::Submit {
-                                        let connection =
-                                            crate::database::open_database(&database_path, &root)?;
-                                        runner::record_execution(&connection, &plan, &result)?;
-                                    }
-                                    Ok(result)
-                                })(),
-                            ),
-                        };
+                        let source_for_save = source.clone();
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let save_result = if write_source {
+                                    source::atomic_save(&root, &plan.solution_path, &source)
+                                } else {
+                                    Ok(())
+                                };
+                                match save_result {
+                                    Err(error) => (None, Err(error)),
+                                    Ok(()) => (
+                                        Some(source_for_save),
+                                        (|| {
+                                            let result = runner::execute(
+                                                &plan,
+                                                &database_path,
+                                                &ExecutionLimits::default(),
+                                                &cancellation,
+                                                None,
+                                            )?;
+                                            if intent == crate::app::RunIntent::Submit {
+                                                let connection = crate::database::open_database(
+                                                    &database_path,
+                                                    &root,
+                                                )?;
+                                                runner::record_execution(
+                                                    &connection,
+                                                    &plan,
+                                                    &result,
+                                                )?;
+                                            }
+                                            Ok(result)
+                                        })(),
+                                    ),
+                                }
+                            }));
+                        let (saved, result) = outcome
+                            .unwrap_or_else(|_| (None, Err("runner worker panicked".into())));
                         if event_sender
                             .send(Event::RunFinished(
-                                operation, generation, intent, saved, result,
+                                operation, revision, intent, saved, result,
                             ))
                             .is_err()
                         {
@@ -119,7 +136,7 @@ impl RunnerWorker {
     fn run(
         &mut self,
         operation: crate::app::model::OperationId,
-        generation: u64,
+        revision: u64,
         intent: crate::app::RunIntent,
         plan: runner::ExecutionPlan,
         source: String,
@@ -129,7 +146,7 @@ impl RunnerWorker {
         self.sender
             .send(WorkerCommand::Run {
                 operation,
-                generation,
+                revision,
                 intent,
                 plan,
                 source,
@@ -137,18 +154,18 @@ impl RunnerWorker {
                 cancellation: cancellation.clone(),
             })
             .map_err(|_| "runner worker stopped".to_string())?;
-        self.active = Some((operation, cancellation));
+        self.active = Some((operation, revision, intent, cancellation));
         Ok(())
     }
     fn cancel(&mut self, operation: crate::app::model::OperationId) {
-        if let Some((active, token)) = &self.active
+        if let Some((active, _, _, token)) = &self.active
             && *active == operation
         {
             token.cancel();
         }
     }
     fn leave(&mut self) {
-        if let Some((_, token)) = &self.active {
+        if let Some((_, _, _, token)) = &self.active {
             token.cancel();
         }
         if self.active.is_some() {
@@ -158,14 +175,34 @@ impl RunnerWorker {
     }
     fn poll(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
-            self.active = None;
-            events.push(event)
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => {
+                    self.active = None;
+                    events.push(event);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if let Some((operation, revision, intent, _)) = self.active.take() {
+                        events.push(Event::RunFinished(
+                            operation,
+                            revision,
+                            intent,
+                            None,
+                            Err("runner worker disconnected".into()),
+                        ));
+                    }
+                    if let Some(join) = self.join.take() {
+                        let _ = join.join();
+                    }
+                    break;
+                }
+            }
         }
         events
     }
     fn shutdown(mut self) {
-        if let Some((_, token)) = &self.active {
+        if let Some((_, _, _, token)) = &self.active {
             token.cancel();
         }
         let _ = self.sender.send(WorkerCommand::Shutdown);
@@ -234,7 +271,8 @@ fn apply_effects(
                         cancellation: None,
                         pending_save: None,
                         stale: false,
-                        quit_after_save: false,
+                        quit_after_save: None,
+                        refresh_after_submit: false,
                     }))
                 })();
                 effects.extend(reduce(state, Event::SolveOpened(operation, result)));
@@ -243,16 +281,16 @@ fn apply_effects(
                 operation,
                 plan,
                 source,
-                generation,
+                revision,
                 write_source,
                 intent,
             } => {
                 if let Err(error) =
-                    worker.run(operation, generation, intent, plan, source, write_source)
+                    worker.run(operation, revision, intent, plan, source, write_source)
                 {
                     effects.extend(reduce(
                         state,
-                        Event::RunFinished(operation, generation, intent, false, Err(error)),
+                        Event::RunFinished(operation, revision, intent, None, Err(error)),
                     ))
                 }
             }
@@ -312,15 +350,13 @@ pub fn run(
                 }
                 TerminalEvent::Resize(_, _) => needs_draw = true,
                 TerminalEvent::Paste(text) => {
-                    for character in text.chars() {
-                        let effects = reduce(
-                            &mut state,
-                            Event::Command(crate::app::Action::Editor(
-                                crate::app::EditorAction::Insert(character),
-                            )),
-                        );
-                        apply_effects(&mut state, &repository, &root, &mut worker, effects)
-                    }
+                    let effects = reduce(
+                        &mut state,
+                        Event::Command(crate::app::Action::Editor(
+                            crate::app::EditorAction::Paste(text),
+                        )),
+                    );
+                    apply_effects(&mut state, &repository, &root, &mut worker, effects);
                     needs_draw = true
                 }
                 TerminalEvent::FocusGained | TerminalEvent::FocusLost | TerminalEvent::Mouse(_) => {

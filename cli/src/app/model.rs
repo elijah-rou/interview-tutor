@@ -42,7 +42,8 @@ pub struct SolveSession {
     pub cancellation: Option<CancellationToken>,
     pub pending_save: Option<(u64, String)>,
     pub stale: bool,
-    pub quit_after_save: bool,
+    pub quit_after_save: Option<(Option<OperationId>, u64)>,
+    pub refresh_after_submit: bool,
 }
 
 impl SolveSession {

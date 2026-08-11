@@ -9,7 +9,8 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     if state.screen != Screen::Solve {
         return browser_key(key);
     }
-    let mode = state.solve.as_ref()?.editor.mode;
+    let solve = state.solve.as_ref()?;
+    let mode = solve.editor.mode;
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Action::Cancel);
     }
@@ -29,6 +30,14 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     }
     if key.code == KeyCode::Tab {
         return Some(Action::NextFocus);
+    }
+    if solve.pane != crate::app::model::SolvePane::Editor {
+        return match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
+            KeyCode::Esc => Some(Action::Editor(EditorAction::Escape)),
+            _ => None,
+        };
     }
     match mode {
         Mode::Insert => match key.code {
@@ -66,6 +75,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
                 state.leader_pending = false;
                 return match key.code {
                     KeyCode::Char('q') => Some(Action::Quit),
+                    KeyCode::Char('b') => Some(Action::Back),
                     _ => None,
                 };
             }
@@ -74,7 +84,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
                 return None;
             }
             match key.code {
-                KeyCode::Esc => Some(Action::Back),
+                KeyCode::Esc => Some(Action::Editor(EditorAction::Escape)),
                 KeyCode::Up => Some(Action::Editor(EditorAction::Up)),
                 KeyCode::Down => Some(Action::Editor(EditorAction::Down)),
                 KeyCode::Left => Some(Action::Editor(EditorAction::Left)),
