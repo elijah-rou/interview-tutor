@@ -26,4 +26,4 @@ cargo test --manifest-path cli/Cargo.toml
 
 The CLI crate is independent of the Python solution environment. Python remains one problem-adapter language alongside Rust.
 
-`runner::execute` is synchronous so callers can place it on a worker thread. Its defaults are one child, a 30 second wall timeout, 250 millisecond TERM grace, 256 KiB retained combined output, 8 KiB reads, and 64 queued events. See `docs/architecture.md` for termination and outcome semantics.
+`runner::execute` is synchronous so callers can place it on a worker thread. Its defaults are one child, a 30 second wall timeout, 250 millisecond TERM grace, 256 KiB final rendered output, 8 KiB reads, and 64 queued events. Optional event delivery uses `SyncSender::try_send`; full or disconnected consumers cause counted event drops and never delay lifecycle cleanup. The bounded final `ExecutionResult` is authoritative. See `docs/architecture.md` for termination and outcome semantics.
