@@ -74,14 +74,15 @@ fn header(state: &AppState) -> Paragraph<'static> {
         .map_or("none", |item| item.display_name.as_str());
     let solve_badges = state.solve.as_ref().map_or(String::new(), |solve| {
         format!(
-            "  {:?}{}{}",
+            "  {:?}{}{}  Codex {}",
             solve.editor.mode,
             if solve.editor.dirty() {
                 " · DIRTY"
             } else {
                 " · SAVED"
             },
-            if solve.stale { " · STALE" } else { "" }
+            if solve.stale { " · STALE" } else { "" },
+            state.codex.status.label()
         )
     });
     Paragraph::new(format!(
@@ -361,7 +362,60 @@ fn solve_output(state: &AppState) -> Paragraph<'static> {
 }
 fn solve_interview(state: &AppState) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
-    Paragraph::new("Interview is offline until Stack 7.\nLocal edit, test, cancel, and submit remain available.").block(block(if solve.pane==SolvePane::Interview{"Interview [active]"}else{"Interview"})).wrap(Wrap{trim:true})
+    let mut lines = vec![Line::from(format!(
+        "Codex {} · Transcript memory only · not saved",
+        state.codex.status.label()
+    ))];
+    match state.codex.status {
+        crate::app::model::CodexStatus::Disclosure => {
+            lines.push(Line::from("Privacy disclosure"));
+            lines.push(Line::from(
+                "The selected statement, current source, bounded latest test output,",
+            ));
+            lines.push(Line::from(
+                "in-memory transcript, and your question may be sent to OpenAI",
+            ));
+            lines.push(Line::from(
+                "under your Codex account controls. y/Enter accept · n/Esc decline",
+            ));
+        }
+        crate::app::model::CodexStatus::AuthRequired => lines.push(Line::from(
+            "Authentication required. Exit and run: codex login",
+        )),
+        crate::app::model::CodexStatus::Declined => lines.push(Line::from(
+            "Codex declined. Local editor, tests, and submission remain available.",
+        )),
+        _ => {
+            for (label, message) in &state.codex.messages {
+                lines.push(Line::styled(
+                    format!("{label}:"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+                lines.extend(message.lines().map(|line| Line::from(line.to_string())));
+            }
+            lines.push(Line::from(""));
+            let cursor = if state.codex.composer_focused {
+                "▌"
+            } else {
+                ""
+            };
+            lines.push(Line::from(format!(
+                "Question: {}{cursor}",
+                state.codex.composer
+            )));
+            lines.push(Line::from(
+                "i ask · Enter send · Space-h hint · Space-r reset · Ctrl-C cancel",
+            ));
+        }
+    }
+    Paragraph::new(lines)
+        .block(block(if solve.pane == SolvePane::Interview {
+            "Interview [active]"
+        } else {
+            "Interview"
+        }))
+        .wrap(Wrap { trim: false })
+        .scroll((state.codex.scroll, 0))
 }
 fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let solve = state.solve.as_ref().unwrap();
@@ -418,9 +472,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     frame.render_widget(header(state), vertical[0]);
     let footer = if state.screen == Screen::Solve {
         if area.width >= 80 {
-            "Ctrl-S/F5 test  F9 submit  Ctrl-C cancel  Tab panes  Space-b back  Space-q quit"
+            "F5 test F9 submit Tab panes i ask Space-h hint Ctrl-C cancel Space-q quit"
         } else {
-            "F5 test F9 submit Tab panes Space-b back Space-q quit"
+            "F5 test F9 submit Tab panes i ask Space-h hint Space-q quit"
         }
     } else {
         footer_text(area.width)
@@ -754,13 +808,39 @@ mod tests {
     }
 
     #[test]
-    fn solve_layouts_offline_placeholder_and_syntax_style() {
+    fn interview_disclosure_and_labels_render_at_supported_sizes() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        assert!(rendered(&state, 120, 40).contains("Privacy disclosure"));
+        assert!(rendered(&state, 80, 24).contains("Privacy disclosure"));
+        assert!(rendered(&state, 59, 19).contains("Terminal too small"));
+        state.codex.status = crate::app::model::CodexStatus::Feedback;
+        state
+            .codex
+            .messages
+            .push(("Interviewer".into(), "Question".into()));
+        state.codex.messages.push(("Hinter".into(), "Hint".into()));
+        state
+            .codex
+            .messages
+            .push(("Submission review".into(), "Review".into()));
+        let view = rendered(&state, 80, 24);
+        assert!(
+            view.contains("Interviewer")
+                && view.contains("Hinter")
+                && view.contains("Submission review")
+        );
+    }
+
+    #[test]
+    fn solve_layouts_interview_privacy_badge_and_syntax_style() {
         use crate::editor::EditorDocument;
         let mut state = solve_state();
         let full = rendered(&state, 120, 40);
         assert!(full.contains("Problem / Examples"));
         assert!(full.contains("compiler error"));
-        assert!(full.contains("Stack 7"));
+        assert!(full.contains("Question:"));
         let compact = rendered(&state, 80, 24);
         assert!(compact.contains("Solve panes"));
         assert!(compact.contains("def solve"));

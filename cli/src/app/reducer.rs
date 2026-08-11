@@ -1,5 +1,9 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
-use super::model::{AppState, DiscardAction, Focus, MAX_SCROLL, OperationId, Screen, SolvePane};
+use super::model::{
+    AppState, CodexStatus, DiscardAction, Focus, MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId,
+    Screen, SolvePane,
+};
+use crate::codex::prompt::Mode as CodexMode;
 use crate::editor::{EditorCommand, Mode};
 
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
@@ -97,6 +101,136 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     }
 
     match action {
+        Action::InterviewFocus => {
+            solve.pane = SolvePane::Interview;
+            if state.codex.disclosure_accepted {
+                state.codex.composer_focused = true;
+                if matches!(
+                    state.codex.status,
+                    CodexStatus::Offline | CodexStatus::Disconnected
+                ) {
+                    state.codex.status = CodexStatus::Connecting;
+                    return vec![Effect::ConnectCodex];
+                }
+            } else {
+                state.codex.status = CodexStatus::Disclosure;
+            }
+            Vec::new()
+        }
+        Action::InterviewDisclosure(accepted) if state.codex.status == CodexStatus::Disclosure => {
+            if accepted {
+                state.codex.disclosure_accepted = true;
+                state.codex.status = CodexStatus::Connecting;
+                state.codex.composer_focused = true;
+                vec![Effect::ConnectCodex]
+            } else {
+                state.codex.status = CodexStatus::Declined;
+                state.codex.composer_focused = false;
+                Vec::new()
+            }
+        }
+        Action::InterviewChar(character) if state.codex.composer_focused => {
+            if state
+                .codex
+                .composer
+                .len()
+                .saturating_add(character.len_utf8())
+                <= MAX_COMPOSER_BYTES
+            {
+                state.codex.composer.push(character);
+            }
+            Vec::new()
+        }
+        Action::InterviewBackspace if state.codex.composer_focused => {
+            state.codex.composer.pop();
+            Vec::new()
+        }
+        Action::InterviewEscape => {
+            state.codex.composer_focused = false;
+            Vec::new()
+        }
+        Action::InterviewSend
+            if state.codex.composer_focused
+                && matches!(
+                    state.codex.status,
+                    CodexStatus::Ready | CodexStatus::Feedback
+                ) =>
+        {
+            let question = state.codex.composer.trim().to_string();
+            if question.is_empty() {
+                return Vec::new();
+            }
+            let operation = next_operation(state);
+            let solve = state.solve.as_ref().expect("solve exists");
+            let revision = solve.editor.revision;
+            state.codex.composer.clear();
+            state.codex.composer_focused = false;
+            state.codex.push_message("You".into(), question.clone());
+            state.codex.status = CodexStatus::Thinking;
+            state.codex.active = Some((operation, revision));
+            vec![Effect::CodexTurn {
+                operation,
+                revision,
+                mode: CodexMode::Interviewer,
+                statement: solve.statement.clone(),
+                source: solve.editor.text().to_string(),
+                output: solve
+                    .output
+                    .chars()
+                    .rev()
+                    .take(16 * 1024)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect(),
+                question,
+                solved: state.codex.submission_recorded,
+            }]
+        }
+        Action::Hint
+            if state.codex.disclosure_accepted
+                && matches!(
+                    state.codex.status,
+                    CodexStatus::Ready | CodexStatus::Feedback
+                ) =>
+        {
+            let revision = solve.editor.revision;
+            if state.codex.hint_revision != Some(revision) {
+                state.codex.hint_revision = Some(revision);
+                state.codex.hint_count = 0;
+            }
+            if state.codex.hint_count >= 3 {
+                state.error = Some("maximum three hints reached for this revision".into());
+                return Vec::new();
+            }
+            let level = state.codex.hint_count + 1;
+            let operation = next_operation(state);
+            let solve = state.solve.as_ref().expect("solve exists");
+            state.codex.status = CodexStatus::Thinking;
+            state.codex.active = Some((operation, revision));
+            vec![Effect::CodexTurn {
+                operation,
+                revision,
+                mode: CodexMode::Hint(level),
+                statement: solve.statement.clone(),
+                source: solve.editor.text().to_string(),
+                output: solve
+                    .output
+                    .chars()
+                    .rev()
+                    .take(16 * 1024)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect(),
+                question: String::new(),
+                solved: false,
+            }]
+        }
+        Action::ResetInterview => {
+            state.codex.clear_session();
+            vec![Effect::ResetCodex]
+        }
         Action::SaveTest | Action::Submit => {
             let intent = if action == Action::Submit {
                 RunIntent::Submit
@@ -136,7 +270,11 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             }]
         }
         Action::Cancel => {
-            if let Some((operation, _, _)) = solve.running {
+            if state.codex.active.is_some() {
+                state.codex.status = CodexStatus::Disconnected;
+                state.codex.active = None;
+                vec![Effect::CancelCodex]
+            } else if let Some((operation, _, _)) = solve.running {
                 state.status = "Cancelling…".into();
                 vec![Effect::CancelRun { operation }]
             } else {
@@ -148,9 +286,11 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 .running
                 .map(|(operation, _, _)| Effect::CancelRun { operation });
             state.solve = None;
+            state.codex.clear_session();
             state.screen = Screen::ProblemDetail;
             state.status = "Ready".into();
             let mut effects = effect.into_iter().collect::<Vec<_>>();
+            effects.push(Effect::ResetCodex);
             effects.push(Effect::LeaveSolve);
             effects
         }
@@ -311,6 +451,48 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     if state.screen == Screen::Solve {
         match event {
             Event::Command(action) => return solve_command(state, action),
+            Event::CodexConnected(result) => {
+                match result {
+                    Ok(()) => {
+                        state.codex.status = CodexStatus::Ready;
+                        state.error = None;
+                    }
+                    Err(error) if error.contains("authentication required") => {
+                        state.codex.status = CodexStatus::AuthRequired;
+                        state.error = Some(error);
+                    }
+                    Err(error) => {
+                        state.codex.status = CodexStatus::Disconnected;
+                        state.error = Some(error);
+                    }
+                }
+                return Vec::new();
+            }
+            Event::CodexFinished(operation, revision, mode, result) => {
+                if state.codex.active != Some((operation, revision)) {
+                    return Vec::new();
+                }
+                state.codex.active = None;
+                match result {
+                    Ok(message) => {
+                        let label = match mode {
+                            CodexMode::Interviewer => "Interviewer",
+                            CodexMode::Hint(_) => "Hinter",
+                            CodexMode::SubmissionReview => "Submission review",
+                        };
+                        if matches!(mode, CodexMode::Hint(_)) {
+                            state.codex.hint_count = state.codex.hint_count.saturating_add(1);
+                        }
+                        state.codex.push_message(label.into(), message);
+                        state.codex.status = CodexStatus::Feedback;
+                    }
+                    Err(error) => {
+                        state.codex.status = CodexStatus::ProtocolError;
+                        state.error = Some(error);
+                    }
+                }
+                return Vec::new();
+            }
             Event::RunFinished(operation, revision, intent, saved_source, result) => {
                 let Some(solve) = state.solve.as_mut() else {
                     return Vec::new();
@@ -366,7 +548,40 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 if intent == RunIntent::Submit && succeeded {
                     solve.refresh_after_submit = true;
-                    return load_effect(state);
+                    state.codex.submission_recorded = true;
+                    let review = if state.codex.disclosure_accepted
+                        && matches!(
+                            state.codex.status,
+                            CodexStatus::Ready | CodexStatus::Feedback
+                        ) {
+                        let operation = next_operation(state);
+                        let solve = state.solve.as_ref().expect("solve exists");
+                        state.codex.status = CodexStatus::Thinking;
+                        state.codex.active = Some((operation, revision));
+                        Some(Effect::CodexTurn {
+                            operation,
+                            revision,
+                            mode: CodexMode::SubmissionReview,
+                            statement: solve.statement.clone(),
+                            source: solve.editor.text().to_string(),
+                            output: solve
+                                .output
+                                .chars()
+                                .rev()
+                                .take(16 * 1024)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect(),
+                            question: String::new(),
+                            solved: true,
+                        })
+                    } else {
+                        None
+                    };
+                    let mut effects = load_effect(state);
+                    effects.extend(review);
+                    return effects;
                 }
                 return start_pending_test(state);
             }
@@ -496,6 +711,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             Screen::Solve => unreachable!("solve events handled above"),
         },
+        Event::CodexConnected(_) | Event::CodexFinished(_, _, _, _) => {}
         Event::OpenSet(slug) => {
             state.selected_set_id = Some(slug);
             state.selected_problem_id = None;
@@ -540,7 +756,20 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
         Event::Command(Action::Help) => state.show_help = true,
         Event::Command(Action::Quit) => state.quit = true,
-        Event::Command(Action::SaveTest | Action::Submit | Action::Cancel | Action::Editor(_)) => {}
+        Event::Command(
+            Action::SaveTest
+            | Action::Submit
+            | Action::Cancel
+            | Action::InterviewFocus
+            | Action::InterviewChar(_)
+            | Action::InterviewBackspace
+            | Action::InterviewSend
+            | Action::InterviewEscape
+            | Action::InterviewDisclosure(_)
+            | Action::Hint
+            | Action::ResetInterview
+            | Action::Editor(_),
+        ) => {}
         Event::SolveOpened(operation, result) => {
             if state.active_operation != Some(operation) {
                 return Vec::new();
@@ -1153,6 +1382,82 @@ mod tests {
             ),
         );
         assert!(!state.quit);
+    }
+
+    #[test]
+    fn codex_disclosure_question_hint_stale_response_and_failure_preserve_solve() {
+        let mut state = solve_state();
+        reduce(&mut state, Event::Command(Action::InterviewFocus));
+        assert_eq!(state.codex.status, CodexStatus::Disclosure);
+        let effects = reduce(
+            &mut state,
+            Event::Command(Action::InterviewDisclosure(true)),
+        );
+        assert!(matches!(effects.as_slice(), [Effect::ConnectCodex]));
+        reduce(&mut state, Event::CodexConnected(Ok(())));
+        reduce(&mut state, Event::Command(Action::InterviewChar('W')));
+        let effects = reduce(&mut state, Event::Command(Action::InterviewSend));
+        let Effect::CodexTurn {
+            operation,
+            revision,
+            mode: CodexMode::Interviewer,
+            ..
+        } = effects[0]
+        else {
+            panic!("expected interview turn")
+        };
+        reduce(
+            &mut state,
+            Event::CodexFinished(
+                OperationId(operation.0 + 1),
+                revision,
+                CodexMode::Interviewer,
+                Ok("stale".into()),
+            ),
+        );
+        assert_eq!(state.codex.messages.len(), 1);
+        assert!(
+            !state
+                .codex
+                .messages
+                .iter()
+                .any(|(_, message)| message == "stale")
+        );
+        reduce(
+            &mut state,
+            Event::CodexFinished(
+                operation,
+                revision,
+                CodexMode::Interviewer,
+                Err("protocol failed".into()),
+            ),
+        );
+        assert_eq!(state.codex.status, CodexStatus::ProtocolError);
+        assert!(state.solve.is_some());
+        state
+            .codex
+            .messages
+            .push(("Interviewer".into(), "secret".into()));
+        let reset = reduce(&mut state, Event::Command(Action::ResetInterview));
+        assert!(matches!(reset.as_slice(), [Effect::ResetCodex]));
+        assert!(state.codex.messages.is_empty());
+        assert_eq!(state.codex.status, CodexStatus::Offline);
+    }
+
+    #[test]
+    fn codex_disclosure_decline_keeps_local_solve_available() {
+        let mut state = solve_state();
+        reduce(&mut state, Event::Command(Action::InterviewFocus));
+        assert!(
+            reduce(
+                &mut state,
+                Event::Command(Action::InterviewDisclosure(false))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.codex.status, CodexStatus::Declined);
+        let effects = reduce(&mut state, Event::Command(Action::SaveTest));
+        assert!(matches!(effects.as_slice(), [Effect::SaveRun { .. }]));
     }
 
     #[test]

@@ -23,6 +23,43 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     if key.code == KeyCode::F(9) {
         return Some(Action::Submit);
     }
+    if solve.pane == crate::app::model::SolvePane::Interview {
+        if state.codex.status == crate::app::model::CodexStatus::Disclosure {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => Some(Action::InterviewDisclosure(true)),
+                KeyCode::Esc | KeyCode::Char('n') => Some(Action::InterviewDisclosure(false)),
+                _ => None,
+            };
+        }
+        if state.codex.composer_focused {
+            return match key.code {
+                KeyCode::Esc => Some(Action::InterviewEscape),
+                KeyCode::Enter => Some(Action::InterviewSend),
+                KeyCode::Backspace => Some(Action::InterviewBackspace),
+                KeyCode::Char(character)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    Some(Action::InterviewChar(character))
+                }
+                _ => None,
+            };
+        }
+        if state.leader_pending {
+            state.leader_pending = false;
+            return match key.code {
+                KeyCode::Char('h') => Some(Action::Hint),
+                KeyCode::Char('r') => Some(Action::ResetInterview),
+                _ => None,
+            };
+        }
+        if key.code == KeyCode::Char(' ') {
+            state.leader_pending = true;
+            return None;
+        }
+        if key.code == KeyCode::Char('i') {
+            return Some(Action::InterviewFocus);
+        }
+    }
     if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
         || key.code == KeyCode::BackTab
     {

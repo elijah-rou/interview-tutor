@@ -9,6 +9,98 @@ pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_SCROLL: u16 = u16::MAX;
 pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
+pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexStatus {
+    Offline,
+    Disclosure,
+    Connecting,
+    AuthRequired,
+    Ready,
+    Thinking,
+    Feedback,
+    Declined,
+    Disconnected,
+    ProtocolError,
+}
+
+impl CodexStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Disclosure => "disclosure",
+            Self::Connecting => "connecting",
+            Self::AuthRequired => "auth",
+            Self::Ready => "ready",
+            Self::Thinking => "busy",
+            Self::Feedback => "feedback",
+            Self::Declined => "declined",
+            Self::Disconnected => "disconnected",
+            Self::ProtocolError => "protocol error",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CodexUi {
+    pub status: CodexStatus,
+    pub disclosure_accepted: bool,
+    pub composer_focused: bool,
+    pub composer: String,
+    pub messages: Vec<(String, String)>,
+    pub scroll: u16,
+    pub active: Option<(OperationId, u64)>,
+    pub hint_revision: Option<u64>,
+    pub hint_count: u8,
+    pub submission_recorded: bool,
+}
+
+impl Default for CodexUi {
+    fn default() -> Self {
+        Self {
+            status: CodexStatus::Offline,
+            disclosure_accepted: false,
+            composer_focused: false,
+            composer: String::new(),
+            messages: Vec::new(),
+            scroll: 0,
+            active: None,
+            hint_revision: None,
+            hint_count: 0,
+            submission_recorded: false,
+        }
+    }
+}
+
+impl CodexUi {
+    pub fn push_message(&mut self, label: String, message: String) {
+        self.messages.push((label, message));
+        while self.messages.len() > 128
+            || self
+                .messages
+                .iter()
+                .map(|(label, message)| label.len() + message.len())
+                .sum::<usize>()
+                > 256 * 1024
+        {
+            self.messages.remove(0);
+        }
+        assert!(self.messages.len() <= 128);
+    }
+
+    pub fn clear_session(&mut self) {
+        self.composer.clear();
+        self.messages.clear();
+        self.scroll = 0;
+        self.active = None;
+        self.hint_revision = None;
+        self.hint_count = 0;
+        self.submission_recorded = false;
+        self.composer_focused = false;
+        self.status = CodexStatus::Offline;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Screen {
@@ -151,7 +243,6 @@ impl AppData {
     }
 }
 
-#[derive(Debug)]
 pub struct AppState {
     pub screen: Screen,
     pub focus: Focus,
@@ -171,6 +262,7 @@ pub struct AppState {
     pub error: Option<String>,
     pub show_help: bool,
     pub leader_pending: bool,
+    pub codex: CodexUi,
     pub quit: bool,
 }
 
@@ -197,6 +289,7 @@ impl AppState {
             error: None,
             show_help: false,
             leader_pending: false,
+            codex: CodexUi::default(),
             quit: false,
         }
     }
