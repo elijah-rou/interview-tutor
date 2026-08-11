@@ -4,6 +4,7 @@ use crate::database::{
 
 pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
+pub const MAX_SCROLL: u16 = u16::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Screen {
@@ -97,6 +98,8 @@ pub struct AppState {
     pub selected_problem_id: Option<i64>,
     pub set_index: usize,
     pub problem_index: usize,
+    pub detail_scroll: u16,
+    pub progress_scroll: u16,
     pub data: AppData,
     pub active_operation: Option<OperationId>,
     pub next_operation: u64,
@@ -119,6 +122,8 @@ impl AppState {
             selected_problem_id: None,
             set_index: 0,
             problem_index: 0,
+            detail_scroll: 0,
+            progress_scroll: 0,
             data: AppData::empty(),
             active_operation: None,
             next_operation: 1,

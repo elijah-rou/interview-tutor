@@ -30,7 +30,10 @@ fn run() -> Result<(), String> {
     if let Some(problem_set) = &cli.problem_set {
         database::get_problem_set(&connection, problem_set)?;
     }
-    let languages = database::list_enabled_languages(&connection)?;
+    let languages = database::list_enabled_languages_bounded(
+        &connection,
+        database::RowLimit::new(practice_cli::app::model::MAX_ROWS)?,
+    )?;
     if languages.is_empty() {
         return Err("no enabled languages".to_string());
     }

@@ -1,10 +1,16 @@
 use super::model::{AppData, OperationId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoadScope {
+    Global,
+    ProblemSet(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     Load {
         operation: OperationId,
-        set_slug: Option<String>,
+        scope: LoadScope,
         problem_id: Option<i64>,
         language_slug: String,
     },

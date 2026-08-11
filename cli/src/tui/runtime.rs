@@ -1,4 +1,4 @@
-use crate::app::{AppState, Effect, Event, Repository, reduce};
+use crate::app::{AppState, Effect, Event, LoadScope, Repository, reduce};
 use crate::tui::{input, render};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event as TerminalEvent};
@@ -37,12 +37,16 @@ fn apply_effects(state: &mut AppState, repository: &Repository, mut effects: Vec
         match effect {
             Effect::Load {
                 operation,
-                set_slug,
+                scope,
                 problem_id,
                 language_slug,
             } => {
+                let set_slug = match &scope {
+                    LoadScope::Global => None,
+                    LoadScope::ProblemSet(slug) => Some(slug.as_str()),
+                };
                 let result = repository
-                    .load(set_slug.as_deref(), problem_id, &language_slug)
+                    .load(set_slug, problem_id, &language_slug)
                     .map(Box::new);
                 effects.extend(reduce(state, Event::Loaded(operation, result)));
             }
@@ -69,13 +73,18 @@ pub fn run(
     terminal
         .clear()
         .map_err(|error| format!("cannot clear terminal: {error}"))?;
+    let mut needs_draw = true;
     while !state.quit {
-        terminal
-            .draw(|frame| render::render(frame, &state))
-            .map_err(|error| format!("cannot draw terminal: {error}"))?;
+        if needs_draw {
+            terminal
+                .draw(|frame| render::render(frame, &state))
+                .map_err(|error| format!("cannot draw terminal: {error}"))?;
+            needs_draw = false;
+        }
         if !event::poll(Duration::from_millis(250))
             .map_err(|error| format!("cannot poll terminal: {error}"))?
         {
+            // Future background effects can set needs_draw when they change state.
             continue;
         }
         match event::read().map_err(|error| format!("cannot read terminal: {error}"))? {
@@ -83,9 +92,10 @@ pub fn run(
                 if let Some(action) = input::action_for_key(key) {
                     let effects = reduce(&mut state, Event::Command(action));
                     apply_effects(&mut state, &repository, effects);
+                    needs_draw = true;
                 }
             }
-            TerminalEvent::Resize(_, _) => {}
+            TerminalEvent::Resize(_, _) => needs_draw = true,
             TerminalEvent::FocusGained
             | TerminalEvent::FocusLost
             | TerminalEvent::Paste(_)

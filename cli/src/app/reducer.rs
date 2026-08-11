@@ -1,10 +1,17 @@
-use super::effects::{Action, Effect, Event};
-use super::model::{AppState, Focus, OperationId, Screen};
+use super::effects::{Action, Effect, Event, LoadScope};
+use super::model::{AppState, Focus, MAX_SCROLL, OperationId, Screen};
 
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
     let Some(language_slug) = state.language_slug().map(str::to_string) else {
         state.error = Some("no enabled languages".to_string());
         return Vec::new();
+    };
+    let scope = match state.screen {
+        Screen::SetMenu => LoadScope::Global,
+        Screen::ProblemList | Screen::ProblemDetail => match &state.selected_set_id {
+            Some(slug) => LoadScope::ProblemSet(slug.clone()),
+            None => LoadScope::Global,
+        },
     };
     let operation = OperationId(state.next_operation);
     state.next_operation = state
@@ -16,7 +23,7 @@ fn load_effect(state: &mut AppState) -> Vec<Effect> {
     state.error = None;
     vec![Effect::Load {
         operation,
-        set_slug: state.selected_set_id.clone(),
+        scope,
         problem_id: (state.screen == Screen::ProblemDetail)
             .then_some(state.selected_problem_id)
             .flatten(),
@@ -50,7 +57,20 @@ fn restore_selection(state: &mut AppState) {
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
+    if state.show_help {
+        if matches!(event, Event::Command(Action::Back | Action::Help)) {
+            state.show_help = false;
+        }
+        return Vec::new();
+    }
+
     match event {
+        Event::Command(Action::Up) if state.focus == Focus::Progress => {
+            state.progress_scroll = state.progress_scroll.saturating_sub(1);
+        }
+        Event::Command(Action::Down) if state.focus == Focus::Progress => {
+            state.progress_scroll = state.progress_scroll.checked_add(1).unwrap_or(MAX_SCROLL);
+        }
         Event::Command(Action::Up) => match state.screen {
             Screen::SetMenu => {
                 state.set_index = state.set_index.saturating_sub(1);
@@ -68,7 +88,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .get(state.problem_index)
                     .map(|row| row.id);
             }
-            Screen::ProblemDetail => {}
+            Screen::ProblemDetail => state.detail_scroll = state.detail_scroll.saturating_sub(1),
         },
         Event::Command(Action::Down) => match state.screen {
             Screen::SetMenu => {
@@ -89,14 +109,19 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .get(state.problem_index)
                     .map(|row| row.id);
             }
-            Screen::ProblemDetail => {}
+            Screen::ProblemDetail => {
+                state.detail_scroll = state.detail_scroll.checked_add(1).unwrap_or(MAX_SCROLL);
+            }
         },
+        Event::Command(Action::Open) if state.focus == Focus::Progress => {}
         Event::Command(Action::Open) => match state.screen {
             Screen::SetMenu => {
                 if let Some(row) = state.data.sets.get(state.set_index) {
                     state.selected_set_id = Some(row.slug.clone());
                     state.selected_problem_id = None;
                     state.problem_index = 0;
+                    state.detail_scroll = 0;
+                    state.progress_scroll = 0;
                     state.screen = Screen::ProblemList;
                     return load_effect(state);
                 }
@@ -104,6 +129,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             Screen::ProblemList => {
                 if let Some(row) = state.data.problems.get(state.problem_index) {
                     state.selected_problem_id = Some(row.id);
+                    state.detail_scroll = 0;
+                    state.progress_scroll = 0;
                     state.screen = Screen::ProblemDetail;
                     return load_effect(state);
                 }
@@ -113,30 +140,45 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         Event::OpenSet(slug) => {
             state.selected_set_id = Some(slug);
             state.selected_problem_id = None;
+            state.detail_scroll = 0;
+            state.progress_scroll = 0;
             state.screen = Screen::ProblemList;
             return load_effect(state);
         }
         Event::Command(Action::Back) => {
-            state.show_help = false;
+            state.detail_scroll = 0;
+            state.progress_scroll = 0;
+            state.focus = Focus::Main;
             match state.screen {
                 Screen::ProblemDetail => state.screen = Screen::ProblemList,
                 Screen::ProblemList => {
                     state.screen = Screen::SetMenu;
                     state.selected_problem_id = None;
+                    return load_effect(state);
                 }
                 Screen::SetMenu => {}
             }
         }
-        Event::Command(Action::NextFocus) => state.focus = Focus::Progress,
-        Event::Command(Action::PreviousFocus) => state.focus = Focus::Main,
+        Event::Command(Action::NextFocus | Action::PreviousFocus) => {
+            state.focus = match state.focus {
+                Focus::Main => Focus::Progress,
+                Focus::Progress => Focus::Main,
+            };
+        }
         Event::Command(Action::CycleLanguage) => {
             if !state.languages.is_empty() {
                 state.language_index = (state.language_index + 1) % state.languages.len();
+                state.detail_scroll = 0;
+                state.progress_scroll = 0;
                 return load_effect(state);
             }
         }
-        Event::Command(Action::Reload) => return load_effect(state),
-        Event::Command(Action::Help) => state.show_help = !state.show_help,
+        Event::Command(Action::Reload) => {
+            state.detail_scroll = 0;
+            state.progress_scroll = 0;
+            return load_effect(state);
+        }
+        Event::Command(Action::Help) => state.show_help = true,
         Event::Command(Action::Quit) => state.quit = true,
         Event::Loaded(operation, result) => {
             if state.active_operation != Some(operation) {
@@ -148,6 +190,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     data.assert_bounded();
                     state.data = *data;
                     restore_selection(state);
+                    state.detail_scroll = 0;
+                    state.progress_scroll = 0;
                     state.status = "Ready".to_string();
                     state.error = None;
                 }
@@ -196,8 +240,35 @@ mod tests {
         state
     }
 
+    fn load_scope(effects: Vec<Effect>) -> LoadScope {
+        let Effect::Load { scope, .. } = effects.into_iter().next().unwrap();
+        scope
+    }
+
     #[test]
-    fn menus_clamp_without_wrapping_and_empty_data_is_safe() {
+    fn load_scope_follows_screen_not_highlighted_set() {
+        let mut state = state();
+        assert_eq!(
+            load_scope(reduce(&mut state, Event::Command(Action::Reload))),
+            LoadScope::Global
+        );
+        assert_eq!(
+            load_scope(reduce(&mut state, Event::Command(Action::CycleLanguage))),
+            LoadScope::Global
+        );
+        reduce(&mut state, Event::Command(Action::Open));
+        assert_eq!(
+            load_scope(reduce(&mut state, Event::Command(Action::Reload))),
+            LoadScope::ProblemSet("a".into())
+        );
+        assert_eq!(
+            load_scope(reduce(&mut state, Event::Command(Action::Back))),
+            LoadScope::Global
+        );
+    }
+
+    #[test]
+    fn menus_clamp_and_progress_focus_routes_navigation() {
         let mut state = state();
         reduce(&mut state, Event::Command(Action::Up));
         assert_eq!(state.set_index, 0);
@@ -205,37 +276,19 @@ mod tests {
             reduce(&mut state, Event::Command(Action::Down));
         }
         assert_eq!(state.set_index, 1);
-        state.data = AppData::empty();
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        reduce(&mut state, Event::Command(Action::Up));
+        assert_eq!(state.set_index, 1);
+        reduce(&mut state, Event::Command(Action::Open));
+        assert_eq!(state.screen, Screen::SetMenu);
         reduce(&mut state, Event::Command(Action::Down));
-        assert_eq!(state.set_index, 0);
+        assert_eq!(state.progress_scroll, 1);
     }
 
     #[test]
-    fn reload_preserves_ids_and_ignores_stale_completion() {
-        let mut state = state();
-        state.set_index = 1;
-        state.selected_set_id = Some("b".into());
-        let first = reduce(&mut state, Event::Command(Action::Reload));
-        let second = reduce(&mut state, Event::Command(Action::Reload));
-        let Effect::Load { operation: old, .. } = first[0].clone();
-        reduce(
-            &mut state,
-            Event::Loaded(old, Ok(Box::new(AppData::empty()))),
-        );
-        assert_eq!(state.selected_set_id.as_deref(), Some("b"));
-        let Effect::Load { operation, .. } = second[0].clone();
-        let mut data = AppData::empty();
-        data.sets = state.data.sets.iter().cloned().rev().collect();
-        reduce(&mut state, Event::Loaded(operation, Ok(Box::new(data))));
-        assert_eq!(state.set_index, 0);
-        assert_eq!(state.selected_set_id.as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn open_back_language_and_quit_are_explicit() {
+    fn detail_scroll_is_bounded_and_resets_on_screen_changes() {
         let mut state = state();
         reduce(&mut state, Event::Command(Action::Open));
-        assert_eq!(state.screen, Screen::ProblemList);
         state.data.problems = vec![ProblemRow {
             id: 7,
             ordinal: Some(1),
@@ -246,12 +299,41 @@ mod tests {
             completed: false,
         }];
         reduce(&mut state, Event::Command(Action::Open));
-        assert_eq!(state.screen, Screen::ProblemDetail);
+        state.detail_scroll = MAX_SCROLL;
+        reduce(&mut state, Event::Command(Action::Down));
+        assert_eq!(state.detail_scroll, MAX_SCROLL);
         reduce(&mut state, Event::Command(Action::Back));
-        assert_eq!(state.screen, Screen::ProblemList);
-        reduce(&mut state, Event::Command(Action::CycleLanguage));
-        assert!(state.active_operation.is_some());
+        assert_eq!(state.detail_scroll, 0);
+    }
+
+    #[test]
+    fn help_is_modal() {
+        let mut state = state();
+        reduce(&mut state, Event::Command(Action::Help));
+        reduce(&mut state, Event::Command(Action::Down));
         reduce(&mut state, Event::Command(Action::Quit));
-        assert!(state.quit);
+        assert_eq!(state.set_index, 0);
+        assert!(!state.quit);
+        reduce(&mut state, Event::Command(Action::Back));
+        assert!(!state.show_help);
+    }
+
+    #[test]
+    fn stale_completion_is_ignored() {
+        let mut state = state();
+        let first = reduce(&mut state, Event::Command(Action::Reload));
+        let second = reduce(&mut state, Event::Command(Action::Reload));
+        let Effect::Load { operation: old, .. } = first[0].clone();
+        reduce(
+            &mut state,
+            Event::Loaded(old, Ok(Box::new(AppData::empty()))),
+        );
+        assert_eq!(state.selected_set_id.as_deref(), Some("a"));
+        let Effect::Load { operation, .. } = second[0].clone();
+        reduce(
+            &mut state,
+            Event::Loaded(operation, Ok(Box::new(AppData::empty()))),
+        );
+        assert!(state.active_operation.is_none());
     }
 }
