@@ -504,10 +504,17 @@ fn run_one(
         &cancellation,
         None,
     );
-    let signal_exit_code = signal_handlers.exit_code();
-    drop(signal_handlers);
-    let result = execution?;
+    let mut result = execution?;
+    if cancellation.is_cancelled() {
+        result.termination = runner::Termination::Cancelled;
+    }
     runner::record_execution(&context.connection, &plan, &result)?;
+    let signal_exit_code = if result.termination == runner::Termination::Cancelled {
+        signal_handlers.exit_code()
+    } else {
+        None
+    };
+    drop(signal_handlers);
     io::stderr()
         .write_all(result.display_output.as_bytes())
         .map_err(|error| format!("cannot write runner output: {error}"))?;

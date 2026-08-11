@@ -878,12 +878,15 @@ fn execute_command(
         }
     }
 
+    if cancellation.is_cancelled() {
+        requested_termination = Some(Termination::Cancelled);
+    }
     if requested_termination.is_none()
         && let Some(error) = pending_error.as_ref()
     {
         return Err(error.clone());
     }
-    let termination = if let Some(termination) = requested_termination {
+    let mut termination = if let Some(termination) = requested_termination {
         termination
     } else {
         termination_from_status(final_status.ok_or_else(|| {
@@ -893,6 +896,9 @@ fn execute_command(
     let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let (display_output, omitted_bytes) = retention.finish(spec.tagged_output);
     assert!(display_output.len() <= limits.display_output_bytes);
+    if cancellation.is_cancelled() {
+        termination = Termination::Cancelled;
+    }
     Ok(ExecutionResult {
         termination,
         display_output,
