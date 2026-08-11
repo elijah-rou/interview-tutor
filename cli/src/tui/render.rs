@@ -1,9 +1,13 @@
-use crate::app::model::{AppState, Focus, MAX_RENDERED_MARKDOWN_CHARS, MAX_ROWS, Screen};
+use crate::app::model::{
+    AppState, Focus, MAX_RENDERED_MARKDOWN_CHARS, MAX_ROWS, Screen, SolvePane,
+};
+use crate::editor::{Mode, highlight_line, highlight_style};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 fn block(title: &str) -> Block<'static> {
     Block::default()
@@ -67,9 +71,21 @@ fn header(state: &AppState) -> Paragraph<'static> {
         .languages
         .get(state.language_index)
         .map_or("none", |item| item.display_name.as_str());
+    let solve_badges = state.solve.as_ref().map_or(String::new(), |solve| {
+        format!(
+            "  {:?}{}{}",
+            solve.editor.mode,
+            if solve.editor.dirty() {
+                " · DIRTY"
+            } else {
+                " · SAVED"
+            },
+            if solve.stale { " · STALE" } else { "" }
+        )
+    });
     Paragraph::new(format!(
-        " Interview Tutor  Language: {language}  Progress: {}/{}  {}",
-        state.data.progress.completed, state.data.progress.total, state.status
+        " Interview Tutor  Language: {language}  Progress: {}/{}  {}{}",
+        state.data.progress.completed, state.data.progress.total, state.status, solve_badges
     ))
     .style(
         Style::default()
@@ -232,6 +248,152 @@ fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
     }
 }
 
+fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
+    let Some(solve) = &state.solve else { return };
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let start = if solve.editor.row >= solve.editor.viewport_row.saturating_add(visible) {
+        solve.editor.row.saturating_add(1).saturating_sub(visible)
+    } else {
+        solve.editor.viewport_row.min(solve.editor.row)
+    };
+    let visible_columns = usize::from(area.width.saturating_sub(2)).max(1);
+    let cursor_line = solve.editor.line(solve.editor.row);
+    let mut viewport_column = solve.editor.viewport_column.min(solve.editor.column);
+    while viewport_column < solve.editor.column {
+        let visible_prefix = cursor_line
+            .chars()
+            .skip(viewport_column)
+            .take(solve.editor.column - viewport_column)
+            .collect::<String>();
+        if UnicodeWidthStr::width(visible_prefix.as_str()) < visible_columns {
+            break;
+        }
+        viewport_column += 1;
+    }
+    let horizontal_scroll = UnicodeWidthStr::width(
+        cursor_line
+            .chars()
+            .take(viewport_column)
+            .collect::<String>()
+            .as_str(),
+    );
+    let lines = solve
+        .editor
+        .text()
+        .split('\n')
+        .skip(start)
+        .take(visible)
+        .map(|line| {
+            let spans = highlight_line(&solve.language, line)
+                .into_iter()
+                .map(|item| {
+                    Span::styled(
+                        line[item.start..item.end].to_string(),
+                        highlight_style(item.kind),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block(if solve.pane == SolvePane::Editor {
+                "Editor [active]"
+            } else {
+                "Editor"
+            }))
+            .scroll((0, u16::try_from(horizontal_scroll).unwrap_or(u16::MAX))),
+        area,
+    );
+    if solve.pane == SolvePane::Editor && matches!(solve.editor.mode, Mode::Insert | Mode::Normal) {
+        let visible_prefix = cursor_line
+            .chars()
+            .skip(viewport_column)
+            .take(solve.editor.column.saturating_sub(viewport_column))
+            .collect::<String>();
+        let cursor_width = UnicodeWidthStr::width(visible_prefix.as_str());
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(u16::try_from(cursor_width).unwrap_or(u16::MAX))
+            .min(area.right().saturating_sub(2));
+        let y = area
+            .y
+            .saturating_add(1)
+            .saturating_add(solve.editor.row.saturating_sub(start) as u16)
+            .min(area.bottom().saturating_sub(2));
+        frame.set_cursor_position((x, y));
+    }
+}
+fn solve_problem(state: &AppState) -> Paragraph<'static> {
+    let solve = state.solve.as_ref().unwrap();
+    Paragraph::new(markdown_text(&solve.statement))
+        .block(block(if solve.pane == SolvePane::Problem {
+            "Problem / Examples [active]"
+        } else {
+            "Problem / Examples"
+        }))
+        .wrap(Wrap { trim: false })
+        .scroll((solve.problem_scroll, 0))
+}
+fn solve_output(state: &AppState) -> Paragraph<'static> {
+    let solve = state.solve.as_ref().unwrap();
+    Paragraph::new(solve.output.clone())
+        .block(block(if solve.pane == SolvePane::Output {
+            "Output / Test [active]"
+        } else {
+            "Output / Test"
+        }))
+        .wrap(Wrap { trim: false })
+        .scroll((solve.output_scroll, 0))
+}
+fn solve_interview(state: &AppState) -> Paragraph<'static> {
+    let solve = state.solve.as_ref().unwrap();
+    Paragraph::new("Interview is offline until Stack 7.\nLocal edit, test, cancel, and submit remain available.").block(block(if solve.pane==SolvePane::Interview{"Interview [active]"}else{"Interview"})).wrap(Wrap{trim:true})
+}
+fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
+    let solve = state.solve.as_ref().unwrap();
+    if area.width >= 100 && area.height >= 28 {
+        let vertical =
+            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
+        let upper = Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(45),
+            Constraint::Percentage(25),
+        ])
+        .split(vertical[0]);
+        frame.render_widget(solve_problem(state), upper[0]);
+        solve_editor(frame, state, upper[1]);
+        frame.render_widget(solve_interview(state), upper[2]);
+        frame.render_widget(solve_output(state), vertical[1]);
+    } else {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
+        let panes = ["Editor", "Problem", "Output", "Interview"]
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+        let selected = match solve.pane {
+            SolvePane::Editor => 0,
+            SolvePane::Problem => 1,
+            SolvePane::Output => 2,
+            SolvePane::Interview => 3,
+        };
+        frame.render_widget(
+            Tabs::new(panes)
+                .select(selected)
+                .block(block("Solve panes")),
+            chunks[0],
+        );
+        match solve.pane {
+            SolvePane::Editor => solve_editor(frame, state, chunks[1]),
+            SolvePane::Problem => frame.render_widget(solve_problem(state), chunks[1]),
+            SolvePane::Output => frame.render_widget(solve_output(state), chunks[1]),
+            SolvePane::Interview => frame.render_widget(solve_interview(state), chunks[1]),
+        }
+    }
+}
+
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
     let vertical = Layout::default()
@@ -243,7 +405,12 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         ])
         .split(area);
     frame.render_widget(header(state), vertical[0]);
-    frame.render_widget(Paragraph::new(footer_text(area.width)), vertical[2]);
+    let footer = if state.screen == Screen::Solve {
+        "Ctrl-S/F5 save+test  F9 submit  Ctrl-C cancel  Tab panes  Space q quit"
+    } else {
+        footer_text(area.width)
+    };
+    frame.render_widget(Paragraph::new(footer), vertical[2]);
 
     if area.width < 60 || area.height < 20 {
         frame.render_widget(
@@ -256,6 +423,10 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
 
     let content = vertical[1];
+    if state.screen == Screen::Solve {
+        render_solve(frame, state, content);
+        return;
+    }
     if area.width >= 100 && area.height >= 30 {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -269,6 +440,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
             Screen::ProblemDetail => {
                 frame.render_widget(detail(state, columns[0].width), columns[0])
             }
+            Screen::Solve => unreachable!("solve rendered above"),
         }
         frame.render_widget(progress(state), columns[1]);
     } else {
@@ -287,6 +459,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 Screen::SetMenu => 0,
                 Screen::ProblemList => 1,
                 Screen::ProblemDetail => 2,
+                Screen::Solve => unreachable!("solve rendered above"),
             }
         };
         frame.render_widget(
@@ -304,6 +477,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 Screen::ProblemDetail => {
                     frame.render_widget(detail(state, chunks[1].width), chunks[1])
                 }
+                Screen::Solve => unreachable!("solve rendered above"),
             }
         }
     }
@@ -515,6 +689,60 @@ mod tests {
             .collect();
         state.progress_scroll = 6;
         assert!(rendered(&state, 80, 24).contains("topic-17"));
+    }
+
+    #[test]
+    fn solve_layouts_offline_placeholder_and_syntax_style() {
+        use crate::app::model::{SolvePane, SolveSession};
+        use crate::editor::EditorDocument;
+        use crate::runner::ExecutionPlan;
+        use std::path::PathBuf;
+        let mut state = AppState::new(Vec::new(), 0);
+        state.screen = Screen::Solve;
+        state.solve = Some(SolveSession {
+            problem_id: 1,
+            problem_slug: "p".into(),
+            problem_title: "P".into(),
+            statement: "Statement\nExample".into(),
+            language: "python".into(),
+            plan: ExecutionPlan {
+                root: PathBuf::from("/tmp"),
+                language: "python".into(),
+                problem_slug: "p".into(),
+                set_slug: None,
+                runner_path: PathBuf::from("/tmp/run"),
+                solution_path: PathBuf::from("/tmp/p.py"),
+            },
+            editor: EditorDocument::new("def solve():\n    return \"界\" # comment".into())
+                .unwrap(),
+            pane: SolvePane::Editor,
+            output: "compiler error".into(),
+            output_scroll: 0,
+            problem_scroll: 0,
+            running: None,
+            cancellation: None,
+            pending_save: None,
+            stale: false,
+            quit_after_save: false,
+        });
+        let full = rendered(&state, 120, 40);
+        assert!(full.contains("Problem / Examples"));
+        assert!(full.contains("compiler error"));
+        assert!(full.contains("Stack 7"));
+        let compact = rendered(&state, 80, 24);
+        assert!(compact.contains("Solve panes"));
+        assert!(compact.contains("def solve"));
+        assert!(rendered(&state, 59, 19).contains("Terminal too small"));
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let keyword = &terminal.backend().buffer()[(37, 2)];
+        assert_eq!(keyword.symbol(), "d");
+        assert_eq!(keyword.fg, Color::Magenta);
+        state.solve.as_mut().unwrap().editor =
+            EditorDocument::new(format!("{}END", "界".repeat(100))).unwrap();
+        state.solve.as_mut().unwrap().editor.normal('$').unwrap();
+        assert!(rendered(&state, 80, 24).contains("END"));
     }
 
     #[test]

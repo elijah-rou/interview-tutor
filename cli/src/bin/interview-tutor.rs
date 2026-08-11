@@ -48,7 +48,13 @@ fn run() -> Result<(), String> {
             .unwrap_or(0),
     };
     let state = AppState::new(languages, language_index);
-    tui::runtime::run(state, Repository::new(connection), cli.problem_set)
+    tui::runtime::run(
+        state,
+        Repository::new(connection),
+        cli.problem_set,
+        root,
+        database_path,
+    )
 }
 
 fn main() -> ExitCode {

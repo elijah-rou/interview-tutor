@@ -3,7 +3,9 @@ use crate::database::{
     self, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
     ProgressScope, RowLimit,
 };
+use crate::runner::{self, ExecutionPlan};
 use rusqlite::Connection;
+use std::path::Path;
 
 fn validate_chars(label: &str, value: &str, maximum: usize) -> Result<(), String> {
     let length = value.chars().count();
@@ -41,6 +43,22 @@ pub struct Repository {
 impl Repository {
     pub fn new(connection: Connection) -> Self {
         Self { connection }
+    }
+
+    pub fn prepare_execution(
+        &self,
+        root: &Path,
+        problem_slug: &str,
+        set_slug: Option<&str>,
+        language_slug: &str,
+    ) -> Result<ExecutionPlan, String> {
+        runner::plan_execution(
+            &self.connection,
+            root,
+            language_slug,
+            problem_slug,
+            set_slug,
+        )
     }
 
     pub fn load(

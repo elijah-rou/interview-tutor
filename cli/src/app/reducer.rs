@@ -1,5 +1,6 @@
-use super::effects::{Action, Effect, Event, LoadScope};
-use super::model::{AppState, Focus, MAX_SCROLL, OperationId, Screen};
+use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
+use super::model::{AppState, Focus, MAX_SCROLL, OperationId, Screen, SolvePane};
+use crate::editor::{EditorCommand, Mode};
 
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
     let Some(language_slug) = state.language_slug().map(str::to_string) else {
@@ -8,7 +9,8 @@ fn load_effect(state: &mut AppState) -> Vec<Effect> {
     };
     let scope = match state.screen {
         Screen::SetMenu => LoadScope::Global,
-        Screen::ProblemList | Screen::ProblemDetail => match &state.selected_set_id {
+        Screen::ProblemList | Screen::ProblemDetail | Screen::Solve => match &state.selected_set_id
+        {
             Some(slug) => LoadScope::ProblemSet(slug.clone()),
             None => LoadScope::Global,
         },
@@ -24,7 +26,7 @@ fn load_effect(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::Load {
         operation,
         scope,
-        problem_id: (state.screen == Screen::ProblemDetail)
+        problem_id: matches!(state.screen, Screen::ProblemDetail | Screen::Solve)
             .then_some(state.selected_problem_id)
             .flatten(),
         language_slug,
@@ -56,7 +58,262 @@ fn restore_selection(state: &mut AppState) {
         .map(|row| row.id);
 }
 
+fn next_operation(state: &mut AppState) -> OperationId {
+    let operation = OperationId(state.next_operation);
+    state.next_operation = state
+        .next_operation
+        .checked_add(1)
+        .expect("operation id overflow");
+    operation
+}
+
+fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
+    let Some(solve) = state.solve.as_mut() else {
+        return Vec::new();
+    };
+    match action {
+        Action::SaveTest | Action::Submit => {
+            let intent = if action == Action::Submit {
+                RunIntent::Submit
+            } else {
+                RunIntent::Test
+            };
+            if solve.running.is_some() {
+                if intent == RunIntent::Test {
+                    solve.pending_save =
+                        Some((solve.editor.generation, solve.editor.text().to_string()));
+                    state.status = "Test queued for newest generation".into();
+                } else {
+                    state.error = Some("a run is already active".into());
+                }
+                return Vec::new();
+            }
+            let operation = next_operation(state);
+            let solve = state.solve.as_mut().expect("solve exists");
+            let generation = solve.editor.generation;
+            solve.running = Some((operation, generation, intent));
+            state.status = if intent == RunIntent::Submit {
+                "Submitting…"
+            } else {
+                "Testing…"
+            }
+            .into();
+            vec![Effect::SaveRun {
+                operation,
+                plan: solve.plan.clone(),
+                source: solve.editor.text().to_string(),
+                generation,
+                write_source: solve.editor.dirty(),
+                intent,
+            }]
+        }
+        Action::Cancel => {
+            if let Some((operation, _, _)) = solve.running {
+                state.status = "Cancelling…".into();
+                vec![Effect::CancelRun { operation }]
+            } else {
+                Vec::new()
+            }
+        }
+        Action::Back => {
+            let effect = solve
+                .running
+                .map(|(operation, _, _)| Effect::CancelRun { operation });
+            state.solve = None;
+            state.screen = Screen::ProblemDetail;
+            state.status = "Ready".into();
+            let mut effects = effect.into_iter().collect::<Vec<_>>();
+            effects.push(Effect::LeaveSolve);
+            effects
+        }
+        Action::NextFocus | Action::PreviousFocus => {
+            let forward = action == Action::NextFocus;
+            solve.pane = match (solve.pane, forward) {
+                (SolvePane::Editor, true) => SolvePane::Problem,
+                (SolvePane::Problem, true) => SolvePane::Output,
+                (SolvePane::Output, true) => SolvePane::Interview,
+                (SolvePane::Interview, true) => SolvePane::Editor,
+                (SolvePane::Editor, false) => SolvePane::Interview,
+                (SolvePane::Interview, false) => SolvePane::Output,
+                (SolvePane::Output, false) => SolvePane::Problem,
+                (SolvePane::Problem, false) => SolvePane::Editor,
+            };
+            Vec::new()
+        }
+        Action::Editor(editor_action) if solve.pane == SolvePane::Editor => {
+            let result = match editor_action {
+                EditorAction::Normal(key) => solve.editor.normal(key),
+                EditorAction::Insert(character) => solve.editor.insert_char(character),
+                EditorAction::CommandChar(character) => {
+                    solve.editor.command_char(character);
+                    Ok(())
+                }
+                EditorAction::ExecuteCommand => match solve.editor.execute_command() {
+                    Ok(command) => {
+                        return solve_command(
+                            state,
+                            Action::Editor(EditorAction::Command(command)),
+                        );
+                    }
+                    Err(error) => {
+                        solve.editor.error = Some(error.clone());
+                        state.error = Some(error);
+                        Ok(())
+                    }
+                },
+                EditorAction::Escape => {
+                    solve.editor.mode = Mode::Normal;
+                    solve.editor.command_buffer.clear();
+                    Ok(())
+                }
+                EditorAction::Enter => solve.editor.enter(),
+                EditorAction::Backspace => solve.editor.backspace(),
+                EditorAction::CommandBackspace => {
+                    solve.editor.command_buffer.pop();
+                    Ok(())
+                }
+                EditorAction::Delete => solve.editor.delete(),
+                EditorAction::Left => solve.editor.normal('h'),
+                EditorAction::Right => solve.editor.normal('l'),
+                EditorAction::Up => solve.editor.normal('k'),
+                EditorAction::Down => solve.editor.normal('j'),
+                EditorAction::Redo => {
+                    solve.editor.redo();
+                    Ok(())
+                }
+                EditorAction::Command(command) => {
+                    let action = match command {
+                        EditorCommand::Write => Action::SaveTest,
+                        EditorCommand::WriteQuit => {
+                            solve.quit_after_save = true;
+                            Action::SaveTest
+                        }
+                        EditorCommand::Submit => Action::Submit,
+                        EditorCommand::Quit if solve.editor.dirty() => {
+                            state.error = Some("unsaved changes: use :wq".into());
+                            return Vec::new();
+                        }
+                        EditorCommand::Quit => Action::Back,
+                    };
+                    return solve_command(state, action);
+                }
+            };
+            if let Err(error) = result {
+                state.error = Some(error);
+            }
+            Vec::new()
+        }
+        Action::Up => {
+            match solve.pane {
+                SolvePane::Problem => solve.problem_scroll = solve.problem_scroll.saturating_sub(1),
+                SolvePane::Output => solve.output_scroll = solve.output_scroll.saturating_sub(1),
+                _ => {}
+            }
+            Vec::new()
+        }
+        Action::Down => {
+            match solve.pane {
+                SolvePane::Problem => solve.problem_scroll = solve.problem_scroll.saturating_add(1),
+                SolvePane::Output => solve.output_scroll = solve.output_scroll.saturating_add(1),
+                _ => {}
+            }
+            Vec::new()
+        }
+        Action::Quit
+            if solve.editor.mode != Mode::Insert
+                && solve.editor.mode != Mode::Command
+                && !solve.editor.dirty() =>
+        {
+            state.quit = true;
+            Vec::new()
+        }
+        Action::Quit if solve.editor.mode != Mode::Insert && solve.editor.mode != Mode::Command => {
+            state.error = Some("unsaved changes: use :wq or leave with Esc".into());
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
+    if state.screen == Screen::Solve {
+        match event {
+            Event::Command(action) => return solve_command(state, action),
+            Event::RunFinished(operation, generation, intent, saved, result) => {
+                let Some(solve) = state.solve.as_mut() else {
+                    return Vec::new();
+                };
+                if solve.running.map(|item| item.0) != Some(operation) {
+                    return Vec::new();
+                }
+                solve.running = None;
+                solve.cancellation = None;
+                if saved {
+                    solve.editor.mark_saved(generation);
+                    if solve.quit_after_save && generation == solve.editor.generation {
+                        state.quit = true;
+                    }
+                }
+                solve.quit_after_save = false;
+                match result {
+                    Ok(result) => {
+                        solve.stale = generation != solve.editor.generation;
+                        solve.bounded_output(format!(
+                            "{:?} ({} ms){}\n{}",
+                            result.termination,
+                            result.duration_ms,
+                            if solve.stale { " · STALE" } else { "" },
+                            result.display_output
+                        ));
+                        state.status = if solve.stale {
+                            "Run complete · stale"
+                        } else {
+                            "Run complete"
+                        }
+                        .into();
+                    }
+                    Err(error) => {
+                        solve.bounded_output(format!("Runner error: {error}"));
+                        state.status = "Run failed".into();
+                    }
+                }
+                if let Some((pending_generation, source)) = solve.pending_save.take() {
+                    let operation = next_operation(state);
+                    let solve = state.solve.as_mut().unwrap();
+                    solve.running = Some((operation, pending_generation, RunIntent::Test));
+                    return vec![Effect::SaveRun {
+                        operation,
+                        plan: solve.plan.clone(),
+                        source,
+                        generation: pending_generation,
+                        write_source: true,
+                        intent: RunIntent::Test,
+                    }];
+                }
+                if intent == RunIntent::Submit {
+                    return load_effect(state);
+                }
+                return Vec::new();
+            }
+            Event::Loaded(operation, result) => {
+                /* progress refresh after submit */
+                if state.active_operation != Some(operation) {
+                    return Vec::new();
+                }
+                state.active_operation = None;
+                match result {
+                    Ok(data) => {
+                        state.data = *data;
+                        state.status = "Submit recorded · progress refreshed".into();
+                        state.error = None
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+                return Vec::new();
+            }
+            Event::SolveOpened(_, _) | Event::OpenSet(_) => return Vec::new(),
+        }
+    }
     if state.show_help {
         match event {
             Event::Command(Action::Quit) => state.quit = true,
@@ -91,6 +348,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .map(|row| row.id);
             }
             Screen::ProblemDetail => state.detail_scroll = state.detail_scroll.saturating_sub(1),
+            Screen::Solve => unreachable!("solve events handled above"),
         },
         Event::Command(Action::Down) => match state.screen {
             Screen::SetMenu => {
@@ -114,6 +372,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             Screen::ProblemDetail => {
                 state.detail_scroll = state.detail_scroll.checked_add(1).unwrap_or(MAX_SCROLL);
             }
+            Screen::Solve => unreachable!("solve events handled above"),
         },
         Event::Command(Action::Open) if state.focus == Focus::Progress => {}
         Event::Command(Action::Open) => match state.screen {
@@ -137,7 +396,24 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     return load_effect(state);
                 }
             }
-            Screen::ProblemDetail => {}
+            Screen::ProblemDetail => {
+                let Some(problem_slug) =
+                    state.data.detail.as_ref().map(|detail| detail.slug.clone())
+                else {
+                    state.error = Some("problem detail is unavailable".into());
+                    return Vec::new();
+                };
+                let operation = next_operation(state);
+                state.active_operation = Some(operation);
+                state.status = "Loading source…".into();
+                return vec![Effect::OpenSolve {
+                    operation,
+                    problem_slug,
+                    set_slug: state.selected_set_id.clone(),
+                    language_slug: state.language_slug().unwrap_or("").to_string(),
+                }];
+            }
+            Screen::Solve => unreachable!("solve events handled above"),
         },
         Event::OpenSet(slug) => {
             state.selected_set_id = Some(slug);
@@ -159,6 +435,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     return load_effect(state);
                 }
                 Screen::SetMenu => {}
+                Screen::Solve => unreachable!("solve events handled above"),
             }
         }
         Event::Command(Action::NextFocus | Action::PreviousFocus) => {
@@ -182,6 +459,26 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
         Event::Command(Action::Help) => state.show_help = true,
         Event::Command(Action::Quit) => state.quit = true,
+        Event::Command(Action::SaveTest | Action::Submit | Action::Cancel | Action::Editor(_)) => {}
+        Event::SolveOpened(operation, result) => {
+            if state.active_operation != Some(operation) {
+                return Vec::new();
+            }
+            state.active_operation = None;
+            match result {
+                Ok(solve) => {
+                    state.solve = Some(*solve);
+                    state.screen = Screen::Solve;
+                    state.status = "Ready".into();
+                    state.error = None
+                }
+                Err(error) => {
+                    state.status = "Source load failed".into();
+                    state.error = Some(error)
+                }
+            }
+        }
+        Event::RunFinished(_, _, _, _, _) => {}
         Event::Loaded(operation, result) => {
             if state.active_operation != Some(operation) {
                 return Vec::new();
@@ -243,7 +540,9 @@ mod tests {
     }
 
     fn load_scope(effects: Vec<Effect>) -> LoadScope {
-        let Effect::Load { scope, .. } = effects.into_iter().next().unwrap();
+        let Effect::Load { scope, .. } = effects.into_iter().next().unwrap() else {
+            panic!("expected load effect")
+        };
         scope
     }
 
@@ -328,18 +627,153 @@ mod tests {
         assert!(state.quit);
     }
 
+    fn solve_state() -> AppState {
+        use crate::app::model::{SolvePane, SolveSession};
+        use crate::editor::EditorDocument;
+        use crate::runner::ExecutionPlan;
+        use std::path::PathBuf;
+        let mut state = state();
+        state.screen = Screen::Solve;
+        state.solve = Some(SolveSession {
+            problem_id: 1,
+            problem_slug: "p".into(),
+            problem_title: "P".into(),
+            statement: "Example".into(),
+            language: "python".into(),
+            plan: ExecutionPlan {
+                root: PathBuf::from("/tmp"),
+                language: "python".into(),
+                problem_slug: "p".into(),
+                set_slug: Some("a".into()),
+                runner_path: PathBuf::from("/tmp/run"),
+                solution_path: PathBuf::from("/tmp/p.py"),
+            },
+            editor: EditorDocument::new("print(1)".into()).unwrap(),
+            pane: SolvePane::Editor,
+            output: String::new(),
+            output_scroll: 0,
+            problem_scroll: 0,
+            running: None,
+            cancellation: None,
+            pending_save: None,
+            stale: false,
+            quit_after_save: false,
+        });
+        state
+    }
+
+    #[test]
+    fn solve_keeps_only_newest_pending_test_and_ignores_old_operation() {
+        let mut state = solve_state();
+        let first = reduce(&mut state, Event::Command(Action::SaveTest));
+        let Effect::SaveRun {
+            operation,
+            generation,
+            ..
+        } = first[0].clone()
+        else {
+            panic!("expected run")
+        };
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('x'))),
+        );
+        reduce(&mut state, Event::Command(Action::SaveTest));
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('y'))),
+        );
+        reduce(&mut state, Event::Command(Action::SaveTest));
+        assert_eq!(
+            state
+                .solve
+                .as_ref()
+                .unwrap()
+                .pending_save
+                .as_ref()
+                .unwrap()
+                .0,
+            2
+        );
+        reduce(
+            &mut state,
+            Event::RunFinished(
+                OperationId(999),
+                generation,
+                RunIntent::Test,
+                true,
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "ignored",
+                )),
+            ),
+        );
+        assert_eq!(state.solve.as_ref().unwrap().running.unwrap().0, operation);
+        let queued = reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                generation,
+                RunIntent::Test,
+                true,
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "PASS",
+                )),
+            ),
+        );
+        assert!(state.solve.as_ref().unwrap().stale);
+        let Effect::SaveRun { generation, .. } = queued[0] else {
+            panic!("expected queued run")
+        };
+        assert_eq!(generation, 2);
+    }
+
+    #[test]
+    fn solve_submit_intent_cancel_and_leave_cleanup_are_explicit() {
+        let mut state = solve_state();
+        let effects = reduce(&mut state, Event::Command(Action::Submit));
+        let Effect::SaveRun {
+            operation, intent, ..
+        } = effects[0]
+        else {
+            panic!("expected submit")
+        };
+        assert_eq!(intent, RunIntent::Submit);
+        let cancel = reduce(&mut state, Event::Command(Action::Cancel));
+        assert!(
+            matches!(cancel.as_slice(),[Effect::CancelRun{operation: cancelled}] if *cancelled==operation)
+        );
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::LeaveSolve))
+        );
+        assert!(state.solve.is_none());
+        assert_eq!(state.screen, Screen::ProblemDetail);
+    }
+
     #[test]
     fn stale_completion_is_ignored() {
         let mut state = state();
         let first = reduce(&mut state, Event::Command(Action::Reload));
         let second = reduce(&mut state, Event::Command(Action::Reload));
-        let Effect::Load { operation: old, .. } = first[0].clone();
+        let Effect::Load { operation: old, .. } = first[0].clone() else {
+            panic!("expected load effect")
+        };
         reduce(
             &mut state,
             Event::Loaded(old, Ok(Box::new(AppData::empty()))),
         );
         assert_eq!(state.selected_set_id.as_deref(), Some("a"));
-        let Effect::Load { operation, .. } = second[0].clone();
+        let Effect::Load { operation, .. } = second[0].clone() else {
+            panic!("expected load effect")
+        };
         reduce(
             &mut state,
             Event::Loaded(operation, Ok(Box::new(AppData::empty()))),

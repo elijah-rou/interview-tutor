@@ -29,6 +29,10 @@ cd python && ./run two-sum
 cd rust && ./run two-sum
 ```
 
+## Interview TUI
+
+`./interview` opens the local catalog browser and bounded native solve editor. Save/test never records progress; explicit submit records one attempt. The Interview pane remains offline until Stack 7. See [docs/interview-tui.md](docs/interview-tui.md) for exact keys, limits, responsive layout, and cancellation semantics.
+
 ## Browse sets and progress
 
 ```console
