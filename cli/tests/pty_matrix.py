@@ -469,7 +469,7 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
 
         session.send(F9)
         wait_turns(session, home, 5)
-        session.wait_screen("Submission review:")
+        session.wait_screen("Submission review · recorded")
         attempts = query_attempts(database)
         assert attempts == [("pass", 0)], attempts
         session.send(b" r")
@@ -575,7 +575,7 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.send(b"\t")
         session.wait_screen("Interview [active]")
         wait_turn_completion(session, home, 7)
-        session.wait_screen("Submission review:")
+        session.wait_screen("Submission review · recorded revision")
         expected_sequence = [
             (
                 "interviewer",

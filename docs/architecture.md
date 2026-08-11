@@ -29,7 +29,7 @@ Database open validates the catalog before use, enables a 5-second SQLite busy t
 
 ## Control plane and data plane
 
-Control messages are small, typed values: selectors, `ExecutionPlan`, operation ID, source revision, run intent, cancellation token, and reducer effects/events. They determine which immutable snapshot an operation owns. Stale operation IDs are ignored; a stale source revision may be displayed but cannot describe the current buffer or enter a Codex transcript.
+Control messages are small, typed values: selectors, `ExecutionPlan`, operation ID, source revision, run intent, cancellation token, and reducer effects/events. They determine which immutable snapshot an operation owns. Stale operation IDs are ignored. Interviewer and hint responses for stale source revisions cannot describe the current buffer or enter a Codex transcript; submission review is explicitly labeled and retained as feedback on its matching recorded revision.
 
 Data values are explicitly bounded at ingress: statement/source text, source snapshots, stdout/stderr chunks, rendered output, composer text, protocol lines, assistant responses, transcript entries, and temporary submitted-source copies. The TUI never parses CLI tables. The local runner never writes progress. Codex never executes the language adapter and cannot mark a problem complete.
 
@@ -39,9 +39,9 @@ The main thread owns `AppState`, the primary SQLite connection, Crossterm/Ratatu
 
 - One runner worker has a command channel of 2 and event channel of 64. It serializes source save, synchronous execute, and optional attempt record/finalization. App state retains at most the newest queued save/test; submit is rejected while a run is active.
 - During execution, the local runner creates at most two pipe reader threads. Their bounded channel uses the configured event capacity (64 by default). The coordinator continuously drains into sanitized bounded retention. Optional caller progress uses nonblocking `try_send`; full/disconnected consumers increment a drop count and cannot delay cleanup. All reader threads are joined.
-- One Codex worker has a command channel of 2 and event channel of 64. It owns one app-server process/session and serializes connect/turn/reset. The process reader channel holds 64 protocol messages, and pending request IDs are capped at 16. Interviewer/reviewer and hinter use two separate ephemeral app-server conversation threads; these are protocol resources, not additional application authority.
+- One Codex worker has a command channel of 2 and event channel of 64. It owns one app-server process/session and serializes connect/turn/reset. The process reader channel holds 64 protocol messages, and pending request IDs are capped at 16. Interviewer/reviewer and hinter use two separate ephemeral app-server conversation threads; these are protocol resources, not additional application authority. Application state can retain one newest recorded-submission review while Codex is busy or reconnecting; replacement and reset are deterministic.
 
-Worker events carry operation/revision/role identity. A Codex response is held pending until the reducer explicitly accepts the matching current turn; cancellation, edit, reset, or stale identity discards it before transcript commit. Both workers are cancelled and joined before terminal restoration.
+Worker events carry operation/revision/role identity. A Codex response is held pending until the reducer explicitly accepts the matching turn. Interviewer and hint turns also require the current editor revision; submission review instead remains bound to its recorded revision and is labeled accordingly. Cancellation, reset, or stale operation/role identity discards a response before transcript commit. Both workers are cancelled and joined before terminal restoration.
 
 ## Resource bounds
 

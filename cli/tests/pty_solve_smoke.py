@@ -94,6 +94,24 @@ def wait_for_turn_count(master: int, process: subprocess.Popen[bytes], output: b
             raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
 
 
+def wait_for_attempt_count(master: int, process: subprocess.Popen[bytes], output: bytearray, database: Path, count: int, deadline: float) -> None:
+    attempts = 0
+    while attempts < count:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {count} attempts; tail={bytes(output[-3000:])!r}")
+        with sqlite3.connect(database) as connection:
+            attempts = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+        readable, _, _ = select.select([master], [], [], 0.05)
+        if readable:
+            try:
+                output.extend(os.read(master, 65536))
+            except OSError:
+                pass
+        if process.poll() is not None:
+            raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
+    assert attempts == count, attempts
+
+
 def turn_payload(turn: dict) -> dict:
     text = turn["params"]["input"][0]["text"]
     return json.loads(text.split("INPUT_JSON:", 1)[1])
@@ -130,7 +148,7 @@ def main() -> int:
         database = root / "smoke.db"
         codex_home = root / "codex-home"
         codex_home.mkdir(mode=0o700)
-        (codex_home / "fake-mode").write_text("normal")
+        (codex_home / "fake-mode").write_text("hold-interviewer")
         capture = codex_home / "fake-capture.jsonl"
         env = os.environ.copy()
         env["PRACTICE_ROOT"] = str(root)
@@ -158,33 +176,50 @@ def main() -> int:
 
             os.write(master, b"Why this invariant?\r")
             wait_for_turn_count(master, process, output, capture, 1, deadline)
-            wait_for(master, process, output, b"Interviewer:", deadline)
-            os.write(master, b" h")
-            wait_for_turn_count(master, process, output, capture, 2, deadline)
-            wait_for(master, process, output, b"Hinter:", deadline)
+            held = codex_home / "fake-held-turn"
+            while not held.exists():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("fake interviewer turn was not held")
+                time.sleep(0.01)
+
             os.write(master, b"\x1b[20~")
-            wait_for_turn_count(master, process, output, capture, 3, deadline)
-            wait_for(master, process, output, b"Submission review", deadline)
+            wait_for_attempt_count(master, process, output, database, 1, deadline)
+            assert len(captured_turns(capture)) == 1
+            edit_mark = len(output)
+            os.write(master, b"\tiX\x1b")
+            wait_for_after(master, process, output, edit_mark, b"Xprint", deadline)
+            assert solution.read_text() == recorded_source
+            (codex_home / "fake-release-turn").write_text("release")
+
+            wait_for_turn_count(master, process, output, capture, 2, deadline)
+            wait_for(master, process, output, b"RECORDED_SUBMISSION_REVIEW", deadline)
+            wait_for(
+                master,
+                process,
+                output,
+                b"Submission review \xc2\xb7 recorded",
+                deadline,
+            )
+            wait_for(master, process, output, b"revision 0:", deadline)
             with sqlite3.connect(database) as connection:
                 attempts = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
             assert attempts == 1, attempts
 
             turns = captured_turns(capture)
-            assert len(turns) == 3, len(turns)
+            assert len(turns) == 2, len(turns)
             payloads = [turn_payload(turn) for turn in turns]
             expected_fields = {"statement", "source", "latestTestOutput", "transcript", "userQuestion"}
             assert all(set(payload) == expected_fields for payload in payloads)
             assert payloads[0]["userQuestion"] == "Why this invariant?"
-            assert payloads[1]["transcript"] == ""
-            assert payloads[2]["source"] == recorded_source
-            assert payloads[2]["userQuestion"] == ""
-            assert turns[0]["params"]["threadId"] == turns[2]["params"]["threadId"]
-            assert turns[0]["params"]["threadId"] != turns[1]["params"]["threadId"]
+            assert payloads[1]["source"] == recorded_source
+            assert payloads[1]["source"] != "X" + recorded_source
+            assert payloads[1]["userQuestion"] == ""
+            assert turns[0]["params"]["threadId"] == turns[1]["params"]["threadId"]
 
             mark = len(output)
-            os.write(master, b" r")
+            os.write(master, b"\t\t\t r")
             wait_for_after(master, process, output, mark, b"offline \xc2\xb7 memory", deadline)
-            os.write(master, b"\t q")
+            os.write(master, b"\t q q")
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
             assert process.returncode == 0, process.returncode
         finally:
@@ -194,7 +229,7 @@ def main() -> int:
         process_cwds = [Path(record["cwd"]) for record in records if record.get("kind") == "process"]
         assert process_cwds and all(not cwd.exists() for cwd in process_cwds)
         persisted = database.read_bytes() + solution.read_bytes()
-        for transcript_text in [b"Why this invariant?", b"What invariant holds?", b"Level 1 invariant", b"Submission reviewed"]:
+        for transcript_text in [b"Why this invariant?", b"What invariant holds?", b"Level 1 invariant", b"Submission reviewed", b"RECORDED_SUBMISSION_REVIEW"]:
             assert transcript_text not in persisted
 
         master, process, output = launch(interview_binary, database, env)
@@ -205,9 +240,10 @@ def main() -> int:
             assert b"What invariant holds?" not in output
             assert b"Level 1 invariant" not in output
             assert b"Submission reviewed" not in output
+            assert b"RECORDED_SUBMISSION_REVIEW" not in output
             os.write(master, b"i")
             wait_for(master, process, output, b"Privacy disclosure", deadline)
-            assert len(captured_turns(capture)) == 3
+            assert len(captured_turns(capture)) == 2
             os.write(master, b"n\t q")
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
             assert process.returncode == 0, process.returncode
@@ -216,7 +252,7 @@ def main() -> int:
 
         assert solution.read_text() == recorded_source
         assert time.monotonic() - started <= 20
-        print("fake_turns=3 attempts=1 transcript_after_relaunch=0")
+        print("fake_turns=2 attempts=1 recorded_revision=0 transcript_after_relaunch=0")
     return 0
 
 

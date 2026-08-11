@@ -1,7 +1,7 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
 use super::model::{
     AppState, CodexStatus, DiscardAction, Focus, MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId,
-    Screen, SolvePane,
+    RecordedSubmissionReview, Screen, SolvePane,
 };
 use crate::codex::prompt::Mode as CodexMode;
 use crate::editor::{EditorCommand, Mode};
@@ -78,6 +78,67 @@ fn start_codex_connect(state: &mut AppState) -> Vec<Effect> {
     state.codex.status = CodexStatus::Connecting;
     state.error = None;
     vec![Effect::ConnectCodex { operation }]
+}
+
+fn codex_output_tail(output: &str) -> String {
+    output
+        .chars()
+        .rev()
+        .take(16 * 1024)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn dispatch_pending_submission_review(state: &mut AppState) -> Vec<Effect> {
+    if !state.codex.enabled
+        || !state.codex.disclosure_accepted
+        || !matches!(
+            state.codex.status,
+            CodexStatus::Ready | CodexStatus::Feedback
+        )
+    {
+        return Vec::new();
+    }
+    let Some(review) = state.codex.pending_submission_review.take() else {
+        return Vec::new();
+    };
+    let operation = next_operation(state);
+    let revision = review.revision;
+    let solve = state.solve.as_ref().expect("solve exists");
+    let effect = Effect::CodexTurn {
+        operation,
+        revision,
+        mode: CodexMode::SubmissionReview,
+        statement: solve.statement.clone(),
+        source: review.source().to_string(),
+        output: review.output().to_string(),
+        question: String::new(),
+        solved: true,
+    };
+    state.codex.status = CodexStatus::Thinking;
+    state.codex.active = Some((operation, revision, CodexMode::SubmissionReview));
+    state.status = format!("Reviewing recorded revision {revision}…");
+    vec![effect]
+}
+
+fn finalize_codex_turn_and_dispatch_review(
+    state: &mut AppState,
+    operation: OperationId,
+    revision: u64,
+    mode: CodexMode,
+    accepted: bool,
+) -> Vec<Effect> {
+    let mut effects = dispatch_pending_submission_review(state);
+    // Effects execute from the end, so finalization reaches the worker before a queued review.
+    effects.push(Effect::FinalizeCodexTurn {
+        operation,
+        revision,
+        mode,
+        accepted,
+    });
+    effects
 }
 
 fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
@@ -186,15 +247,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 mode: CodexMode::Interviewer,
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
-                output: solve
-                    .output
-                    .chars()
-                    .rev()
-                    .take(16 * 1024)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect(),
+                output: codex_output_tail(&solve.output),
                 question,
                 solved: state.codex.submission_recorded,
             }]
@@ -226,15 +279,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 mode: CodexMode::Hint(level),
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
-                output: solve
-                    .output
-                    .chars()
-                    .rev()
-                    .take(16 * 1024)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect(),
+                output: codex_output_tail(&solve.output),
                 question: String::new(),
                 solved: false,
             }]
@@ -493,9 +538,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Ok(()) => {
                         state.codex.status = CodexStatus::Ready;
                         state.error = None;
+                        return dispatch_pending_submission_review(state);
                     }
                     Err(error) if error.contains("authentication required") => {
                         state.codex.status = CodexStatus::AuthRequired;
+                        state.codex.pending_submission_review = None;
                         state.error = Some(error);
                     }
                     Err(error) => {
@@ -529,7 +576,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     }
                 };
                 let current_revision = state.solve.as_ref().expect("solve exists").editor.revision;
-                if current_revision != revision {
+                if mode != CodexMode::SubmissionReview && current_revision != revision {
                     state.codex.status = if state.codex.messages.len() > 1 {
                         CodexStatus::Feedback
                     } else {
@@ -538,29 +585,25 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     state.error = Some(
                         "Codex response ignored because the source changed during the turn".into(),
                     );
-                    return vec![Effect::FinalizeCodexTurn {
-                        operation,
-                        revision,
-                        mode,
-                        accepted: false,
-                    }];
+                    return finalize_codex_turn_and_dispatch_review(
+                        state, operation, revision, mode, false,
+                    );
                 }
                 let label = match mode {
-                    CodexMode::Interviewer => "Interviewer",
-                    CodexMode::Hint(_) => "Hinter",
-                    CodexMode::SubmissionReview => "Submission review",
+                    CodexMode::Interviewer => "Interviewer".to_string(),
+                    CodexMode::Hint(_) => "Hinter".to_string(),
+                    CodexMode::SubmissionReview => {
+                        format!("Submission review · recorded revision {revision}")
+                    }
                 };
                 if matches!(mode, CodexMode::Hint(_)) {
                     state.codex.hint_count = state.codex.hint_count.saturating_add(1);
                 }
-                state.codex.push_message(label.into(), message);
+                state.codex.push_message(label, message);
                 state.codex.status = CodexStatus::Feedback;
-                return vec![Effect::FinalizeCodexTurn {
-                    operation,
-                    revision,
-                    mode,
-                    accepted: true,
-                }];
+                return finalize_codex_turn_and_dispatch_review(
+                    state, operation, revision, mode, true,
+                );
             }
             Event::CodexDisconnected(error) => {
                 state.codex.connecting = None;
@@ -634,41 +677,60 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 if intent == RunIntent::Submit && succeeded {
                     solve.refresh_after_submit = true;
                     state.codex.submission_recorded = true;
-                    let codex_ready = state.codex.disclosure_accepted
+                    let source = submitted_source
+                        .expect("successful matching submit retains its captured source");
+                    let output = codex_output_tail(&solve.output);
+                    let review_allowed = state.codex.enabled
+                        && state.codex.disclosure_accepted
                         && matches!(
                             state.codex.status,
-                            CodexStatus::Ready | CodexStatus::Feedback
+                            CodexStatus::Offline
+                                | CodexStatus::Connecting
+                                | CodexStatus::Ready
+                                | CodexStatus::Thinking
+                                | CodexStatus::Feedback
+                                | CodexStatus::Disconnected
+                                | CodexStatus::ProtocolError
                         );
-                    let review = match (codex_ready, submitted_source) {
-                        (true, Some(source)) => {
-                            let operation = next_operation(state);
-                            let solve = state.solve.as_ref().expect("solve exists");
-                            state.codex.status = CodexStatus::Thinking;
-                            state.codex.active =
-                                Some((operation, revision, CodexMode::SubmissionReview));
-                            Some(Effect::CodexTurn {
-                                operation,
-                                revision,
-                                mode: CodexMode::SubmissionReview,
-                                statement: solve.statement.clone(),
-                                source,
-                                output: solve
-                                    .output
-                                    .chars()
-                                    .rev()
-                                    .take(16 * 1024)
-                                    .collect::<String>()
-                                    .chars()
-                                    .rev()
-                                    .collect(),
-                                question: String::new(),
-                                solved: true,
-                            })
+                    let replaced = if review_allowed {
+                        let replaced = state
+                            .codex
+                            .pending_submission_review
+                            .replace(RecordedSubmissionReview::new(revision, source, output))
+                            .is_some();
+                        if replaced {
+                            state
+                                .codex
+                                .pending_submission_review
+                                .as_mut()
+                                .expect("newest review inserted")
+                                .replaced_older = true;
                         }
-                        (false, _) | (true, None) => None,
+                        replaced
+                    } else {
+                        false
                     };
                     let mut effects = load_effect(state);
-                    effects.extend(review);
+                    effects.extend(dispatch_pending_submission_review(state));
+                    if let Some(review) = state.codex.pending_submission_review.as_ref() {
+                        state.status = if replaced {
+                            format!(
+                                "Submit recorded · queued review replaced by recorded revision {}",
+                                review.revision
+                            )
+                        } else {
+                            format!(
+                                "Submit recorded · review queued for recorded revision {}",
+                                review.revision
+                            )
+                        };
+                    } else if let Some((_, review_revision, CodexMode::SubmissionReview)) =
+                        state.codex.active
+                    {
+                        state.status = format!(
+                            "Submit recorded · reviewing recorded revision {review_revision}"
+                        );
+                    }
                     return effects;
                 }
                 return start_pending_test(state);
@@ -682,7 +744,29 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 match result {
                     Ok(data) => {
                         state.data = *data;
-                        state.status = "Submit recorded · progress refreshed".into();
+                        state.status = if let Some(review) =
+                            state.codex.pending_submission_review.as_ref()
+                        {
+                            if review.replaced_older {
+                                format!(
+                                    "Submit recorded · progress refreshed · queued review replaced by recorded revision {}",
+                                    review.revision
+                                )
+                            } else {
+                                format!(
+                                    "Submit recorded · progress refreshed · review queued for recorded revision {}",
+                                    review.revision
+                                )
+                            }
+                        } else if let Some((_, revision, CodexMode::SubmissionReview)) =
+                            state.codex.active
+                        {
+                            format!(
+                                "Submit recorded · progress refreshed · reviewing recorded revision {revision}"
+                            )
+                        } else {
+                            "Submit recorded · progress refreshed".into()
+                        };
                         state.error = None;
                     }
                     Err(error) => {
@@ -1085,6 +1169,33 @@ mod tests {
             submitted_source: None,
         });
         state
+    }
+
+    fn finish_successful_submit(state: &mut AppState, output: &str) -> Vec<Effect> {
+        let submit = reduce(state, Event::Command(Action::Submit));
+        let Effect::SaveRun {
+            operation,
+            revision,
+            source,
+            intent: RunIntent::Submit,
+            ..
+        } = submit[0].clone()
+        else {
+            panic!("expected submit")
+        };
+        reduce(
+            state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Submit,
+                Some(source),
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    output,
+                )),
+            ),
+        )
     }
 
     #[test]
@@ -1658,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn submission_review_uses_successfully_recorded_source_even_after_edit() {
+    fn submission_review_dispatch_and_completion_stay_bound_to_recorded_revision_after_edit() {
         let mut state = solve_state();
         state.codex.disclosure_accepted = true;
         state.codex.status = CodexStatus::Ready;
@@ -1672,15 +1783,6 @@ mod tests {
         else {
             panic!("expected submit")
         };
-        reduce(
-            &mut state,
-            Event::Command(Action::Editor(EditorAction::Normal('i'))),
-        );
-        reduce(
-            &mut state,
-            Event::Command(Action::Editor(EditorAction::Insert('x'))),
-        );
-
         let effects = reduce(
             &mut state,
             Event::RunFinished(
@@ -1694,22 +1796,231 @@ mod tests {
                 )),
             ),
         );
-        let review = effects
+        let (review_operation, review_revision, review_source) = effects
             .iter()
             .find_map(|effect| match effect {
                 Effect::CodexTurn {
+                    operation,
                     revision,
                     mode: CodexMode::SubmissionReview,
                     source,
                     ..
-                } => Some((*revision, source)),
+                } => Some((*operation, *revision, source.clone())),
                 _ => None,
             })
             .expect("submission review");
-        assert_eq!(review.0, revision);
-        assert_eq!(review.1, &submitted_source);
-        assert_ne!(review.1, state.solve.as_ref().unwrap().editor.text());
+        assert_eq!(review_revision, revision);
+        assert_eq!(review_source, submitted_source);
+
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('x'))),
+        );
+        assert_ne!(review_source, state.solve.as_ref().unwrap().editor.text());
+        let completion = reduce(
+            &mut state,
+            Event::CodexFinished(
+                review_operation,
+                review_revision,
+                CodexMode::SubmissionReview,
+                Ok("recorded result passes".into()),
+            ),
+        );
+        assert!(matches!(
+            completion.as_slice(),
+            [Effect::FinalizeCodexTurn { accepted: true, .. }]
+        ));
+        assert_eq!(
+            state.codex.messages.last(),
+            Some(&(
+                format!("Submission review · recorded revision {review_revision}"),
+                "recorded result passes".into()
+            ))
+        );
         assert!(state.solve.as_ref().unwrap().submitted_source.is_none());
+    }
+
+    #[test]
+    fn successful_submit_queues_behind_turn_and_connect_then_dispatches_first() {
+        let mut turning = solve_state();
+        turning.codex.disclosure_accepted = true;
+        turning.codex.status = CodexStatus::Thinking;
+        turning.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        let effects = finish_successful_submit(&mut turning, "TURN-BUSY");
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::CodexTurn { .. }))
+        );
+        assert_eq!(
+            turning
+                .codex
+                .pending_submission_review
+                .as_ref()
+                .map(|review| review.revision),
+            Some(0)
+        );
+        let completion = reduce(
+            &mut turning,
+            Event::CodexFinished(
+                OperationId(90),
+                0,
+                CodexMode::Interviewer,
+                Ok("question complete".into()),
+            ),
+        );
+        assert!(matches!(
+            completion.as_slice(),
+            [
+                Effect::CodexTurn {
+                    mode: CodexMode::SubmissionReview,
+                    revision: 0,
+                    ..
+                },
+                Effect::FinalizeCodexTurn {
+                    mode: CodexMode::Interviewer,
+                    accepted: true,
+                    ..
+                }
+            ]
+        ));
+        assert!(reduce(&mut turning, Event::Command(Action::Hint)).is_empty());
+
+        let mut connecting = solve_state();
+        connecting.codex.disclosure_accepted = true;
+        connecting.codex.status = CodexStatus::Connecting;
+        connecting.codex.connecting = Some(OperationId(91));
+        finish_successful_submit(&mut connecting, "CONNECTING");
+        let connected = reduce(
+            &mut connecting,
+            Event::CodexConnected(OperationId(91), Ok(())),
+        );
+        assert!(matches!(
+            connected.as_slice(),
+            [Effect::CodexTurn {
+                mode: CodexMode::SubmissionReview,
+                revision: 0,
+                ..
+            }]
+        ));
+        assert_eq!(connecting.codex.status, CodexStatus::Thinking);
+    }
+
+    #[test]
+    fn newest_queued_submission_replaces_older_and_reset_or_exit_clears_it() {
+        let mut state = solve_state();
+        state.codex.disclosure_accepted = true;
+        state.codex.status = CodexStatus::Thinking;
+        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        finish_successful_submit(&mut state, "FIRST");
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('x'))),
+        );
+        let second_effects = finish_successful_submit(&mut state, "SECOND");
+        let reload_operation = second_effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Load { operation, .. } => Some(*operation),
+                _ => None,
+            })
+            .expect("progress reload");
+        let pending = state
+            .codex
+            .pending_submission_review
+            .as_ref()
+            .expect("newest review queued");
+        assert_eq!(pending.revision, 1);
+        assert_eq!(pending.source(), "xprint(1)");
+        assert!(pending.output().contains("SECOND"));
+        assert!(state.status.contains("queued review replaced"));
+        reduce(
+            &mut state,
+            Event::Loaded(reload_operation, Ok(Box::new(AppData::empty()))),
+        );
+        assert!(state.status.contains("queued review replaced"));
+
+        reduce(&mut state, Event::Command(Action::ResetInterview));
+        assert!(state.codex.pending_submission_review.is_none());
+        state.codex.pending_submission_review = Some(RecordedSubmissionReview::new(
+            1,
+            "private".into(),
+            "output".into(),
+        ));
+        reduce(&mut state, Event::Command(Action::Back));
+        reduce(&mut state, Event::Command(Action::Back));
+        assert!(state.codex.pending_submission_review.is_none());
+        assert!(state.solve.is_none());
+    }
+
+    #[test]
+    fn queued_submission_survives_turn_failure_and_dispatches_after_reconnect() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.disclosure_accepted = true;
+        state.codex.status = CodexStatus::Thinking;
+        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        finish_successful_submit(&mut state, "RECORDED");
+        let failed = reduce(
+            &mut state,
+            Event::CodexFinished(
+                OperationId(90),
+                0,
+                CodexMode::Interviewer,
+                Err("turn failed".into()),
+            ),
+        );
+        assert!(matches!(
+            failed.as_slice(),
+            [Effect::FinalizeCodexTurn {
+                accepted: false,
+                ..
+            }]
+        ));
+        assert!(state.codex.pending_submission_review.is_some());
+        let reconnect = reduce(&mut state, Event::Command(Action::InterviewFocus));
+        let Effect::ConnectCodex { operation } = reconnect[0] else {
+            panic!("expected reconnect")
+        };
+        let review = reduce(&mut state, Event::CodexConnected(operation, Ok(())));
+        assert!(matches!(
+            review.as_slice(),
+            [Effect::CodexTurn {
+                mode: CodexMode::SubmissionReview,
+                source,
+                output,
+                ..
+            }] if source == "print(1)" && output.contains("RECORDED")
+        ));
+    }
+
+    #[test]
+    fn terminal_codex_states_never_queue_or_send_submission_review() {
+        for status in [
+            CodexStatus::Disabled,
+            CodexStatus::Declined,
+            CodexStatus::AuthRequired,
+        ] {
+            let mut state = solve_state();
+            state.codex.enabled = status != CodexStatus::Disabled;
+            state.codex.disclosure_accepted = true;
+            state.codex.status = status;
+            let effects = finish_successful_submit(&mut state, "PASS");
+            assert!(state.codex.pending_submission_review.is_none());
+            assert!(
+                effects
+                    .iter()
+                    .all(|effect| !matches!(effect, Effect::CodexTurn { .. }))
+            );
+        }
     }
 
     #[test]
