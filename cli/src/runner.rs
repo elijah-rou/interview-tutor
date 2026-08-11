@@ -134,6 +134,20 @@ pub struct ExecutionResult {
 }
 
 impl ExecutionResult {
+    #[cfg(test)]
+    pub(crate) fn test_result(termination: Termination, output: &str) -> Self {
+        Self {
+            termination,
+            display_output: output.to_string(),
+            omitted_bytes: 0,
+            dropped_events: 0,
+            duration_ms: 1,
+            discovery_stdout: None,
+            discovery_stderr: None,
+            discovery_stdout_truncated: false,
+        }
+    }
+
     pub fn exit_code(&self) -> Option<i32> {
         match self.termination {
             Termination::Exited(code) => Some(code),
