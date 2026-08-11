@@ -433,6 +433,9 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
         state.codex.status.label()
     ))];
     match state.codex.status {
+        crate::app::model::CodexStatus::Disabled => lines.push(Line::from(
+            "Codex is Disabled. Local editor, tests, and submission remain available.",
+        )),
         crate::app::model::CodexStatus::Disclosure => {
             lines.push(Line::from("Privacy disclosure"));
             lines.push(Line::from(
@@ -932,6 +935,11 @@ mod tests {
     fn interview_disclosure_and_labels_render_at_supported_sizes() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.disable_codex();
+        let disabled = rendered(&state, 120, 40);
+        assert!(disabled.contains("Codex Disabled"));
+
+        state.codex.enabled = true;
         state.codex.status = crate::app::model::CodexStatus::Disclosure;
         let disclosure = rendered(&state, 120, 40);
         assert!(disclosure.contains("Privacy disclosure"));
@@ -988,6 +996,7 @@ mod tests {
     fn solve_header_preserves_exact_codex_state_and_memory_badge_at_supported_widths() {
         let mut state = solve_state();
         for status in [
+            crate::app::model::CodexStatus::Disabled,
             crate::app::model::CodexStatus::Offline,
             crate::app::model::CodexStatus::AuthRequired,
             crate::app::model::CodexStatus::Ready,

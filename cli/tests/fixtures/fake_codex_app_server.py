@@ -24,6 +24,9 @@ def spawn_escaped_pipe_holder(pid_name):
 
 
 if "--version" in sys.argv:
+    if codex_home:
+        with open(os.path.join(codex_home, "fake-version-probe"), "a", encoding="utf-8") as file:
+            file.write("version\n")
     if mode == "escaped-version-pipes":
         spawn_escaped_pipe_holder("escaped-version-pid")
     print("codex-cli 0.146.0")
@@ -38,7 +41,7 @@ def record(value):
             file.write(json.dumps(value, sort_keys=True) + "\n")
 
 
-record({"kind": "process", "argv": sys.argv[1:], "cwd": os.getcwd(), "environment_names": sorted(os.environ)})
+record({"kind": "process", "argv": sys.argv[1:], "cwd": os.getcwd(), "environment_names": sorted(os.environ), "pid": os.getpid()})
 if mode == "escaped-session-pipes":
     spawn_escaped_pipe_holder("escaped-session-pid")
 with open("fake-session-artifact", "w", encoding="utf-8") as file:
