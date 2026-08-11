@@ -182,22 +182,27 @@ impl EditorDocument {
             return Ok(());
         }
         let at = self.byte_offset();
-        let rows = inserted.bytes().filter(|byte| *byte == b'\n').count();
-        let trailing = inserted
-            .rsplit('\n')
-            .next()
-            .unwrap_or("")
-            .graphemes(true)
-            .count();
-        let graphemes = inserted.graphemes(true).count();
-        let original_column = self.column;
+        let endpoint = at
+            .checked_add(inserted.len())
+            .ok_or_else(|| "document position overflow".to_string())?;
         let result = self.mutate(|text, row, column| {
             text.insert_str(at, inserted);
-            if rows == 0 {
-                *column = original_column + graphemes;
-            } else {
-                *row += rows;
-                *column = trailing;
+            let prefix = &text[..endpoint];
+            *row = prefix.bytes().filter(|byte| *byte == b'\n').count();
+            let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+            let line_end = text[endpoint..]
+                .find('\n')
+                .map_or(text.len(), |index| endpoint + index);
+            let line = &text[line_start..line_end];
+            let endpoint_in_line = endpoint - line_start;
+            *column = line
+                .grapheme_indices(true)
+                .take_while(|(index, grapheme)| index + grapheme.len() <= endpoint_in_line)
+                .count();
+            if line.grapheme_indices(true).any(|(index, grapheme)| {
+                index < endpoint_in_line && endpoint_in_line < index + grapheme.len()
+            }) {
+                *column += 1;
             }
         });
         if result.is_ok() {
@@ -331,6 +336,20 @@ impl EditorDocument {
         self.pending_g = false;
         self.error = None;
         self.clamp();
+    }
+
+    pub fn move_left(&mut self) {
+        self.column = self.column.saturating_sub(1);
+        self.error = None;
+    }
+
+    pub fn move_right(&mut self) {
+        let maximum = match self.mode {
+            Mode::Insert => self.line_graphemes(),
+            Mode::Normal | Mode::Command => self.line_graphemes().saturating_sub(1),
+        };
+        self.column = self.column.saturating_add(1).min(maximum);
+        self.error = None;
     }
 
     pub fn normal(&mut self, key: char) -> Result<(), String> {
@@ -630,6 +649,29 @@ mod tests {
         document.normal('i').unwrap();
         document.insert_text(family).unwrap();
         document.escape();
+        assert_eq!(document.column, 0);
+    }
+
+    #[test]
+    fn insertion_cursor_uses_resulting_grapheme_boundaries() {
+        let mut document = EditorDocument::new(String::new()).unwrap();
+        document.normal('i').unwrap();
+        document.insert_char('a').unwrap();
+        document.insert_char('\u{301}').unwrap();
+        document.insert_char('b').unwrap();
+        assert_eq!(document.text(), "a\u{301}b");
+        assert_eq!(document.column, 2);
+
+        let mut document = EditorDocument::new("👩b".into()).unwrap();
+        document.normal('a').unwrap();
+        document.insert_text("\u{200d}💻").unwrap();
+        assert_eq!(document.text(), "👩‍💻b");
+        assert_eq!(document.column, 1);
+        document.move_right();
+        assert_eq!(document.column, 2);
+        document.move_left();
+        document.move_left();
+        document.move_left();
         assert_eq!(document.column, 0);
     }
 

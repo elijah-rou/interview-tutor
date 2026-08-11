@@ -249,6 +249,28 @@ fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
     }
 }
 
+fn highlighted_crop(language: &str, line: &str, start: usize, width: usize) -> Line<'static> {
+    let highlights = highlight_line(language, line);
+    let mut used: usize = 0;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (grapheme_index, (byte_index, grapheme)) in line.grapheme_indices(true).enumerate() {
+        if grapheme_index < start {
+            continue;
+        }
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used.saturating_add(grapheme_width) > width {
+            break;
+        }
+        let kind = highlights
+            .iter()
+            .find(|span| span.start <= byte_index && byte_index < span.end)
+            .map_or(crate::editor::HighlightKind::Plain, |span| span.kind);
+        spans.push(Span::styled(grapheme.to_string(), highlight_style(kind)));
+        used += grapheme_width;
+    }
+    Line::from(spans)
+}
+
 fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let Some(solve) = &state.solve else { return };
     let visible = usize::from(area.height.saturating_sub(3)).max(1);
@@ -277,23 +299,7 @@ fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         .split('\n')
         .skip(start)
         .take(visible)
-        .map(|line| {
-            let bounded = line
-                .graphemes(true)
-                .skip(viewport_column)
-                .take(visible_columns.saturating_mul(2))
-                .collect::<String>();
-            let spans = highlight_line(&solve.language, &bounded)
-                .into_iter()
-                .map(|item| {
-                    Span::styled(
-                        bounded[item.start..item.end].to_string(),
-                        highlight_style(item.kind),
-                    )
-                })
-                .collect::<Vec<_>>();
-            Line::from(spans)
-        })
+        .map(|line| highlighted_crop(&solve.language, line, viewport_column, visible_columns))
         .collect::<Vec<_>>();
     let inline = if solve.editor.mode == Mode::Command {
         format!(":{}", solve.editor.command_buffer)
@@ -421,7 +427,8 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     };
     frame.render_widget(Paragraph::new(footer), vertical[2]);
 
-    if area.width < 60 || area.height < 20 {
+    let undersized = area.width < 60 || area.height < 20;
+    if undersized {
         let quit_key = if state.screen == Screen::Solve {
             "Space-q"
         } else {
@@ -429,76 +436,75 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         };
         frame.render_widget(
             Paragraph::new(format!(
-                "Terminal too small\nResize to at least 60 × 20\nPress {quit_key} to quit"
+                "Terminal too small\nResize to at least 60 × 20\nPress {quit_key} to quit\nDirty editor: press twice to confirm"
             ))
             .alignment(ratatui::layout::Alignment::Center)
             .block(block("Resize required")),
             vertical[1],
         );
-        return;
-    }
-
-    let content = vertical[1];
-    if state.screen == Screen::Solve {
-        render_solve(frame, state, content);
-        return;
-    }
-    if area.width >= 100 && area.height >= 30 {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-            .split(content);
-        match state.screen {
-            Screen::SetMenu => frame.render_widget(sets(state, columns[0].height), columns[0]),
-            Screen::ProblemList => {
-                frame.render_widget(problems(state, columns[0].height), columns[0])
-            }
-            Screen::ProblemDetail => {
-                frame.render_widget(detail(state, columns[0].width), columns[0])
-            }
-            Screen::Solve => unreachable!("solve rendered above"),
-        }
-        frame.render_widget(progress(state), columns[1]);
     } else {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .split(content);
-        let labels: Vec<Line<'static>> = ["Sets", "Problems", "Detail", "Progress"]
-            .into_iter()
-            .map(Line::from)
-            .collect();
-        let selected = if state.focus == Focus::Progress {
-            3
-        } else {
+        let content = vertical[1];
+        if state.screen == Screen::Solve {
+            render_solve(frame, state, content);
+        } else if area.width >= 100 && area.height >= 30 {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+                .split(content);
             match state.screen {
-                Screen::SetMenu => 0,
-                Screen::ProblemList => 1,
-                Screen::ProblemDetail => 2,
-                Screen::Solve => unreachable!("solve rendered above"),
-            }
-        };
-        frame.render_widget(
-            Tabs::new(labels).select(selected).block(block("View")),
-            chunks[0],
-        );
-        if state.focus == Focus::Progress {
-            frame.render_widget(progress(state), chunks[1]);
-        } else {
-            match state.screen {
-                Screen::SetMenu => frame.render_widget(sets(state, chunks[1].height), chunks[1]),
+                Screen::SetMenu => frame.render_widget(sets(state, columns[0].height), columns[0]),
                 Screen::ProblemList => {
-                    frame.render_widget(problems(state, chunks[1].height), chunks[1])
+                    frame.render_widget(problems(state, columns[0].height), columns[0])
                 }
                 Screen::ProblemDetail => {
-                    frame.render_widget(detail(state, chunks[1].width), chunks[1])
+                    frame.render_widget(detail(state, columns[0].width), columns[0])
                 }
                 Screen::Solve => unreachable!("solve rendered above"),
+            }
+            frame.render_widget(progress(state), columns[1]);
+        } else {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(1)])
+                .split(content);
+            let labels: Vec<Line<'static>> = ["Sets", "Problems", "Detail", "Progress"]
+                .into_iter()
+                .map(Line::from)
+                .collect();
+            let selected = if state.focus == Focus::Progress {
+                3
+            } else {
+                match state.screen {
+                    Screen::SetMenu => 0,
+                    Screen::ProblemList => 1,
+                    Screen::ProblemDetail => 2,
+                    Screen::Solve => unreachable!("solve rendered above"),
+                }
+            };
+            frame.render_widget(
+                Tabs::new(labels).select(selected).block(block("View")),
+                chunks[0],
+            );
+            if state.focus == Focus::Progress {
+                frame.render_widget(progress(state), chunks[1]);
+            } else {
+                match state.screen {
+                    Screen::SetMenu => {
+                        frame.render_widget(sets(state, chunks[1].height), chunks[1])
+                    }
+                    Screen::ProblemList => {
+                        frame.render_widget(problems(state, chunks[1].height), chunks[1])
+                    }
+                    Screen::ProblemDetail => {
+                        frame.render_widget(detail(state, chunks[1].width), chunks[1])
+                    }
+                    Screen::Solve => unreachable!("solve rendered above"),
+                }
             }
         }
     }
 
-    if state.show_help {
+    if state.show_help && !undersized {
         let popup = centered(70, 55, area);
         frame.render_widget(Clear, popup);
         frame.render_widget(Paragraph::new("Help\n\n↑/k up  ↓/j down  Enter open\nEsc back  Tab/Shift-Tab pane\nl language  r reload  ? close  q quit").block(block("Keyboard help")).wrap(Wrap { trim: true }), popup);
@@ -587,6 +593,7 @@ mod tests {
         let view = rendered(&state, 59, 19);
         assert!(view.contains("Terminal too small"));
         assert!(view.contains("Press q to quit"));
+        assert!(view.contains("press twice to confirm"));
         assert!(!view.contains("Keyboard help"));
         reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
@@ -739,7 +746,9 @@ mod tests {
             cancellation: None,
             pending_save: None,
             stale: false,
+            latest_run_revision: None,
             quit_after_save: None,
+            discard_confirmation: None,
             refresh_after_submit: false,
         });
         let full = rendered(&state, 120, 40);
@@ -760,6 +769,32 @@ mod tests {
             EditorDocument::new(format!("{}END", "界".repeat(100))).unwrap();
         state.solve.as_mut().unwrap().editor.normal('$').unwrap();
         assert!(rendered(&state, 80, 24).contains("END"));
+    }
+
+    #[test]
+    fn horizontal_crop_preserves_style_from_offscreen_openers() {
+        let comment = highlighted_crop("python", "# hidden comment", 9, 7);
+        assert!(
+            comment
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(Color::DarkGray))
+        );
+        assert_eq!(
+            comment
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "comment"
+        );
+        let string = highlighted_crop("python", "\"hidden string\"", 8, 6);
+        assert!(
+            string
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(Color::Green))
+        );
     }
 
     #[test]

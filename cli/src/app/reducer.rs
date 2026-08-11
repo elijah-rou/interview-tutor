@@ -1,5 +1,5 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
-use super::model::{AppState, Focus, MAX_SCROLL, OperationId, Screen, SolvePane};
+use super::model::{AppState, DiscardAction, Focus, MAX_SCROLL, OperationId, Screen, SolvePane};
 use crate::editor::{EditorCommand, Mode};
 
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
@@ -73,6 +73,29 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     };
     state.error = None;
     solve.editor.error = None;
+
+    let requested_discard = match action {
+        Action::Back => Some(DiscardAction::Back),
+        Action::Quit => Some(DiscardAction::Quit),
+        _ => None,
+    };
+    if let Some(discard) = requested_discard
+        && solve.editor.mode == Mode::Normal
+        && solve.editor.dirty()
+    {
+        if solve.discard_confirmation != Some(discard) {
+            solve.discard_confirmation = Some(discard);
+            state.status = match discard {
+                DiscardAction::Back => "Unsaved changes · Space-b again to discard".into(),
+                DiscardAction::Quit => "Unsaved changes · Space-q again to quit".into(),
+            };
+            state.error = Some("unsaved changes; repeat the same guarded action to discard".into());
+            return Vec::new();
+        }
+    } else {
+        solve.discard_confirmation = None;
+    }
+
     match action {
         Action::SaveTest | Action::Submit => {
             let intent = if action == Action::Submit {
@@ -84,7 +107,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 if intent == RunIntent::Test {
                     solve.pending_save =
                         Some((solve.editor.revision, solve.editor.text().to_string()));
-                    state.status = "Test queued for newest revision".into();
+                    state.status = "Running · newest test pending".into();
                 } else {
                     state.error = Some("a run is already active".into());
                 }
@@ -184,8 +207,14 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     Ok(())
                 }
                 EditorAction::Delete => solve.editor.delete(),
-                EditorAction::Left => solve.editor.normal('h'),
-                EditorAction::Right => solve.editor.normal('l'),
+                EditorAction::Left => {
+                    solve.editor.move_left();
+                    Ok(())
+                }
+                EditorAction::Right => {
+                    solve.editor.move_right();
+                    Ok(())
+                }
                 EditorAction::Up => solve.editor.normal('k'),
                 EditorAction::Down => solve.editor.normal('j'),
                 EditorAction::Redo => {
@@ -216,7 +245,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 state.error = None;
             }
             if solve.editor.revision != revision_before {
-                solve.stale = true;
+                solve.stale = solve
+                    .latest_run_revision
+                    .is_some_and(|revision| revision != solve.editor.revision);
             }
             Vec::new()
         }
@@ -231,21 +262,22 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Down => {
             match solve.pane {
                 SolvePane::Problem => solve.problem_scroll = solve.problem_scroll.saturating_add(1),
-                SolvePane::Output => solve.output_scroll = solve.output_scroll.saturating_add(1),
+                SolvePane::Output => {
+                    solve.output_scroll = solve
+                        .output_scroll
+                        .saturating_add(1)
+                        .min(solve.output_scroll_max())
+                }
                 _ => {}
             }
             Vec::new()
         }
         Action::Quit
-            if solve.editor.mode != Mode::Insert
-                && solve.editor.mode != Mode::Command
-                && !solve.editor.dirty() =>
+            if solve.editor.mode == Mode::Normal
+                && (!solve.editor.dirty()
+                    || solve.discard_confirmation == Some(DiscardAction::Quit)) =>
         {
             state.quit = true;
-            Vec::new()
-        }
-        Action::Quit if solve.editor.mode != Mode::Insert && solve.editor.mode != Mode::Command => {
-            state.error = Some("unsaved changes: use :wq or leave with Esc".into());
             Vec::new()
         }
         _ => Vec::new(),
@@ -263,6 +295,7 @@ fn start_pending_test(state: &mut AppState) -> Vec<Effect> {
     let operation = next_operation(state);
     let solve = state.solve.as_mut().expect("solve exists");
     solve.running = Some((operation, revision, RunIntent::Test));
+    state.status = "Testing pending revision…".into();
     if solve.quit_after_save == Some((None, revision)) {
         solve.quit_after_save = Some((Some(operation), revision));
     }
@@ -294,9 +327,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 let quit_matches = solve.quit_after_save == Some((Some(operation), revision));
                 let succeeded = result.is_ok();
+                solve.latest_run_revision = Some(revision);
+                solve.stale = revision != solve.editor.revision;
+                solve.output_scroll = 0;
                 match result {
                     Ok(result) => {
-                        solve.stale = revision != solve.editor.revision;
                         solve.bounded_output(format!(
                             "{:?} ({} ms){}\n{}",
                             result.termination,
@@ -319,8 +354,16 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 if quit_matches {
                     solve.quit_after_save = None;
-                    if succeeded && saved_source.is_some() {
+                    if succeeded
+                        && saved_source.as_deref() == Some(solve.editor.text())
+                        && revision == solve.editor.revision
+                    {
                         state.quit = true;
+                    } else if succeeded {
+                        state.status =
+                            "Saved revision finished, but newer edits remain open".into();
+                        state.error =
+                            Some("buffer changed during :wq; review and save again".into());
                     }
                 }
                 if intent == RunIntent::Submit && succeeded {
@@ -697,7 +740,9 @@ mod tests {
             cancellation: None,
             pending_save: None,
             stale: false,
+            latest_run_revision: None,
             quit_after_save: None,
+            discard_confirmation: None,
             refresh_after_submit: false,
         });
         state
@@ -840,6 +885,87 @@ mod tests {
         assert_eq!(
             state.solve.as_ref().unwrap().running,
             Some((operation, revision, RunIntent::Test))
+        );
+    }
+
+    #[test]
+    fn first_edit_before_a_run_is_not_stale_and_dirty_quit_is_guarded() {
+        let mut state = solve_state();
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('x'))),
+        );
+        assert!(!state.solve.as_ref().unwrap().stale);
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Escape)),
+        );
+
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(!state.quit);
+        assert_eq!(
+            state.solve.as_ref().unwrap().discard_confirmation,
+            Some(DiscardAction::Quit)
+        );
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(state.quit);
+    }
+
+    #[test]
+    fn write_quit_does_not_quit_when_buffer_changes_during_run() {
+        let mut state = solve_state();
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        let effects = reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Command(
+                EditorCommand::WriteQuit,
+            ))),
+        );
+        let Effect::SaveRun {
+            operation,
+            revision,
+            source,
+            ..
+        } = effects[0].clone()
+        else {
+            panic!("expected run")
+        };
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Normal('i'))),
+        );
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Insert('x'))),
+        );
+        reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Test,
+                Some(source),
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "PASS",
+                )),
+            ),
+        );
+        assert!(!state.quit);
+        assert!(state.solve.as_ref().unwrap().editor.dirty());
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("changed during :wq")
         );
     }
 

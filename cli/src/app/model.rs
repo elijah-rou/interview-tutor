@@ -8,6 +8,7 @@ use crate::runner::{CancellationToken, ExecutionPlan};
 pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_SCROLL: u16 = u16::MAX;
+pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Screen {
@@ -23,6 +24,12 @@ pub enum SolvePane {
     Problem,
     Output,
     Interview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscardAction {
+    Back,
+    Quit,
 }
 
 #[derive(Clone, Debug)]
@@ -42,22 +49,30 @@ pub struct SolveSession {
     pub cancellation: Option<CancellationToken>,
     pub pending_save: Option<(u64, String)>,
     pub stale: bool,
+    pub latest_run_revision: Option<u64>,
     pub quit_after_save: Option<(Option<OperationId>, u64)>,
+    pub discard_confirmation: Option<DiscardAction>,
     pub refresh_after_submit: bool,
 }
 
 impl SolveSession {
     pub fn bounded_output(&mut self, output: String) {
-        const MAX_OUTPUT: usize = 256 * 1024;
-        self.output = if output.len() <= MAX_OUTPUT {
+        const MARKER: &str = "… output truncated …\n";
+        self.output = if output.len() <= MAX_RUN_OUTPUT_BYTES {
             output
         } else {
-            let mut start = output.len() - MAX_OUTPUT;
+            let retained_bytes = MAX_RUN_OUTPUT_BYTES - MARKER.len();
+            let mut start = output.len() - retained_bytes;
             while !output.is_char_boundary(start) {
                 start += 1;
             }
-            format!("… output truncated …\n{}", &output[start..])
+            format!("{MARKER}{}", &output[start..])
         };
+        assert!(self.output.len() <= MAX_RUN_OUTPUT_BYTES);
+    }
+
+    pub fn output_scroll_max(&self) -> u16 {
+        u16::try_from(self.output.lines().count().saturating_sub(1)).unwrap_or(u16::MAX)
     }
 }
 
@@ -190,5 +205,48 @@ impl AppState {
         self.languages
             .get(self.language_index)
             .map(|item| item.slug.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::ExecutionPlan;
+    use std::path::PathBuf;
+
+    #[test]
+    fn run_output_bound_includes_utf8_truncation_marker() {
+        let mut solve = SolveSession {
+            problem_id: 1,
+            problem_slug: "p".into(),
+            problem_title: "P".into(),
+            statement: String::new(),
+            language: "python".into(),
+            plan: ExecutionPlan {
+                root: PathBuf::from("/tmp"),
+                language: "python".into(),
+                problem_slug: "p".into(),
+                set_slug: None,
+                runner_path: PathBuf::from("/tmp/run"),
+                solution_path: PathBuf::from("/tmp/p.py"),
+            },
+            editor: EditorDocument::new(String::new()).unwrap(),
+            pane: SolvePane::Editor,
+            output: String::new(),
+            output_scroll: 0,
+            problem_scroll: 0,
+            running: None,
+            cancellation: None,
+            pending_save: None,
+            stale: false,
+            latest_run_revision: None,
+            quit_after_save: None,
+            discard_confirmation: None,
+            refresh_after_submit: false,
+        };
+        solve.bounded_output("界".repeat(MAX_RUN_OUTPUT_BYTES));
+        assert!(solve.output.starts_with("… output truncated …\n"));
+        assert!(solve.output.len() <= MAX_RUN_OUTPUT_BYTES);
+        assert!(MAX_RUN_OUTPUT_BYTES - solve.output.len() < "界".len());
     }
 }

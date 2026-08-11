@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -48,6 +49,20 @@ enum WorkerCommand {
     },
     Shutdown,
 }
+type SaveService = dyn Fn(&Path, &Path, &str) -> Result<(), String> + Send + Sync;
+type ExecuteService = dyn Fn(&runner::ExecutionPlan, &CancellationToken) -> Result<runner::ExecutionResult, String>
+    + Send
+    + Sync;
+type RecordService =
+    dyn Fn(&runner::ExecutionPlan, &runner::ExecutionResult) -> Result<(), String> + Send + Sync;
+
+#[derive(Clone)]
+struct RunnerServices {
+    save: Arc<SaveService>,
+    execute: Arc<ExecuteService>,
+    record: Arc<RecordService>,
+}
+
 struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
@@ -61,6 +76,31 @@ struct RunnerWorker {
 }
 impl RunnerWorker {
     fn start(root: PathBuf, database_path: PathBuf) -> Self {
+        let save_root = root.clone();
+        let execute_database = database_path.clone();
+        let record_root = root;
+        let record_database = database_path;
+        Self::start_with_services(RunnerServices {
+            save: Arc::new(move |_, solution_path, source| {
+                source::atomic_save(&save_root, solution_path, source)
+            }),
+            execute: Arc::new(move |plan, cancellation| {
+                runner::execute(
+                    plan,
+                    &execute_database,
+                    &ExecutionLimits::default(),
+                    cancellation,
+                    None,
+                )
+            }),
+            record: Arc::new(move |plan, result| {
+                let connection = crate::database::open_database(&record_database, &record_root)?;
+                runner::record_execution(&connection, plan, result).map(|_| ())
+            }),
+        })
+    }
+
+    fn start_with_services(services: RunnerServices) -> Self {
         let (sender, commands) = mpsc::sync_channel(2);
         let (event_sender, events) = mpsc::sync_channel(64);
         let join = thread::spawn(move || {
@@ -80,7 +120,7 @@ impl RunnerWorker {
                         let outcome =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 let save_result = if write_source {
-                                    source::atomic_save(&root, &plan.solution_path, &source)
+                                    (services.save)(&plan.root, &plan.solution_path, &source)
                                 } else {
                                     Ok(())
                                 };
@@ -89,23 +129,9 @@ impl RunnerWorker {
                                     Ok(()) => (
                                         Some(source_for_save),
                                         (|| {
-                                            let result = runner::execute(
-                                                &plan,
-                                                &database_path,
-                                                &ExecutionLimits::default(),
-                                                &cancellation,
-                                                None,
-                                            )?;
+                                            let result = (services.execute)(&plan, &cancellation)?;
                                             if intent == crate::app::RunIntent::Submit {
-                                                let connection = crate::database::open_database(
-                                                    &database_path,
-                                                    &root,
-                                                )?;
-                                                runner::record_execution(
-                                                    &connection,
-                                                    &plan,
-                                                    &result,
-                                                )?;
+                                                (services.record)(&plan, &result)?;
                                             }
                                             Ok(result)
                                         })(),
@@ -271,7 +297,9 @@ fn apply_effects(
                         cancellation: None,
                         pending_save: None,
                         stale: false,
+                        latest_run_revision: None,
                         quit_after_save: None,
+                        discard_confirmation: None,
                         refresh_after_submit: false,
                     }))
                 })();
@@ -367,4 +395,175 @@ pub fn run(
     })();
     worker.shutdown();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::RunIntent;
+    use crate::app::model::OperationId;
+    use crate::runner::{ExecutionPlan, ExecutionResult, Termination};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn plan() -> ExecutionPlan {
+        ExecutionPlan {
+            root: PathBuf::from("/tmp"),
+            language: "python".into(),
+            problem_slug: "p".into(),
+            set_slug: None,
+            runner_path: PathBuf::from("/tmp/run"),
+            solution_path: PathBuf::from("/tmp/p.py"),
+        }
+    }
+
+    fn services(termination: Termination, records: Arc<AtomicUsize>) -> RunnerServices {
+        RunnerServices {
+            save: Arc::new(|_, _, _| Ok(())),
+            execute: Arc::new(move |_, _| {
+                Ok(ExecutionResult::test_result(termination.clone(), "result"))
+            }),
+            record: Arc::new(move |_, _| {
+                records.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        }
+    }
+
+    fn run_once(worker: &mut RunnerWorker, operation: u64, intent: RunIntent) -> Event {
+        worker
+            .run(
+                OperationId(operation),
+                0,
+                intent,
+                plan(),
+                "source".into(),
+                true,
+            )
+            .unwrap();
+        worker.events.recv_timeout(Duration::from_secs(2)).unwrap()
+    }
+
+    #[test]
+    fn worker_tests_never_record_and_submit_terminations_record_once() {
+        let records = Arc::new(AtomicUsize::new(0));
+        let mut worker =
+            RunnerWorker::start_with_services(services(Termination::Exited(0), records.clone()));
+        assert!(matches!(
+            run_once(&mut worker, 1, RunIntent::Test),
+            Event::RunFinished(_, _, RunIntent::Test, Some(_), Ok(_))
+        ));
+        assert_eq!(records.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            run_once(&mut worker, 2, RunIntent::Submit),
+            Event::RunFinished(_, _, RunIntent::Submit, Some(_), Ok(_))
+        ));
+        assert_eq!(records.load(Ordering::SeqCst), 1);
+        worker.shutdown();
+
+        for (index, termination) in [
+            Termination::Exited(1),
+            Termination::TimedOut,
+            Termination::Cancelled,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let records = Arc::new(AtomicUsize::new(0));
+            let mut worker =
+                RunnerWorker::start_with_services(services(termination, records.clone()));
+            assert!(matches!(
+                run_once(&mut worker, index as u64 + 3, RunIntent::Submit),
+                Event::RunFinished(_, _, RunIntent::Submit, Some(_), Ok(_))
+            ));
+            assert_eq!(records.load(Ordering::SeqCst), 1);
+            worker.shutdown();
+        }
+    }
+
+    #[test]
+    fn worker_reports_save_record_and_panic_failures() {
+        let save_failure = RunnerServices {
+            save: Arc::new(|_, _, _| Err("save failed".into())),
+            execute: Arc::new(|_, _| panic!("execute must not run")),
+            record: Arc::new(|_, _| panic!("record must not run")),
+        };
+        let mut worker = RunnerWorker::start_with_services(save_failure);
+        assert!(
+            matches!(run_once(&mut worker, 1, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "save failed")
+        );
+        worker.shutdown();
+
+        let record_failure = RunnerServices {
+            save: Arc::new(|_, _, _| Ok(())),
+            execute: Arc::new(|_, _| {
+                Ok(ExecutionResult::test_result(Termination::Exited(0), "pass"))
+            }),
+            record: Arc::new(|_, _| Err("record failed".into())),
+        };
+        let mut worker = RunnerWorker::start_with_services(record_failure);
+        assert!(
+            matches!(run_once(&mut worker, 2, RunIntent::Submit), Event::RunFinished(_, _, _, Some(_), Err(error)) if error == "record failed")
+        );
+        worker.shutdown();
+
+        let panic_services = RunnerServices {
+            save: Arc::new(|_, _, _| Ok(())),
+            execute: Arc::new(|_, _| panic!("injected panic")),
+            record: Arc::new(|_, _| Ok(())),
+        };
+        let mut worker = RunnerWorker::start_with_services(panic_services);
+        assert!(
+            matches!(run_once(&mut worker, 3, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "runner worker panicked")
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_disconnect_clears_active_operation() {
+        let records = Arc::new(AtomicUsize::new(0));
+        let mut worker =
+            RunnerWorker::start_with_services(services(Termination::Exited(0), records));
+        worker.active = Some((OperationId(9), 4, RunIntent::Test, CancellationToken::new()));
+        worker.sender.send(WorkerCommand::Shutdown).unwrap();
+        assert!(worker.events.recv_timeout(Duration::from_secs(2)).is_err());
+        assert!(
+            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected")
+        );
+        assert!(worker.active.is_none());
+        assert!(worker.join.is_none());
+    }
+
+    #[test]
+    fn shutdown_cancels_and_joins_active_execution() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let observed = finished.clone();
+        let services = RunnerServices {
+            save: Arc::new(|_, _, _| Ok(())),
+            execute: Arc::new(move |_, cancellation| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !cancellation.is_cancelled() && std::time::Instant::now() < deadline {
+                    thread::yield_now();
+                }
+                observed.store(true, Ordering::SeqCst);
+                Ok(ExecutionResult::test_result(
+                    Termination::Cancelled,
+                    "cancelled",
+                ))
+            }),
+            record: Arc::new(|_, _| Ok(())),
+        };
+        let mut worker = RunnerWorker::start_with_services(services);
+        worker
+            .run(
+                OperationId(1),
+                0,
+                RunIntent::Test,
+                plan(),
+                "source".into(),
+                false,
+            )
+            .unwrap();
+        worker.shutdown();
+        assert!(finished.load(Ordering::SeqCst));
+    }
 }
