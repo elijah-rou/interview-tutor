@@ -18,6 +18,7 @@ impl TerminalGuard {
         enable_raw_mode().map_err(|error| format!("cannot enable terminal raw mode: {error}"))?;
         if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
             let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
             return Err(format!("cannot enter terminal screen: {error}"));
         }
         Ok(Self)
