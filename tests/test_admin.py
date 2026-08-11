@@ -153,39 +153,46 @@ class ProjectCliTests(unittest.TestCase):
             timeout=30,
         )
 
-    def test_future_database_version_is_rejected_without_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory) / "progress.db"
-            environment = os.environ.copy()
-            environment["PRACTICE_DB_PATH"] = str(database)
-            initialized = self.run_command(
-                str(ROOT / "practice"), "sets", "list", env=environment
-            )
-            self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            with sqlite3.connect(database) as connection:
-                connection.execute("PRAGMA user_version = 3")
-                connection.execute(
-                    "INSERT INTO metadata(key, value) VALUES ('future_marker', 'untouched')"
-                )
-                before = connection.execute(
-                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
-                ).fetchall()
-            result = self.run_command(
-                str(ROOT / "practice"), "sets", "list", env=environment
-            )
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("unsupported database schema version", result.stderr)
-            with sqlite3.connect(database) as connection:
-                version = connection.execute("PRAGMA user_version").fetchone()[0]
-                marker = connection.execute(
-                    "SELECT value FROM metadata WHERE key = 'future_marker'"
-                ).fetchone()
-                after = connection.execute(
-                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
-                ).fetchall()
-            self.assertEqual(version, 3)
-            self.assertEqual(marker, ("untouched",))
-            self.assertEqual(after, before)
+    def test_out_of_range_database_versions_are_rejected_without_mutation(self) -> None:
+        for unsupported_version in (-1, 3):
+            with self.subTest(user_version=unsupported_version):
+                with tempfile.TemporaryDirectory() as directory:
+                    database = Path(directory) / "progress.db"
+                    environment = os.environ.copy()
+                    environment["PRACTICE_DB_PATH"] = str(database)
+                    initialized = self.run_command(
+                        str(ROOT / "practice"), "sets", "list", env=environment
+                    )
+                    self.assertEqual(initialized.returncode, 0, initialized.stderr)
+                    with sqlite3.connect(database) as connection:
+                        connection.execute(
+                            f"PRAGMA user_version = {unsupported_version}"
+                        )
+                        connection.execute(
+                            "INSERT INTO metadata(key, value) "
+                            "VALUES ('version_marker', 'untouched')"
+                        )
+                        before = connection.execute(
+                            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+                        ).fetchall()
+                    result = self.run_command(
+                        str(ROOT / "practice"), "sets", "list", env=environment
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("unsupported database schema version", result.stderr)
+                    with sqlite3.connect(database) as connection:
+                        version = connection.execute("PRAGMA user_version").fetchone()[
+                            0
+                        ]
+                        marker = connection.execute(
+                            "SELECT value FROM metadata WHERE key = 'version_marker'"
+                        ).fetchone()
+                        after = connection.execute(
+                            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+                        ).fetchall()
+                    self.assertEqual(version, unsupported_version)
+                    self.assertEqual(marker, ("untouched",))
+                    self.assertEqual(after, before)
 
     def test_catalog_rejects_unknown_fields_and_blank_persisted_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,6 +263,23 @@ class ProjectCliTests(unittest.TestCase):
             self.assertIn("URL must use http or https", invalid_url.stderr)
             self.assertFalse(database.exists())
 
+            for invalid_value in (
+                "https://example.com/a path",
+                "https://example.com/path?query=bad value",
+                "https://example.com/path\\segment",
+                "https://example.com/path?query=bad\u0007value",
+            ):
+                with self.subTest(url=repr(invalid_value)):
+                    catalog = self.fixture_catalog()
+                    catalog["problems"][0]["neetcode_url"] = invalid_value  # type: ignore[index]
+                    self.write_fixture_root(root, catalog, self.fixture_sets())
+                    invalid_complete_url = self.run_fixture_command(
+                        root, database, "sets", "list"
+                    )
+                    self.assertEqual(invalid_complete_url.returncode, 2)
+                    self.assertIn("invalid NeetCode URL", invalid_complete_url.stderr)
+                    self.assertFalse(database.exists())
+
             catalog = self.fixture_catalog()
             catalog["problems"][1]["leetcode_id"] = 900001  # type: ignore[index]
             self.write_fixture_root(root, catalog, self.fixture_sets())
@@ -323,6 +347,10 @@ class ProjectCliTests(unittest.TestCase):
 
             upgraded_catalog = self.fixture_catalog(revision=2)
             upgraded_catalog["problems"] = [upgraded_catalog["problems"][0]]  # type: ignore[index]
+            upgraded_catalog["problems"][0]["statement_markdown"] = (  # type: ignore[index]
+                "Managed statement revision two."
+            )
+            upgraded_catalog["problems"][0]["test_revision"] = 2  # type: ignore[index]
             upgraded_catalog["problems"][0]["adapters"] = [  # type: ignore[index]
                 {
                     "language": "python",
@@ -346,6 +374,10 @@ class ProjectCliTests(unittest.TestCase):
                 managed_problems = connection.execute(
                     "SELECT slug, archived FROM problems WHERE managed = 1 ORDER BY slug"
                 ).fetchall()
+                managed_revision = connection.execute(
+                    "SELECT statement_markdown, test_revision FROM problems "
+                    "WHERE slug = 'managed-one'"
+                ).fetchone()
                 adapters = connection.execute(
                     """
                     SELECT p.slug, l.slug, i.enabled
@@ -392,6 +424,7 @@ class ProjectCliTests(unittest.TestCase):
                 managed_problems,
                 [("managed-one", 0), ("managed-retired", 1)],
             )
+            self.assertEqual(managed_revision, ("Managed statement revision two.", 2))
             self.assertEqual(
                 adapters,
                 [

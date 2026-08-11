@@ -84,7 +84,7 @@ rust/src/problems/          Rust solution starters
 .turso/progress.db          local runtime database
 ```
 
-Checked-in catalogs reconcile managed resources once per catalog revision. Managed problems or adapters omitted by a later revision are retired, while custom resources and attempt history remain intact. SQLite is the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
+Checked-in catalogs reconcile managed resources once per catalog revision. Managed problems or adapters omitted by a later revision are retired, while custom resources and attempt rows remain intact. Retiring a managed set clears that set's optional `invoked_set_id` context from historical attempts through `ON DELETE SET NULL`. SQLite is the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
 
 The database is SQLite/libSQL-compatible. The Turso server is optional:
 

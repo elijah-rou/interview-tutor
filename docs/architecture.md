@@ -7,7 +7,7 @@ The checked-in distribution has two independent layers:
 1. `catalog/problems.json` defines global problems and installed language adapter source paths.
 2. `problem_sets/*.json` defines ordered references to global problem slugs.
 
-A catalog revision seeds or upgrades the local database once. Each upgrade reconciles the exact managed catalog and retires managed resources that were omitted, without changing custom resources or attempt history. The database is the runtime authority for user-created problems and sets; opening the CLI does not continuously overwrite local CRUD. Shipped problems and sets are marked managed and read-only through local CRUD. Custom resources are fully editable.
+A catalog revision seeds or upgrades the local database once. Each upgrade reconciles the exact managed catalog and retires managed resources that were omitted, without changing custom resources or deleting attempt rows. Retiring a managed set clears its optional invoked-set context from historical attempts through `ON DELETE SET NULL`. The database is the runtime authority for user-created problems and sets; opening the CLI does not continuously overwrite local CRUD. Shipped problems and sets are marked managed and read-only through local CRUD. Custom resources are fully editable.
 
 ## Runtime schema
 
@@ -20,7 +20,7 @@ SQLite v2 uses durable integer keys internally:
 - `problem_implementations`: per-problem source paths and adapter availability.
 - `attempts`: global problem/language results with optional invoked-set context.
 
-Completion is derived from a passing attempt whose revision matches the global problem's current test revision. It is never stored per set. Removing or reordering a membership cannot delete learning history.
+Completion is derived from a passing attempt whose revision matches the global problem's current test revision. It is never stored per set. Removing or reordering a membership cannot delete learning history; deleting a retired set only clears the attempt's optional invoked-set context.
 
 ## Execution
 

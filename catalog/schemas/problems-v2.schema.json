@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Problem slugs, positive LeetCode IDs, and adapter languages are unique within their runtime scopes; catalog validation enforces these cross-record constraints.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -39,7 +40,8 @@
           },
           "title": {
             "type": "string",
-            "minLength": 1
+            "pattern": "\\S",
+            "maxLength": 200
           },
           "difficulty": {
             "enum": [
@@ -50,7 +52,8 @@
           },
           "topic": {
             "type": "string",
-            "minLength": 1
+            "pattern": "\\S",
+            "maxLength": 100
           },
           "leetcode_id": {
             "type": [
@@ -63,13 +66,14 @@
             "type": "boolean"
           },
           "leetcode_url": {
-            "type": "string"
+            "$ref": "#/$defs/httpUrl"
           },
           "neetcode_url": {
-            "type": "string"
+            "$ref": "#/$defs/httpUrl"
           },
           "statement_markdown": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 1000000
           },
           "test_revision": {
             "type": "integer",
@@ -77,6 +81,7 @@
           },
           "adapters": {
             "type": "array",
+            "maxItems": 2,
             "items": {
               "type": "object",
               "required": [
@@ -85,10 +90,12 @@
               ],
               "properties": {
                 "language": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_-]{0,63}$"
                 },
                 "solution_path": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
                 }
               },
               "additionalProperties": false
@@ -97,6 +104,12 @@
         },
         "additionalProperties": false
       }
+    }
+  },
+  "$defs": {
+    "httpUrl": {
+      "type": "string",
+      "pattern": "^https?://(?:\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9._-]+)(?::[0-9]+)?(?:[/?#][^\\s\\\\]*)?$"
     }
   }
 }

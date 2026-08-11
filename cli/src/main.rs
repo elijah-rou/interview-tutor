@@ -651,6 +651,10 @@ fn register_adapter(
     language: &str,
     solution_path: &str,
 ) -> Result<(), String> {
+    let resolved_problem = database::resolve_problem(&context.connection, problem, None)?;
+    if resolved_problem.managed {
+        return Err(format!("shipped problem is read-only: {problem}"));
+    }
     let solution = context.root.join(solution_path);
     if !solution.is_file() {
         return Err(format!(

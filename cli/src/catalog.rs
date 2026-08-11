@@ -92,18 +92,23 @@ pub fn validate_identifier(value: &str, label: &str, problem_slug: bool) -> Resu
     }
 }
 
-fn validate_http_url(label: &str, value: &str) -> Result<(), String> {
+pub fn validate_http_url(label: &str, value: &str) -> Result<(), String> {
     let authority_and_path = value
         .strip_prefix("https://")
         .or_else(|| value.strip_prefix("http://"))
         .ok_or_else(|| format!("{label} URL must use http or https"))?;
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control() || character == '\\')
+    {
+        return Err(format!("invalid {label} URL"));
+    }
     let authority = authority_and_path
         .split(['/', '?', '#'])
         .next()
         .unwrap_or("");
     if authority.is_empty()
         || authority.contains('@')
-        || authority.contains('\\')
         || authority
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())
