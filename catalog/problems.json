@@ -1418,7 +1418,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/sum-of-two-integers/",
       "neetcode_url": "https://neetcode.io/problems/sum-of-two-integers/question",
-      "statement_markdown": "## Task\n\nGiven two integers, return their sum without using the language addition or subtraction operators.\n\n## Example\n\nInputs `2` and `3` return `5`.",
+      "statement_markdown": "## Task\n\nGiven two integers, return their sum.\n\n## Example\n\nInputs `2` and `3` return `5`.",
       "test_revision": 1,
       "adapters": [
         {
