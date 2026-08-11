@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+script=$(readlink -f -- "$0")
+root=$(CDPATH= cd -- "$(dirname -- "$script")" && pwd)
+export PRACTICE_ROOT="$root"
+exec cargo run --locked --quiet --manifest-path "$root/cli/Cargo.toml" --bin interview-tutor -- "$@"
