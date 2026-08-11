@@ -60,6 +60,7 @@ pub struct CodexUi {
     pub hint_revision: Option<u64>,
     pub hint_count: u8,
     pub submission_recorded: bool,
+    pub pending_submission_review: Option<RecordedSubmissionReview>,
 }
 
 impl Default for CodexUi {
@@ -77,6 +78,7 @@ impl Default for CodexUi {
             hint_revision: None,
             hint_count: 0,
             submission_recorded: false,
+            pending_submission_review: None,
         }
     }
 }
@@ -107,6 +109,7 @@ impl CodexUi {
         self.hint_revision = None;
         self.hint_count = 0;
         self.submission_recorded = false;
+        self.pending_submission_review = None;
         self.composer_focused = false;
         self.status = if self.enabled {
             CodexStatus::Offline
@@ -143,6 +146,51 @@ pub enum SolvePane {
 pub enum DiscardAction {
     Back,
     Quit,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordedSubmissionReview {
+    pub revision: u64,
+    pub replaced_older: bool,
+    source: String,
+    output: String,
+}
+
+impl RecordedSubmissionReview {
+    pub fn new(revision: u64, source: String, output: String) -> Self {
+        assert!(source.len() <= MAX_DOCUMENT_BYTES);
+        assert!(output.chars().count() <= 16 * 1024);
+        Self {
+            revision,
+            replaced_older: false,
+            source,
+            output,
+        }
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+}
+
+impl Drop for RecordedSubmissionReview {
+    fn drop(&mut self) {
+        // This bounded snapshot exists only until its exact recorded revision can be reviewed.
+        unsafe {
+            for byte in self.source.as_mut_vec() {
+                std::ptr::write_volatile(byte, 0);
+            }
+            for byte in self.output.as_mut_vec() {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+        self.source.clear();
+        self.output.clear();
+    }
 }
 
 #[derive(Clone, Debug)]

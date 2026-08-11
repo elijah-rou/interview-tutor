@@ -173,6 +173,16 @@ for raw in sys.stdin:
             )
             continue
         input_text = params["input"][0]["text"]
+        if mode == "hold-interviewer" and turn_number == 1:
+            held_path = os.path.join(codex_home, "fake-held-turn")
+            release_path = os.path.join(codex_home, "fake-release-turn")
+            with open(held_path, "w", encoding="utf-8") as file:
+                file.write(turn_id)
+            release_deadline = time.monotonic() + 15
+            while not os.path.exists(release_path):
+                if time.monotonic() >= release_deadline:
+                    raise SystemExit("held fake interviewer turn was not released")
+                time.sleep(0.01)
         hint_level = (
             params.get("outputSchema", {})
             .get("properties", {})
@@ -196,10 +206,15 @@ for raw in sys.stdin:
             )
         elif "Review the explicitly recorded local submission" in input_text:
             role = "submission-review"
+            review_text = (
+                f"RECORDED_SUBMISSION_REVIEW [turn-{turn_number}]"
+                if mode == "hold-interviewer"
+                else f"Submission reviewed [turn-{turn_number}]"
+            )
             text = json.dumps(
                 {
                     "kind": "feedback",
-                    "text": f"Submission reviewed [turn-{turn_number}]",
+                    "text": review_text,
                     "assessment": "pass",
                 }
             )

@@ -956,15 +956,15 @@ mod tests {
             .messages
             .push(("Interviewer".into(), "Question".into()));
         state.codex.messages.push(("Hinter".into(), "Hint".into()));
-        state
-            .codex
-            .messages
-            .push(("Submission review".into(), "Review".into()));
+        state.codex.messages.push((
+            "Submission review · recorded revision 7".into(),
+            "Review".into(),
+        ));
         let view = rendered(&state, 80, 24);
         assert!(
             view.contains("Interviewer")
                 && view.contains("Hinter")
-                && view.contains("Submission review")
+                && view.contains("Submission review · recorded revision 7")
         );
     }
 
