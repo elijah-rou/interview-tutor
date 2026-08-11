@@ -714,8 +714,7 @@ mod tests {
         assert!(rendered(&state, 80, 24).contains("topic-17"));
     }
 
-    #[test]
-    fn solve_layouts_offline_placeholder_and_syntax_style() {
+    fn solve_state() -> AppState {
         use crate::app::model::{SolvePane, SolveSession};
         use crate::editor::EditorDocument;
         use crate::runner::ExecutionPlan;
@@ -751,6 +750,13 @@ mod tests {
             discard_confirmation: None,
             refresh_after_submit: false,
         });
+        state
+    }
+
+    #[test]
+    fn solve_layouts_offline_placeholder_and_syntax_style() {
+        use crate::editor::EditorDocument;
+        let mut state = solve_state();
         let full = rendered(&state, 120, 40);
         assert!(full.contains("Problem / Examples"));
         assert!(full.contains("compiler error"));
@@ -769,6 +775,45 @@ mod tests {
             EditorDocument::new(format!("{}END", "界".repeat(100))).unwrap();
         state.solve.as_mut().unwrap().editor.normal('$').unwrap();
         assert!(rendered(&state, 80, 24).contains("END"));
+    }
+
+    #[test]
+    fn invalid_and_overlength_commands_render_bounded_errors() {
+        use crate::app::EditorAction;
+        use crate::editor::{MAX_COMMAND_BYTES, Mode};
+
+        for (command, expected) in [
+            ("bogus".to_string(), "unsupported command: :bogus"),
+            (
+                "x".repeat(MAX_COMMAND_BYTES + 1),
+                "command exceeds 256 bytes",
+            ),
+        ] {
+            let mut state = solve_state();
+            reduce(
+                &mut state,
+                Event::Command(Action::Editor(EditorAction::Normal(':'))),
+            );
+            for character in command.chars() {
+                reduce(
+                    &mut state,
+                    Event::Command(Action::Editor(EditorAction::CommandChar(character))),
+                );
+            }
+            if command == "bogus" {
+                reduce(
+                    &mut state,
+                    Event::Command(Action::Editor(EditorAction::ExecuteCommand)),
+                );
+            }
+
+            let solve = state.solve.as_ref().unwrap();
+            assert_eq!(solve.editor.mode, Mode::Normal);
+            assert_eq!(solve.editor.error.as_deref(), Some(expected));
+            assert!(solve.editor.error.as_ref().unwrap().len() <= MAX_COMMAND_BYTES + 32);
+            let view = rendered(&state, 80, 24);
+            assert!(view.contains(expected));
+        }
     }
 
     #[test]

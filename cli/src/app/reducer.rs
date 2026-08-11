@@ -179,8 +179,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     Mode::Normal => Err("paste ignored in Normal mode".into()),
                 },
                 EditorAction::CommandChar(character) => {
-                    solve.editor.command_char(character);
-                    Ok(())
+                    solve.editor.command_text(&character.to_string())
                 }
                 EditorAction::ExecuteCommand => match solve.editor.execute_command() {
                     Ok(command) => {
@@ -189,11 +188,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                             Action::Editor(EditorAction::Command(command)),
                         );
                     }
-                    Err(error) => {
-                        solve.editor.error = Some(error.clone());
-                        state.error = Some(error);
-                        Ok(())
-                    }
+                    Err(error) => Err(error),
                 },
                 EditorAction::Escape => {
                     solve.editor.escape();
@@ -239,6 +234,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 }
             };
             if let Err(error) = result {
+                if solve.editor.mode == Mode::Command {
+                    solve.editor.escape();
+                }
                 solve.editor.error = Some(error.clone());
                 state.error = Some(error);
             } else {
@@ -746,6 +744,134 @@ mod tests {
             refresh_after_submit: false,
         });
         state
+    }
+
+    #[test]
+    fn command_errors_leave_command_mode_and_next_valid_action_dismisses_them() {
+        use crate::editor::{MAX_COMMAND_BYTES, Mode};
+
+        for command in ["bogus".to_string(), "x".repeat(MAX_COMMAND_BYTES + 1)] {
+            let mut state = solve_state();
+            reduce(
+                &mut state,
+                Event::Command(Action::Editor(EditorAction::Normal(':'))),
+            );
+            for character in command.chars() {
+                reduce(
+                    &mut state,
+                    Event::Command(Action::Editor(EditorAction::CommandChar(character))),
+                );
+            }
+            if command == "bogus" {
+                reduce(
+                    &mut state,
+                    Event::Command(Action::Editor(EditorAction::ExecuteCommand)),
+                );
+            }
+
+            let solve = state.solve.as_ref().unwrap();
+            assert_eq!(solve.editor.mode, Mode::Normal);
+            assert!(solve.editor.error.is_some());
+            assert!(state.error.is_some());
+
+            reduce(
+                &mut state,
+                Event::Command(Action::Editor(EditorAction::Normal('h'))),
+            );
+            let solve = state.solve.as_ref().unwrap();
+            assert!(solve.editor.error.is_none());
+            assert!(state.error.is_none());
+        }
+    }
+
+    #[test]
+    fn submit_refreshes_progress_before_starting_queued_test() {
+        let mut state = solve_state();
+        let submit = reduce(&mut state, Event::Command(Action::Submit));
+        let Effect::SaveRun {
+            operation,
+            revision,
+            intent: RunIntent::Submit,
+            ..
+        } = submit[0]
+        else {
+            panic!("expected submit run")
+        };
+        reduce(&mut state, Event::Command(Action::SaveTest));
+
+        let reload = reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Submit,
+                Some("print(1)".into()),
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "PASS",
+                )),
+            ),
+        );
+        let [
+            Effect::Load {
+                operation: reload_operation,
+                ..
+            },
+        ] = reload.as_slice()
+        else {
+            panic!("expected progress reload before queued test")
+        };
+        assert_eq!(state.status, "Loading…");
+        assert!(state.solve.as_ref().unwrap().running.is_none());
+        assert!(state.solve.as_ref().unwrap().pending_save.is_some());
+
+        let queued = reduce(
+            &mut state,
+            Event::Loaded(*reload_operation, Ok(Box::new(AppData::empty()))),
+        );
+        let [
+            Effect::SaveRun {
+                intent: RunIntent::Test,
+                ..
+            },
+        ] = queued.as_slice()
+        else {
+            panic!("expected queued test after progress reload")
+        };
+        assert_eq!(state.status, "Testing pending revision…");
+        assert!(state.solve.as_ref().unwrap().pending_save.is_none());
+    }
+
+    #[test]
+    fn submit_record_failure_has_failure_status_and_does_not_reload() {
+        let mut state = solve_state();
+        let submit = reduce(&mut state, Event::Command(Action::Submit));
+        let Effect::SaveRun {
+            operation,
+            revision,
+            intent: RunIntent::Submit,
+            ..
+        } = submit[0]
+        else {
+            panic!("expected submit run")
+        };
+
+        let effects = reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Submit,
+                Some("print(1)".into()),
+                Err("record failed".into()),
+            ),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(state.status, "Run failed");
+        assert_eq!(state.error.as_deref(), Some("record failed"));
+        assert!(!state.status.contains("recorded"));
+        assert!(!state.solve.as_ref().unwrap().refresh_after_submit);
+        assert!(state.active_operation.is_none());
     }
 
     #[test]
