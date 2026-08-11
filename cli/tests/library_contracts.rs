@@ -1,6 +1,4 @@
-use practice_cli::database::{
-    self, AttemptOutcome, Difficulty, NewProblem, ProgressScope,
-};
+use practice_cli::database::{self, AttemptOutcome, Difficulty, NewProblem, ProgressScope};
 use practice_cli::runner;
 use rusqlite::params;
 use std::fs;
@@ -102,15 +100,12 @@ fn execution_plan_retains_validated_solution_paths() {
     let fixture = Fixture::new();
     let connection = fixture.connection();
 
-    let shipped = runner::plan_execution(
-        &connection,
-        &fixture.root,
-        "python",
-        "shipped",
-        None,
-    )
-    .unwrap();
-    assert_eq!(shipped.solution_path, fixture.root.join("python/shipped.py"));
+    let shipped =
+        runner::plan_execution(&connection, &fixture.root, "python", "shipped", None).unwrap();
+    assert_eq!(
+        shipped.solution_path,
+        fixture.root.join("python/shipped.py")
+    );
 
     add_custom_problem(&connection, &fixture.root);
     let custom =
@@ -123,10 +118,7 @@ fn set_members_have_positive_typed_ordinals_and_optional_sections() {
     let fixture = Fixture::new();
     let connection = fixture.connection();
     connection
-        .execute(
-            "UPDATE problem_set_members SET section = 'Core'",
-            [],
-        )
+        .execute("UPDATE problem_set_members SET section = 'Core'", [])
         .unwrap();
 
     let members = database::list_set_members(&connection, "shipped-set").unwrap();
@@ -181,19 +173,24 @@ fn progress_summary_uses_current_revisions_for_global_and_set_scopes() {
     )
     .unwrap();
     connection
-        .execute("UPDATE problems SET test_revision = 3 WHERE slug = 'shipped'", [])
+        .execute(
+            "UPDATE problems SET test_revision = 3 WHERE slug = 'shipped'",
+            [],
+        )
         .unwrap();
 
-    let global = database::progress_summary(
-        &connection,
-        ProgressScope::Global,
-        Some("python"),
-    )
-    .unwrap();
+    let global =
+        database::progress_summary(&connection, ProgressScope::Global, Some("python")).unwrap();
     assert_eq!((global.completed, global.total), (0, 2));
     assert_eq!(global.by_difficulty.len(), 2);
     assert_eq!(global.by_difficulty[0].difficulty, Difficulty::Easy);
-    assert_eq!((global.by_difficulty[0].completed, global.by_difficulty[0].total), (0, 1));
+    assert_eq!(
+        (
+            global.by_difficulty[0].completed,
+            global.by_difficulty[0].total
+        ),
+        (0, 1)
+    );
 
     let empty = database::progress_summary(
         &connection,
@@ -208,9 +205,23 @@ fn progress_summary_uses_current_revisions_for_global_and_set_scopes() {
 #[test]
 fn closed_persisted_enums_reject_unknown_values() {
     assert_eq!(Difficulty::from_str("Hard").unwrap().to_string(), "Hard");
-    assert_eq!(AttemptOutcome::from_str("cancelled").unwrap().to_string(), "cancelled");
+    assert_eq!(
+        AttemptOutcome::from_str("cancelled").unwrap().to_string(),
+        "cancelled"
+    );
     assert!(Difficulty::from_str("Extreme").is_err());
     assert!(AttemptOutcome::from_str("timeout").is_err());
+    let sqlite = rusqlite::Connection::open_in_memory().unwrap();
+    let parsed: AttemptOutcome = sqlite
+        .query_row("SELECT 'pass'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(parsed, AttemptOutcome::Pass);
+    let unknown = sqlite
+        .query_row("SELECT 'timeout'", [], |row| {
+            row.get::<_, AttemptOutcome>(0)
+        })
+        .unwrap_err();
+    assert!(format!("{unknown:?}").contains("unknown persisted attempt outcome"));
 
     let fixture = Fixture::new();
     let connection = fixture.connection();

@@ -1,8 +1,8 @@
 use clap::{Args, Parser, Subcommand};
-use database::{NewProblem, Problem, ProblemUpdate};
-use practice_cli::{catalog, config, database, runner};
-use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::{BTreeMap, HashSet};
+use database::{AttemptOutcome, Difficulty, NewProblem, Problem, ProblemUpdate, ProgressScope};
+use practice_cli::{config, database, runner};
+use rusqlite::Connection;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -83,8 +83,7 @@ struct RunArgs {
 struct RecordArgs {
     language: String,
     problem: String,
-    #[arg(value_parser = ["pass", "fail", "error", "cancelled"])]
-    result: String,
+    result: AttemptOutcome,
     duration_ms: i64,
     #[arg(long = "problem-set")]
     invoked_set: Option<String>,
@@ -120,8 +119,8 @@ struct ProblemAddArgs {
     problem: String,
     #[arg(long, required = true)]
     title: String,
-    #[arg(long, required = true, value_parser = ["Easy", "Medium", "Hard"])]
-    difficulty: String,
+    #[arg(long, required = true)]
+    difficulty: Difficulty,
     #[arg(long, required = true)]
     topic: String,
     #[arg(long, conflicts_with = "statement_file", default_value = "")]
@@ -143,8 +142,8 @@ struct ProblemUpdateArgs {
     problem: String,
     #[arg(long)]
     title: Option<String>,
-    #[arg(long, value_parser = ["Easy", "Medium", "Hard"])]
-    difficulty: Option<String>,
+    #[arg(long)]
+    difficulty: Option<Difficulty>,
     #[arg(long)]
     topic: Option<String>,
     #[arg(long, conflicts_with = "statement_file")]
@@ -262,40 +261,22 @@ fn print_table(headers: &[String], rows: &[Vec<String>]) -> Result<(), String> {
     Ok(())
 }
 
-fn title_case(value: &str) -> String {
-    let mut characters = value.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-        None => String::new(),
-    }
-}
-
-fn enabled_languages(connection: &Connection) -> Result<Vec<String>, String> {
-    let mut statement = connection
-        .prepare("SELECT slug FROM languages WHERE enabled = 1 ORDER BY slug")
-        .map_err(|error| error.to_string())?;
-    statement
-        .query_map([], |row| row.get(0))
-        .map_err(|error| error.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())
-}
-
 fn command_list(context: &Context, args: &ListArgs) -> Result<i32, String> {
     let members = database::list_set_members(&context.connection, &context.problem_set)?;
-    let languages = enabled_languages(&context.connection)?;
+    let languages = database::list_enabled_languages(&context.connection)?;
     let mut completed = BTreeMap::new();
     for language in &languages {
         completed.insert(
-            language.clone(),
-            database::completed_problem_ids(&context.connection, Some(language))?,
+            language.slug.clone(),
+            database::completed_problem_ids(&context.connection, Some(&language.slug))?,
         );
     }
     let difficulty = args.difficulty.as_deref();
     let topic = args.topic.as_ref().map(|value| value.to_lowercase());
     let mut rows = Vec::new();
-    for problem in members {
-        if difficulty.is_some_and(|value| problem.difficulty.to_lowercase() != value) {
+    for member in members {
+        let problem = member.problem;
+        if difficulty.is_some_and(|value| problem.difficulty.to_string().to_lowercase() != value) {
             continue;
         }
         if topic
@@ -305,12 +286,12 @@ fn command_list(context: &Context, args: &ListArgs) -> Result<i32, String> {
             continue;
         }
         let mut row = vec![
-            problem.ordinal.unwrap_or_default().to_string(),
-            problem.difficulty,
+            member.ordinal.get().to_string(),
+            problem.difficulty.to_string(),
             problem.topic,
         ];
         for language in &languages {
-            row.push(if completed[language].contains(&problem.id) {
+            row.push(if completed[&language.slug].contains(&problem.id) {
                 "yes".to_string()
             } else {
                 "-".to_string()
@@ -324,20 +305,21 @@ fn command_list(context: &Context, args: &ListArgs) -> Result<i32, String> {
         "Difficulty".to_string(),
         "Topic".to_string(),
     ];
-    headers.extend(languages.iter().map(|language| title_case(language)));
+    headers.extend(
+        languages
+            .iter()
+            .map(|language| language.display_name.clone()),
+    );
     headers.push("Problem".to_string());
     print_table(&headers, &rows)?;
     Ok(0)
 }
 
-fn print_problem(problem: &Problem, set_slug: Option<&str>) {
+fn print_problem(problem: &Problem, set_membership: Option<(&str, database::PositiveOrdinal)>) {
     println!("{}", problem.title);
     println!("Slug: {}", problem.slug);
-    if let Some(set_slug) = set_slug {
-        println!(
-            "Problem set: {set_slug} #{}",
-            problem.ordinal.unwrap_or_default()
-        );
+    if let Some((set_slug, ordinal)) = set_membership {
+        println!("Problem set: {set_slug} #{}", ordinal.get());
     }
     println!("Difficulty: {}", problem.difficulty);
     println!("Topic: {}", problem.topic);
@@ -356,100 +338,75 @@ fn print_problem(problem: &Problem, set_slug: Option<&str>) {
 }
 
 fn command_stats(context: &Context, args: &StatsArgs) -> Result<i32, String> {
-    let (members, set_name) = if args.global_stats {
-        (
-            database::list_active_global_problems(&context.connection)?,
-            "All Problems".to_string(),
-        )
+    let (scope, set_name) = if args.global_stats {
+        (ProgressScope::Global, "All Problems".to_string())
     } else {
         (
-            database::list_set_members(&context.connection, &context.problem_set)?,
+            ProgressScope::ProblemSet(&context.problem_set),
             database::get_problem_set(&context.connection, &context.problem_set)?.name,
         )
     };
     let language = (args.language != "any").then_some(args.language.as_str());
-    if let Some(language) = language
-        && !database::language_is_enabled(&context.connection, language)?
-    {
-        return Err(format!("unknown or disabled language: {language}"));
-    }
-    let completed = database::completed_problem_ids(&context.connection, language)?;
-    let done = members
-        .iter()
-        .filter(|problem| completed.contains(&problem.id))
-        .count();
-    let total = members.len();
-    let percentage = if total == 0 {
-        0.0
-    } else {
-        done as f64 / total as f64 * 100.0
-    };
+    let summary = database::progress_summary(&context.connection, scope, language)?;
+    let overall_percentage = percentage(summary.completed, summary.total);
     let label = language.unwrap_or("any language");
-    println!("{set_name} progress ({label}): {done}/{total} ({percentage:.1}%)");
+    println!(
+        "{set_name} progress ({label}): {}/{} ({overall_percentage:.1}%)",
+        summary.completed, summary.total
+    );
 
-    print_stats_group(&members, &completed, true)?;
-    print_stats_group(&members, &completed, false)?;
+    if !summary.by_difficulty.is_empty() {
+        println!("\nBy difficulty");
+        let rows = summary
+            .by_difficulty
+            .iter()
+            .map(|group| {
+                vec![
+                    group.difficulty.to_string(),
+                    group.completed.to_string(),
+                    group.total.to_string(),
+                    format!("{:.1}%", percentage(group.completed, group.total)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print_progress_table("Difficulty", &rows)?;
+    }
+    if !summary.by_topic.is_empty() {
+        println!("\nBy topic");
+        let rows = summary
+            .by_topic
+            .iter()
+            .map(|group| {
+                vec![
+                    group.topic.clone(),
+                    group.completed.to_string(),
+                    group.total.to_string(),
+                    format!("{:.1}%", percentage(group.completed, group.total)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print_progress_table("Topic", &rows)?;
+    }
     Ok(0)
 }
 
-fn print_stats_group(
-    members: &[Problem],
-    completed: &HashSet<i64>,
-    difficulty: bool,
-) -> Result<(), String> {
-    let mut groups: Vec<(String, Vec<&Problem>)> = Vec::new();
-    for problem in members {
-        let name = if difficulty {
-            &problem.difficulty
-        } else {
-            &problem.topic
-        };
-        if let Some((_, group)) = groups.iter_mut().find(|(existing, _)| existing == name) {
-            group.push(problem);
-        } else {
-            groups.push((name.clone(), vec![problem]));
-        }
-    }
-    if difficulty {
-        groups.sort_by_key(|(name, _)| {
-            catalog::DIFFICULTIES
-                .iter()
-                .position(|difficulty| difficulty == name)
-                .expect("database difficulty satisfies its CHECK constraint")
-        });
-    }
-    if groups.is_empty() {
-        return Ok(());
-    }
-    let heading = if difficulty {
-        "By difficulty"
+fn percentage(completed: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
     } else {
-        "By topic"
-    };
-    println!("\n{heading}");
-    let rows = groups
-        .iter()
-        .map(|(name, group)| {
-            let done = group
-                .iter()
-                .filter(|problem| completed.contains(&problem.id))
-                .count();
-            vec![
-                name.clone(),
-                done.to_string(),
-                group.len().to_string(),
-                format!("{:.1}%", done as f64 / group.len() as f64 * 100.0),
-            ]
-        })
-        .collect::<Vec<_>>();
+        completed as f64 / total as f64 * 100.0
+    }
+}
+
+fn print_progress_table(group_heading: &str, rows: &[Vec<String>]) -> Result<(), String> {
     print_table(
         &[
-            title_case(heading.trim_start_matches("By ")),
+            group_heading.to_string(),
             "Done".to_string(),
             "Total".to_string(),
             "Progress".to_string(),
         ],
-        &rows,
+        rows,
     )
 }
 
@@ -484,8 +441,13 @@ fn command_test(context: &Context, language: &str, problem: &str) -> Result<i32,
         return run_one(context, language, problem, Some(&context.problem_set));
     }
     let mut status = 0;
-    for problem in database::list_set_members(&context.connection, &context.problem_set)? {
-        let result = run_one(context, language, &problem.slug, Some(&context.problem_set))?;
+    for member in database::list_set_members(&context.connection, &context.problem_set)? {
+        let result = run_one(
+            context,
+            language,
+            &member.problem.slug,
+            Some(&context.problem_set),
+        )?;
         if result != 0 {
             status = result;
         }
@@ -509,9 +471,17 @@ fn command_problems(context: &Context, command: &ProblemsCommand) -> Result<i32,
                     .into_iter()
                     .map(|row| {
                         vec![
-                            row.problem.difficulty,
+                            row.problem.difficulty.to_string(),
                             row.problem.topic,
-                            row.languages,
+                            if row.implementations.is_empty() {
+                                "-".to_string()
+                            } else {
+                                row.implementations
+                                    .iter()
+                                    .map(|implementation| implementation.language.slug.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            },
                             if row.problem.archived {
                                 "archived"
                             } else {
@@ -525,30 +495,17 @@ fn command_problems(context: &Context, command: &ProblemsCommand) -> Result<i32,
             )?;
         }
         ProblemsCommand::Show { problem } => {
-            let problem = database::resolve_problem(&context.connection, problem, None)?;
+            let problem = database::resolve_problem(&context.connection, problem, None)?.problem;
             print_problem(&problem, None);
-            let adapters = {
-                let mut statement = context
-                    .connection
-                    .prepare(
-                        "SELECT l.slug, i.solution_path \
-                         FROM problem_implementations AS i \
-                         JOIN languages AS l ON l.id = i.language_id \
-                         WHERE i.problem_id = ? AND i.enabled = 1 ORDER BY l.slug",
-                    )
-                    .map_err(|error| error.to_string())?;
-                statement
-                    .query_map(params![problem.id], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(|error| error.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| error.to_string())?
-            };
-            if !adapters.is_empty() {
+            let implementations =
+                database::list_enabled_implementations(&context.connection, problem.id)?;
+            if !implementations.is_empty() {
                 println!("\nAdapters");
-                for (language, path) in adapters {
-                    println!("{language}: {path}");
+                for implementation in implementations {
+                    println!(
+                        "{}: {}",
+                        implementation.language.slug, implementation.solution_path
+                    );
                 }
             }
         }
@@ -559,7 +516,7 @@ fn command_problems(context: &Context, command: &ProblemsCommand) -> Result<i32,
                 &NewProblem {
                     slug: &args.problem,
                     title: &args.title,
-                    difficulty: &args.difficulty,
+                    difficulty: args.difficulty,
                     topic: &args.topic,
                     statement_markdown: &statement,
                     leetcode_id: args.leetcode_id,
@@ -596,7 +553,7 @@ fn command_problems(context: &Context, command: &ProblemsCommand) -> Result<i32,
                 &args.problem,
                 &ProblemUpdate {
                     title: args.title.as_deref(),
-                    difficulty: args.difficulty.as_deref(),
+                    difficulty: args.difficulty,
                     topic: args.topic.as_deref(),
                     statement_markdown: statement.as_deref(),
                     test_revision: args.test_revision,
@@ -651,7 +608,7 @@ fn register_adapter(
     language: &str,
     solution_path: &str,
 ) -> Result<(), String> {
-    let resolved_problem = database::resolve_problem(&context.connection, problem, None)?;
+    let resolved_problem = database::resolve_problem(&context.connection, problem, None)?.problem;
     if resolved_problem.managed {
         return Err(format!("shipped problem is read-only: {problem}"));
     }
@@ -662,19 +619,8 @@ fn register_adapter(
             solution.display()
         ));
     }
-    let runner_path: Option<String> = context
-        .connection
-        .query_row(
-            "SELECT runner_path FROM languages WHERE slug = ? AND enabled = 1",
-            params![language],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let Some(runner_path) = runner_path else {
-        return Err(format!("unknown or disabled language: {language}"));
-    };
-    let runner = context.root.join(runner_path);
+    let enabled_language = database::get_enabled_language(&context.connection, language)?;
+    let runner = context.root.join(enabled_language.runner_path);
     let output = ProcessCommand::new(&runner)
         .arg("--list")
         .current_dir(
@@ -728,12 +674,12 @@ fn command_sets(context: &Context, command: &SetsCommand) -> Result<i32, String>
                     ],
                     &members
                         .into_iter()
-                        .map(|problem| {
+                        .map(|member| {
                             vec![
-                                problem.ordinal.unwrap_or_default().to_string(),
-                                problem.difficulty,
-                                problem.topic,
-                                problem.slug,
+                                member.ordinal.get().to_string(),
+                                member.problem.difficulty.to_string(),
+                                member.problem.topic,
+                                member.problem.slug,
                             ]
                         })
                         .collect::<Vec<_>>(),
@@ -816,12 +762,16 @@ fn dispatch(cli: Cli) -> Result<i32, String> {
     match &cli.command {
         TopCommand::List(args) => command_list(&context, args),
         TopCommand::Show { problem } => {
-            let problem = database::resolve_problem(
+            let resolved = database::resolve_problem(
                 &context.connection,
                 problem,
                 Some(&context.problem_set),
             )?;
-            print_problem(&problem, Some(&context.problem_set));
+            let membership = resolved
+                .membership
+                .as_ref()
+                .map(|member| (context.problem_set.as_str(), member.ordinal));
+            print_problem(&resolved.problem, membership);
             Ok(0)
         }
         TopCommand::Stats(args) => command_stats(&context, args),
@@ -842,7 +792,7 @@ fn dispatch(cli: Cli) -> Result<i32, String> {
                 &context.connection,
                 &args.problem,
                 &args.language,
-                &args.result,
+                args.result,
                 args.duration_ms,
                 args.exit_code,
                 args.invoked_set.as_deref(),

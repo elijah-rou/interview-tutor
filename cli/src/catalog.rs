@@ -1,13 +1,12 @@
 use crate::database::{
-    MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
+    Difficulty, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-
-pub const DIFFICULTIES: [&str; 3] = ["Easy", "Medium", "Hard"];
+use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -219,9 +218,8 @@ pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
         validate_identifier(&problem.slug, "problem slug", true)?;
         validate_non_blank(&problem.title, "problem title", MAX_TITLE_LENGTH)?;
         validate_non_blank(&problem.topic, "problem topic", MAX_TOPIC_LENGTH)?;
-        if !DIFFICULTIES.contains(&problem.difficulty.as_str()) {
-            return Err(format!("invalid difficulty: {}", problem.difficulty));
-        }
+        Difficulty::from_str(&problem.difficulty)
+            .map_err(|_| format!("invalid difficulty: {}", problem.difficulty))?;
         if problem.test_revision <= 0 {
             return Err(format!(
                 "invalid test revision for problem: {}",
