@@ -2,6 +2,7 @@ use practice_cli::database::{self, AttemptOutcome, Difficulty, NewProblem, Progr
 use practice_cli::runner;
 use rusqlite::params;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +24,11 @@ impl Fixture {
         fs::create_dir_all(root.join("catalog")).unwrap();
         fs::create_dir_all(root.join("problem_sets")).unwrap();
         fs::create_dir_all(root.join("python")).unwrap();
-        fs::write(root.join("python/run"), "#!/bin/sh\nexit 0\n").unwrap();
+        let runner = root.join("python/run");
+        fs::write(&runner, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = fs::metadata(&runner).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runner, permissions).unwrap();
         fs::write(root.join("python/shipped.py"), "# shipped\n").unwrap();
         fs::write(
             root.join("catalog/problems.json"),

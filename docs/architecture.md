@@ -24,9 +24,13 @@ Completion is derived from a passing attempt whose revision matches the global p
 
 ## Execution
 
-`practice_cli::database::resolve_problem` resolves either a global slug or an exact set slug/index. `practice_cli::runner::plan_execution` produces the runner and solution paths. `execute_plan` invokes the set-agnostic language protocol, and `record_execution` writes one central attempt. Language-local wrappers suppress their compatibility recorder during central execution.
+`practice_cli::database::resolve_problem` resolves either a global slug or an exact set slug/index. `practice_cli::runner::plan_execution` preserves the project root, runner path, solution path, problem, language, and optional invoked set. `execute` invokes the set-agnostic language protocol without a shell, while `record_execution` remains an explicit operation that writes exactly one central attempt. Spawn and preflight failures do not record. Language-local wrappers suppress their compatibility recorder during central execution.
 
-This plan/result boundary is the integration point for the future TUI. A Rust TUI can reuse the CLI crate modules to load statement Markdown and registered paths without parsing human CLI tables. The current executor inherits child output and has no timeout or cancellation API. Bounded output streaming belongs to the later runner layer.
+The Linux executor starts one direct child in a new process group and captures both pipes. Defaults are a 30 second wall timeout, 250 millisecond TERM grace, 256 KiB of retained combined display output, 8 KiB pipe reads, and 64 queued events. Limits are validated and bounded. Output is decoded lossily and ANSI/control sequences are removed before display or callback delivery. When combined raw output exceeds its cap, the result retains a prefix and tail separated by one deterministic marker containing the exact omitted raw-byte count; readers continue draining after the cap.
+
+`Termination` distinguishes a numeric exit from caller cancellation, timeout, external signal, and callback failure. Exit 0 maps to `pass`, exit 2 to `error`, every other numeric exit including 130 to `fail`, explicit cancellation to `cancelled`, and timeout, signal, or callback failure to `error`. Timeout, cancellation, callback failure, and remaining descendants trigger process-group TERM, a bounded grace, then KILL. The direct child is reaped and both reader threads are joined before `execute` returns one result. The synchronous API is intended to run on a TUI worker thread; `CancellationToken` and the bounded synchronous event queue do not introduce an async runtime.
+
+Adapter `--list` discovery uses the same process-group implementation with a five second CLI timeout and 64 KiB retained-output cap before any database mutation. This plan/result boundary lets the future TUI reuse statement and runner APIs without parsing CLI tables.
 
 ## Extension path
 

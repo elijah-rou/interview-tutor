@@ -5,8 +5,9 @@ use practice_cli::{config, database, runner};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode};
+use std::process::ExitCode;
 use std::str::FromStr;
 
 fn difficulty_parser() -> impl TypedValueParser<Value = Difficulty> {
@@ -437,9 +438,21 @@ fn run_one(
         reference,
         set_slug,
     )?;
-    let result = runner::execute_plan(&plan, &context.database_path)?;
+    let result = runner::execute(
+        &plan,
+        &context.database_path,
+        &runner::ExecutionLimits::default(),
+        &runner::CancellationToken::new(),
+        |event| {
+            let bytes = match event {
+                runner::ExecutionEvent::Stdout(text) => io::stdout().write_all(text.as_bytes()),
+                runner::ExecutionEvent::Stderr(text) => io::stderr().write_all(text.as_bytes()),
+            };
+            bytes.map_err(|error| format!("cannot write runner output: {error}"))
+        },
+    )?;
     runner::record_execution(&context.connection, &plan, &result)?;
-    Ok(result.status_code)
+    Ok(result.status_code())
 }
 
 fn command_run(context: &Context, args: &RunArgs) -> Result<i32, String> {
@@ -634,22 +647,19 @@ fn register_adapter(
         ));
     }
     let enabled_language = database::get_enabled_language(&context.connection, language)?;
-    let runner = context.root.join(enabled_language.runner_path);
-    let output = ProcessCommand::new(&runner)
-        .arg("--list")
-        .current_dir(
-            runner
-                .parent()
-                .ok_or_else(|| "language runner has no parent".to_string())?,
-        )
-        .output()
-        .map_err(|error| format!("language runner discovery failed: {language}: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("language runner discovery failed: {language}"));
-    }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|_| format!("language runner emitted invalid UTF-8: {language}"))?;
-    if !stdout.lines().any(|slug| slug == problem) {
+    let runner_path = context.root.join(enabled_language.runner_path);
+    let discovery_limits = runner::ExecutionLimits {
+        wall_timeout: std::time::Duration::from_secs(5),
+        display_output_bytes: 64 * 1024,
+        ..runner::ExecutionLimits::default()
+    };
+    let adapters = runner::discover_adapters(
+        &runner_path,
+        &discovery_limits,
+        &runner::CancellationToken::new(),
+    )
+    .map_err(|error| format!("language runner discovery failed: {language}: {error}"))?;
+    if !adapters.iter().any(|slug| slug == problem) {
         return Err(format!(
             "{language} runner does not expose problem adapter: {problem}"
         ));
