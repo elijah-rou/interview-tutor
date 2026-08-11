@@ -15,7 +15,33 @@ pub const MAX_TITLE_LENGTH: usize = 200;
 pub const MAX_TOPIC_LENGTH: usize = 100;
 pub const MAX_DESCRIPTION_LENGTH: usize = 2_000;
 pub const MAX_STATEMENT_LENGTH: usize = 1_000_000;
+pub const MAX_DATABASE_QUERY_ROWS: usize = 100_000;
 const SCHEMA_VERSION: i64 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowLimit(usize);
+
+impl RowLimit {
+    pub fn new(maximum: usize) -> Result<Self, String> {
+        if maximum == 0 || maximum > MAX_DATABASE_QUERY_ROWS {
+            return Err(format!(
+                "database row limit must be between 1 and {MAX_DATABASE_QUERY_ROWS}"
+            ));
+        }
+        Ok(Self(maximum))
+    }
+
+    fn sql_limit(self) -> i64 {
+        i64::try_from(self.0 + 1).expect("validated database row limit fits i64")
+    }
+
+    fn check<T>(self, label: &str, rows: Vec<T>) -> Result<Vec<T>, String> {
+        if rows.len() > self.0 {
+            return Err(format!("{label} row limit exceeded: maximum {}", self.0));
+        }
+        Ok(rows)
+    }
+}
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS metadata (
@@ -1040,6 +1066,37 @@ pub fn list_problem_sets(connection: &Connection) -> Result<Vec<(ProblemSet, i64
         .map_err(sql_error)
 }
 
+pub fn list_problem_sets_bounded(
+    connection: &Connection,
+    limit: RowLimit,
+) -> Result<Vec<(ProblemSet, i64)>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT ps.id, ps.slug, ps.name, ps.description, ps.managed, COUNT(m.problem_id) \
+             FROM problem_sets AS ps \
+             LEFT JOIN problem_set_members AS m ON m.problem_set_id = ps.id \
+             GROUP BY ps.id ORDER BY ps.slug LIMIT ?",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![limit.sql_limit()], |row| {
+            Ok((
+                ProblemSet {
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    managed: row.get(4)?,
+                },
+                row.get(5)?,
+            ))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    limit.check("problem-set", rows)
+}
+
 pub fn list_set_members(connection: &Connection, set_slug: &str) -> Result<Vec<SetMember>, String> {
     get_problem_set(connection, set_slug)?;
     let sql = format!(
@@ -1055,6 +1112,28 @@ pub fn list_set_members(connection: &Connection, set_slug: &str) -> Result<Vec<S
         .map_err(sql_error)?
         .collect::<Result<_, _>>()
         .map_err(sql_error)
+}
+
+pub fn list_set_members_bounded(
+    connection: &Connection,
+    set_slug: &str,
+    limit: RowLimit,
+) -> Result<Vec<SetMember>, String> {
+    get_problem_set(connection, set_slug)?;
+    let sql = format!(
+        "SELECT {PROBLEM_COLUMNS}, m.ordinal, m.section \
+         FROM problem_set_members AS m \
+         JOIN problem_sets AS ps ON ps.id = m.problem_set_id \
+         JOIN problems AS p ON p.id = m.problem_id \
+         WHERE ps.slug = ? ORDER BY m.ordinal LIMIT ?"
+    );
+    let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![set_slug, limit.sql_limit()], set_member_from_row)
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    limit.check("problem-set member", rows)
 }
 
 fn is_ascii_decimal(value: &str) -> bool {
@@ -1225,6 +1304,51 @@ pub fn completed_problem_ids(
     Ok(rows.into_iter().collect())
 }
 
+pub fn completed_problem_ids_bounded(
+    connection: &Connection,
+    language_slug: Option<&str>,
+    limit: RowLimit,
+) -> Result<HashSet<i64>, String> {
+    let (sql, language) = if language_slug.is_some() {
+        (
+            "SELECT DISTINCT a.problem_id \
+             FROM attempts AS a \
+             JOIN problems AS p ON p.id = a.problem_id \
+             JOIN languages AS l ON l.id = a.language_id \
+             WHERE a.result = 'pass' AND a.test_revision = p.test_revision AND l.slug = ?1 \
+             LIMIT ?2",
+            language_slug,
+        )
+    } else {
+        (
+            "SELECT DISTINCT a.problem_id \
+             FROM attempts AS a \
+             JOIN problems AS p ON p.id = a.problem_id \
+             JOIN languages AS l ON l.id = a.language_id \
+             WHERE a.result = 'pass' AND a.test_revision = p.test_revision LIMIT ?1",
+            None,
+        )
+    };
+    let mut statement = connection.prepare(sql).map_err(sql_error)?;
+    let rows = if let Some(language) = language {
+        statement
+            .query_map(params![language, limit.sql_limit()], |row| row.get(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(sql_error)?
+    } else {
+        statement
+            .query_map(params![limit.sql_limit()], |row| row.get(0))
+            .map_err(sql_error)?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(sql_error)?
+    };
+    Ok(limit
+        .check("completed-problem", rows)?
+        .into_iter()
+        .collect())
+}
+
 pub fn language_is_enabled(connection: &Connection, slug: &str) -> Result<bool, String> {
     connection
         .query_row(
@@ -1277,6 +1401,39 @@ pub fn list_enabled_languages(connection: &Connection) -> Result<Vec<EnabledLang
         .map_err(sql_error)
 }
 
+pub fn list_enabled_languages_bounded(
+    connection: &Connection,
+    limit: RowLimit,
+) -> Result<Vec<EnabledLanguage>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT slug, display_name, runner_path FROM languages \
+             WHERE enabled = 1 ORDER BY slug LIMIT ?",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![limit.sql_limit()], |row| {
+            Ok(EnabledLanguage {
+                slug: row.get(0)?,
+                display_name: row.get(1)?,
+                runner_path: row.get(2)?,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    let rows = limit.check("enabled-language", rows)?;
+    for language in &rows {
+        if language.slug.chars().count() > MAX_TITLE_LENGTH
+            || language.display_name.chars().count() > MAX_TITLE_LENGTH
+            || language.runner_path.chars().count() > MAX_DESCRIPTION_LENGTH
+        {
+            return Err("enabled-language row contains oversized text".to_string());
+        }
+    }
+    Ok(rows)
+}
+
 pub fn list_enabled_implementations(
     connection: &Connection,
     problem_id: i64,
@@ -1304,6 +1461,37 @@ pub fn list_enabled_implementations(
         .map_err(sql_error)?
         .collect::<Result<_, _>>()
         .map_err(sql_error)
+}
+
+pub fn list_enabled_implementations_bounded(
+    connection: &Connection,
+    problem_id: i64,
+    limit: RowLimit,
+) -> Result<Vec<ProblemImplementation>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT l.slug, l.display_name, l.runner_path, i.solution_path \
+             FROM problem_implementations AS i \
+             JOIN languages AS l ON l.id = i.language_id \
+             WHERE i.problem_id = ? AND i.enabled = 1 AND l.enabled = 1 \
+             ORDER BY l.slug LIMIT ?",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![problem_id, limit.sql_limit()], |row| {
+            Ok(ProblemImplementation {
+                language: EnabledLanguage {
+                    slug: row.get(0)?,
+                    display_name: row.get(1)?,
+                    runner_path: row.get(2)?,
+                },
+                solution_path: row.get(3)?,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    limit.check("implementation", rows)
 }
 
 pub fn list_global_problems(
@@ -1391,10 +1579,41 @@ pub fn list_active_global_problems(connection: &Connection) -> Result<Vec<Proble
         .map_err(sql_error)
 }
 
+pub fn list_active_global_problems_bounded(
+    connection: &Connection,
+    limit: RowLimit,
+) -> Result<Vec<Problem>, String> {
+    let sql = format!(
+        "SELECT {PROBLEM_COLUMNS} FROM problems AS p \
+         WHERE p.archived = 0 ORDER BY p.slug LIMIT ?"
+    );
+    let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![limit.sql_limit()], problem_from_row)
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    limit.check("problem", rows)
+}
+
 pub fn progress_summary(
     connection: &Connection,
     scope: ProgressScope<'_>,
     language_slug: Option<&str>,
+) -> Result<ProgressSummary, String> {
+    progress_summary_bounded(
+        connection,
+        scope,
+        language_slug,
+        RowLimit::new(MAX_DATABASE_QUERY_ROWS).expect("database maximum is a valid row limit"),
+    )
+}
+
+pub fn progress_summary_bounded(
+    connection: &Connection,
+    scope: ProgressScope<'_>,
+    language_slug: Option<&str>,
+    limit: RowLimit,
 ) -> Result<ProgressSummary, String> {
     if let Some(language_slug) = language_slug
         && !language_is_enabled(connection, language_slug)?
@@ -1410,7 +1629,7 @@ pub fn progress_summary(
                        WHERE a.problem_id = p.id AND a.result = 'pass' \
                          AND a.test_revision = p.test_revision \
                          AND (?1 IS NULL OR l.slug = ?1)) \
-             FROM problems AS p WHERE p.archived = 0 AND ?2 IS NULL ORDER BY p.slug",
+             FROM problems AS p WHERE p.archived = 0 AND ?2 IS NULL ORDER BY p.slug LIMIT ?3",
             None,
         ),
         ProgressScope::ProblemSet(set_slug) => (
@@ -1422,14 +1641,14 @@ pub fn progress_summary(
                          AND (?1 IS NULL OR l.slug = ?1)) \
              FROM problem_set_members AS m \
              JOIN problems AS p ON p.id = m.problem_id \
-             WHERE m.problem_set_id = ?2 ORDER BY m.ordinal",
+             WHERE m.problem_set_id = ?2 ORDER BY m.ordinal LIMIT ?3",
             Some(get_problem_set(connection, set_slug)?.id),
         ),
     };
 
     let mut statement = connection.prepare(sql).map_err(sql_error)?;
     let rows = statement
-        .query_map(params![language_slug, set_id], |row| {
+        .query_map(params![language_slug, set_id, limit.sql_limit()], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Difficulty>(1)?,
@@ -1445,6 +1664,11 @@ pub fn progress_summary(
     let mut topic_order = Vec::new();
     for row in rows {
         let (_problem_id, difficulty, topic, is_completed) = row.map_err(sql_error)?;
+        if topic.chars().count() > MAX_TOPIC_LENGTH {
+            return Err(format!(
+                "progress topic exceeds {MAX_TOPIC_LENGTH} characters"
+            ));
+        }
         let completed_increment = usize::from(is_completed);
         total += 1;
         completed += completed_increment;
@@ -1457,6 +1681,13 @@ pub fn progress_summary(
         let topic_progress = topics.entry(topic).or_default();
         topic_progress.0 += completed_increment;
         topic_progress.1 += 1;
+    }
+
+    if total > limit.0 {
+        return Err(format!(
+            "progress-input row limit exceeded: maximum {}",
+            limit.0
+        ));
     }
 
     Ok(ProgressSummary {

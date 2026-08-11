@@ -1,6 +1,38 @@
 use super::model::{AppData, MAX_ROWS, ProblemDetail, ProblemRow, SetRow};
-use crate::database::{self, ProgressScope};
+use crate::database::{
+    self, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
+    ProgressScope, RowLimit,
+};
 use rusqlite::Connection;
+
+fn validate_chars(label: &str, value: &str, maximum: usize) -> Result<(), String> {
+    let length = value.chars().count();
+    if length > maximum {
+        return Err(format!("{label} exceeds {maximum} characters: {length}"));
+    }
+    Ok(())
+}
+
+fn validate_problem(problem: &database::Problem) -> Result<(), String> {
+    validate_chars("problem slug", &problem.slug, MAX_TITLE_LENGTH)?;
+    validate_chars("problem title", &problem.title, MAX_TITLE_LENGTH)?;
+    validate_chars("problem topic", &problem.topic, MAX_TOPIC_LENGTH)?;
+    validate_chars(
+        "problem statement",
+        &problem.statement_markdown,
+        MAX_STATEMENT_LENGTH,
+    )?;
+    validate_chars(
+        "problem LeetCode URL",
+        &problem.leetcode_url,
+        MAX_DESCRIPTION_LENGTH,
+    )?;
+    validate_chars(
+        "problem NeetCode URL",
+        &problem.neetcode_url,
+        MAX_DESCRIPTION_LENGTH,
+    )
+}
 
 pub struct Repository {
     connection: Connection,
@@ -17,40 +49,50 @@ impl Repository {
         problem_id: Option<i64>,
         language_slug: &str,
     ) -> Result<AppData, String> {
+        let limit = RowLimit::new(MAX_ROWS)?;
         database::get_enabled_language(&self.connection, language_slug)?;
-        let raw_sets = database::list_problem_sets(&self.connection)?;
-        if raw_sets.len() > MAX_ROWS {
-            return Err(format!(
-                "problem-set row limit exceeded: {}",
-                raw_sets.len()
-            ));
-        }
+        let raw_sets = database::list_problem_sets_bounded(&self.connection, limit)?;
         let mut sets = Vec::with_capacity(raw_sets.len());
         for (set, member_count) in raw_sets {
-            let progress = database::progress_summary(
+            validate_chars("problem-set slug", &set.slug, MAX_TITLE_LENGTH)?;
+            validate_chars("problem-set name", &set.name, MAX_TITLE_LENGTH)?;
+            validate_chars(
+                "problem-set description",
+                &set.description,
+                MAX_DESCRIPTION_LENGTH,
+            )?;
+            let progress = database::progress_summary_bounded(
                 &self.connection,
                 ProgressScope::ProblemSet(&set.slug),
                 Some(language_slug),
+                limit,
             )?;
+            let member_count = usize::try_from(member_count)
+                .map_err(|_| "negative problem-set member count".to_string())?;
+            if member_count > MAX_ROWS {
+                return Err(format!("problem-set member count exceeds {MAX_ROWS}"));
+            }
             sets.push(SetRow {
                 slug: set.slug,
                 name: set.name,
                 description: set.description,
-                member_count: usize::try_from(member_count)
-                    .map_err(|_| "negative problem-set member count".to_string())?,
+                member_count,
                 completed_count: progress.completed,
             });
         }
 
-        let progress = database::progress_summary(
+        let progress = database::progress_summary_bounded(
             &self.connection,
             set_slug.map_or(ProgressScope::Global, ProgressScope::ProblemSet),
             Some(language_slug),
+            limit,
         )?;
-        let completed = database::completed_problem_ids(&self.connection, Some(language_slug))?;
+        let completed =
+            database::completed_problem_ids_bounded(&self.connection, Some(language_slug), limit)?;
         let mut problems = Vec::new();
         if let Some(slug) = set_slug {
-            for member in database::list_set_members(&self.connection, slug)? {
+            for member in database::list_set_members_bounded(&self.connection, slug, limit)? {
+                validate_problem(&member.problem)?;
                 problems.push(ProblemRow {
                     id: member.problem.id,
                     ordinal: Some(member.ordinal.get()),
@@ -62,7 +104,8 @@ impl Repository {
                 });
             }
         } else {
-            for problem in database::list_active_global_problems(&self.connection)? {
+            for problem in database::list_active_global_problems_bounded(&self.connection, limit)? {
+                validate_problem(&problem)?;
                 problems.push(ProblemRow {
                     id: problem.id,
                     ordinal: None,
@@ -74,8 +117,8 @@ impl Repository {
                 });
             }
         }
-        if problems.len() > MAX_ROWS {
-            return Err(format!("problem row limit exceeded: {}", problems.len()));
+        for item in &progress.by_topic {
+            validate_chars("progress topic", &item.topic, MAX_TOPIC_LENGTH)?;
         }
 
         let detail = if let Some(id) = problem_id {
@@ -84,6 +127,35 @@ impl Repository {
                 .find(|row| row.id == id)
                 .ok_or_else(|| format!("selected problem no longer exists: {id}"))?;
             let resolved = database::resolve_problem(&self.connection, &row.slug, set_slug)?;
+            validate_chars(
+                "problem statement",
+                &resolved.problem.statement_markdown,
+                MAX_STATEMENT_LENGTH,
+            )?;
+            let implementations =
+                database::list_enabled_implementations_bounded(&self.connection, id, limit)?;
+            for implementation in &implementations {
+                validate_chars(
+                    "implementation path",
+                    &implementation.solution_path,
+                    MAX_DESCRIPTION_LENGTH,
+                )?;
+                validate_chars(
+                    "language slug",
+                    &implementation.language.slug,
+                    MAX_TITLE_LENGTH,
+                )?;
+                validate_chars(
+                    "language display name",
+                    &implementation.language.display_name,
+                    MAX_TITLE_LENGTH,
+                )?;
+                validate_chars(
+                    "language runner path",
+                    &implementation.language.runner_path,
+                    MAX_DESCRIPTION_LENGTH,
+                )?;
+            }
             Some(ProblemDetail {
                 id: resolved.problem.id,
                 slug: resolved.problem.slug,
@@ -91,7 +163,7 @@ impl Repository {
                 difficulty: resolved.problem.difficulty,
                 topic: resolved.problem.topic,
                 statement_markdown: resolved.problem.statement_markdown,
-                implementations: database::list_enabled_implementations(&self.connection, id)?,
+                implementations,
             })
         } else {
             None
@@ -205,6 +277,39 @@ mod tests {
                 .iter()
                 .any(|item| item.language.slug == "python")
         );
+
+        repository
+            .connection
+            .execute(
+                "UPDATE problems SET statement_markdown = ? WHERE id = ?",
+                rusqlite::params!["界".repeat(MAX_STATEMENT_LENGTH + 1), members[0].problem.id],
+            )
+            .unwrap();
+        let error = repository
+            .load(Some(&set_slug), Some(members[0].problem.id), "python")
+            .unwrap_err();
+        assert!(error.contains("problem statement exceeds"));
         assert!(cleanup.0.exists());
+    }
+
+    #[test]
+    fn bounded_language_query_rejects_invalid_limits_and_overflow() {
+        assert!(RowLimit::new(0).is_err());
+        assert!(RowLimit::new(database::MAX_DATABASE_QUERY_ROWS + 1).is_err());
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE languages (
+                id INTEGER PRIMARY KEY, slug TEXT, display_name TEXT,
+                runner_path TEXT, enabled INTEGER
+             );
+             INSERT INTO languages VALUES (1, 'a', 'A', 'a/run', 1);
+             INSERT INTO languages VALUES (2, 'b', 'B', 'b/run', 1);",
+            )
+            .unwrap();
+        let error =
+            database::list_enabled_languages_bounded(&connection, RowLimit::new(1).unwrap())
+                .unwrap_err();
+        assert!(error.contains("row limit exceeded"));
     }
 }
