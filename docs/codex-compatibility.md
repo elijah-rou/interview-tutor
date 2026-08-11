@@ -4,7 +4,7 @@ Interview Tutor uses only the official installed `codex app-server` stdio proces
 
 ## Tested protocol
 
-Validated on 2025-08-11 with:
+Validated for this stack with:
 
 - executable: `/home/elijahrou/.bun/install/global/node_modules/@openai/codex/bin/codex.js` (canonical path reported by the test host)
 - version: `codex-cli 0.146.0`
