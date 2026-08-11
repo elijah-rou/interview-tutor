@@ -26,6 +26,7 @@ class GeneralizedCliTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            timeout=30,
         )
 
     def test_pure_numeric_problem_slug_is_rejected_as_index_ambiguous(self) -> None:
@@ -183,6 +184,36 @@ class GeneralizedCliTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(preserved_attempt, (None,))
 
+    def test_empty_environment_values_do_not_mask_configuration(self) -> None:
+        fallback_database = Path(self.temporary_directory.name) / "fallback.db"
+        self.environment["PRACTICE_DATABASE_URL"] = ""
+        self.environment["PRACTICE_DB_PATH"] = str(fallback_database)
+        database_result = self.run_command(str(ROOT / "practice"), "db")
+        self.assertEqual(database_result.returncode, 0, database_result.stderr)
+        self.assertEqual(database_result.stdout.splitlines()[0], str(fallback_database))
+        self.assertTrue(fallback_database.is_file())
+
+        self.environment["PRACTICE_ROOT"] = ""
+        root_result = self.run_command(
+            "cargo",
+            "run",
+            "--locked",
+            "--quiet",
+            "--manifest-path",
+            str(ROOT / "cli" / "Cargo.toml"),
+            "--bin",
+            "practice",
+            "--",
+            "db",
+        )
+        self.assertEqual(root_result.returncode, 0, root_result.stderr)
+        self.assertEqual(root_result.stdout.splitlines()[0], str(fallback_database))
+
+    def test_explicit_empty_database_flag_is_rejected(self) -> None:
+        result = self.run_command(str(ROOT / "practice"), "--db", "", "db")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("database path must not be empty", result.stderr)
+
     def test_shipped_resources_are_read_only_through_local_crud(self) -> None:
         moved = self.run_command(
             str(ROOT / "practice"),
@@ -203,8 +234,29 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(moved.returncode, 2)
         self.assertEqual(updated.returncode, 2)
+        adapter = self.run_command(
+            str(ROOT / "practice"),
+            "problems",
+            "adapter",
+            "two-sum",
+            "python",
+            "python/local_judge/registry.py",
+        )
+        self.assertEqual(adapter.returncode, 2)
         self.assertIn("read-only", moved.stderr)
         self.assertIn("read-only", updated.stderr)
+        self.assertIn("read-only", adapter.stderr)
+        with sqlite3.connect(self.database) as connection:
+            solution_path = connection.execute(
+                """
+                SELECT i.solution_path
+                FROM problem_implementations AS i
+                JOIN problems AS p ON p.id = i.problem_id
+                JOIN languages AS l ON l.id = i.language_id
+                WHERE p.slug = 'two-sum' AND l.slug = 'python'
+                """
+            ).fetchone()
+        self.assertEqual(solution_path, ("python/problems/easy/two_sum.py",))
 
     def test_empty_custom_set_reports_zero_progress(self) -> None:
         created = self.run_command(

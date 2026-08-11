@@ -14,6 +14,134 @@ BLIND75 = ROOT / "problem_sets" / "blind75.json"
 
 
 class ProjectCliTests(unittest.TestCase):
+    @staticmethod
+    def fixture_catalog(revision: int = 1) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "catalog_revision": revision,
+            "problems": [
+                {
+                    "slug": "managed-one",
+                    "title": "Managed One",
+                    "difficulty": "Easy",
+                    "topic": "Arrays",
+                    "leetcode_id": 900001,
+                    "premium": False,
+                    "leetcode_url": "https://leetcode.com/problems/managed-one/",
+                    "neetcode_url": "https://neetcode.io/problems/managed-one",
+                    "statement_markdown": "Managed statement.",
+                    "test_revision": 1,
+                    "adapters": [
+                        {
+                            "language": "python",
+                            "solution_path": "python/managed_one.py",
+                        },
+                        {
+                            "language": "rust",
+                            "solution_path": "rust/managed_one.rs",
+                        },
+                    ],
+                },
+                {
+                    "slug": "managed-retired",
+                    "title": "Managed Retired",
+                    "difficulty": "Medium",
+                    "topic": "Graphs",
+                    "leetcode_id": 900002,
+                    "premium": False,
+                    "leetcode_url": "https://leetcode.com/problems/managed-retired/",
+                    "neetcode_url": "https://neetcode.io/problems/managed-retired",
+                    "statement_markdown": "Retired statement.",
+                    "test_revision": 1,
+                    "adapters": [
+                        {
+                            "language": "python",
+                            "solution_path": "python/managed_retired.py",
+                        }
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def fixture_sets() -> dict[str, dict[str, object]]:
+        return {
+            "managed-set": {
+                "schema_version": 2,
+                "id": "managed-set",
+                "name": "Managed Set",
+                "description": "",
+                "members": [
+                    {"ordinal": 1, "problem_slug": "managed-one"},
+                    {"ordinal": 2, "problem_slug": "managed-retired"},
+                ],
+            },
+            "managed-retired-set": {
+                "schema_version": 2,
+                "id": "managed-retired-set",
+                "name": "Managed Retired Set",
+                "description": "",
+                "members": [
+                    {"ordinal": 1, "problem_slug": "managed-retired"}
+                ],
+            },
+        }
+
+    def write_fixture_root(
+        self,
+        root: Path,
+        catalog: dict[str, object],
+        problem_sets: dict[str, dict[str, object]],
+    ) -> None:
+        (root / "catalog").mkdir(parents=True, exist_ok=True)
+        (root / "problem_sets").mkdir(parents=True, exist_ok=True)
+        (root / "python").mkdir(parents=True, exist_ok=True)
+        (root / "rust").mkdir(parents=True, exist_ok=True)
+        (root / "catalog" / "problems.json").write_text(
+            json.dumps(catalog), encoding="utf-8"
+        )
+        for old_set in (root / "problem_sets").glob("*.json"):
+            old_set.unlink()
+        for set_id, problem_set in problem_sets.items():
+            (root / "problem_sets" / f"{set_id}.json").write_text(
+                json.dumps(problem_set), encoding="utf-8"
+            )
+        for relative_path in (
+            "python/managed_one.py",
+            "rust/managed_one.rs",
+            "python/managed_retired.py",
+            "python/custom.py",
+            "python/custom_updated.py",
+        ):
+            path = root / relative_path
+            path.write_text("# fixture\n", encoding="utf-8")
+        runner = root / "python" / "run"
+        runner.write_text(
+            "#!/bin/sh\nprintf '%s\\n' managed-one managed-retired custom-problem\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+
+    def run_fixture_command(
+        self, root: Path, database: Path, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["PRACTICE_ROOT"] = str(root)
+        environment["PRACTICE_DB_PATH"] = str(database)
+        return self.run_command(
+            "cargo",
+            "run",
+            "--locked",
+            "--quiet",
+            "--manifest-path",
+            str(ROOT / "cli" / "Cargo.toml"),
+            "--bin",
+            "practice",
+            "--",
+            *arguments,
+            env=environment,
+        )
+
     def run_command(
         self, *arguments: str, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -24,7 +152,224 @@ class ProjectCliTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            timeout=30,
         )
+
+    def test_future_database_version_is_rejected_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "progress.db"
+            environment = os.environ.copy()
+            environment["PRACTICE_DB_PATH"] = str(database)
+            initialized = self.run_command(
+                str(ROOT / "practice"), "sets", "list", env=environment
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            with sqlite3.connect(database) as connection:
+                connection.execute("PRAGMA user_version = 3")
+                connection.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('future_marker', 'untouched')"
+                )
+                before = connection.execute(
+                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+                ).fetchall()
+            result = self.run_command(
+                str(ROOT / "practice"), "sets", "list", env=environment
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("unsupported database schema version", result.stderr)
+            with sqlite3.connect(database) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                marker = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'future_marker'"
+                ).fetchone()
+                after = connection.execute(
+                    "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+                ).fetchall()
+            self.assertEqual(version, 3)
+            self.assertEqual(marker, ("untouched",))
+            self.assertEqual(after, before)
+
+    def test_catalog_rejects_unknown_fields_and_blank_persisted_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            catalog = self.fixture_catalog()
+            catalog["unexpected"] = True
+            self.write_fixture_root(root, catalog, self.fixture_sets())
+            unknown = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(unknown.returncode, 2)
+            self.assertIn("unknown field", unknown.stderr)
+            self.assertFalse(database.exists())
+
+            catalog = self.fixture_catalog()
+            catalog["problems"][0]["title"] = "   "  # type: ignore[index]
+            problem_sets = self.fixture_sets()
+            problem_sets["managed-set"]["name"] = "\t"
+            self.write_fixture_root(root, catalog, problem_sets)
+            blank = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(blank.returncode, 2)
+            self.assertIn("must not be blank", blank.stderr)
+            self.assertFalse(database.exists())
+
+    def test_catalog_rejects_invalid_urls_and_duplicate_positive_leetcode_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            catalog = self.fixture_catalog()
+            catalog["problems"][0]["leetcode_url"] = "file:///tmp/problem"  # type: ignore[index]
+            self.write_fixture_root(root, catalog, self.fixture_sets())
+            invalid_url = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(invalid_url.returncode, 2)
+            self.assertIn("URL must use http or https", invalid_url.stderr)
+            self.assertFalse(database.exists())
+
+            catalog = self.fixture_catalog()
+            catalog["problems"][1]["leetcode_id"] = 900001  # type: ignore[index]
+            self.write_fixture_root(root, catalog, self.fixture_sets())
+            duplicate_id = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(duplicate_id.returncode, 2)
+            self.assertIn("duplicate LeetCode id", duplicate_id.stderr)
+            self.assertFalse(database.exists())
+
+    def test_catalog_revision_reconciles_only_managed_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            self.write_fixture_root(
+                root, self.fixture_catalog(), self.fixture_sets()
+            )
+            initialized = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            for arguments in (
+                (
+                    "problems",
+                    "add",
+                    "custom-problem",
+                    "--title",
+                    "Custom Problem",
+                    "--difficulty",
+                    "Easy",
+                    "--topic",
+                    "Custom",
+                ),
+                (
+                    "problems",
+                    "adapter",
+                    "custom-problem",
+                    "python",
+                    "python/custom.py",
+                ),
+                (
+                    "problems",
+                    "adapter",
+                    "custom-problem",
+                    "python",
+                    "python/custom_updated.py",
+                ),
+                ("sets", "create", "custom-set", "--name", "Custom Set"),
+                ("sets", "add", "custom-set", "custom-problem"),
+                ("_record", "python", "custom-problem", "pass", "1", "--problem-set", "custom-set"),
+                ("_record", "python", "managed-retired", "fail", "2", "--problem-set", "managed-retired-set"),
+            ):
+                result = self.run_fixture_command(root, database, *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            upgraded_catalog = self.fixture_catalog(revision=2)
+            upgraded_catalog["problems"] = [upgraded_catalog["problems"][0]]  # type: ignore[index]
+            upgraded_catalog["problems"][0]["adapters"] = [  # type: ignore[index]
+                {
+                    "language": "python",
+                    "solution_path": "python/managed_one.py",
+                }
+            ]
+            upgraded_sets = {
+                "managed-set": {
+                    "schema_version": 2,
+                    "id": "managed-set",
+                    "name": "Managed Set Revised",
+                    "description": "",
+                    "members": [
+                        {"ordinal": 1, "problem_slug": "managed-one"}
+                    ],
+                }
+            }
+            self.write_fixture_root(root, upgraded_catalog, upgraded_sets)
+            upgraded = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+
+            with sqlite3.connect(database) as connection:
+                managed_problems = connection.execute(
+                    "SELECT slug, archived FROM problems WHERE managed = 1 ORDER BY slug"
+                ).fetchall()
+                adapters = connection.execute(
+                    """
+                    SELECT p.slug, l.slug, i.enabled
+                    FROM problem_implementations AS i
+                    JOIN problems AS p ON p.id = i.problem_id
+                    JOIN languages AS l ON l.id = i.language_id
+                    WHERE p.managed = 1 ORDER BY p.slug, l.slug
+                    """
+                ).fetchall()
+                sets = connection.execute(
+                    "SELECT slug, managed FROM problem_sets ORDER BY slug"
+                ).fetchall()
+                members = connection.execute(
+                    """
+                    SELECT ps.slug, p.slug
+                    FROM problem_set_members AS m
+                    JOIN problem_sets AS ps ON ps.id = m.problem_set_id
+                    JOIN problems AS p ON p.id = m.problem_id
+                    ORDER BY ps.slug, m.ordinal
+                    """
+                ).fetchall()
+                attempts = connection.execute(
+                    """
+                    SELECT p.slug, ps.slug
+                    FROM attempts AS a
+                    JOIN problems AS p ON p.id = a.problem_id
+                    LEFT JOIN problem_sets AS ps ON ps.id = a.invoked_set_id
+                    ORDER BY a.id
+                    """
+                ).fetchall()
+                custom_adapter = connection.execute(
+                    """
+                    SELECT i.solution_path, i.enabled
+                    FROM problem_implementations AS i
+                    JOIN problems AS p ON p.id = i.problem_id
+                    JOIN languages AS l ON l.id = i.language_id
+                    WHERE p.slug = 'custom-problem' AND l.slug = 'python'
+                    """
+                ).fetchone()
+                revision = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'catalog_revision'"
+                ).fetchone()
+            self.assertEqual(
+                managed_problems,
+                [("managed-one", 0), ("managed-retired", 1)],
+            )
+            self.assertEqual(
+                adapters,
+                [
+                    ("managed-one", "python", 1),
+                    ("managed-one", "rust", 0),
+                    ("managed-retired", "python", 0),
+                ],
+            )
+            self.assertEqual(
+                sets, [("custom-set", 0), ("managed-set", 1)]
+            )
+            self.assertEqual(
+                members,
+                [("custom-set", "custom-problem"), ("managed-set", "managed-one")],
+            )
+            self.assertEqual(
+                attempts,
+                [("custom-problem", "custom-set"), ("managed-retired", None)],
+            )
+            self.assertEqual(custom_adapter, ("python/custom_updated.py", 1))
+            self.assertEqual(revision, ("2",))
 
     def test_language_registries_cover_the_seeded_global_catalog(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
