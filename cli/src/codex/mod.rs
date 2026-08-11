@@ -70,11 +70,17 @@ impl CodexSession {
         })
     }
 
-    pub fn prepare_next_operation(
+    pub(crate) fn prepare_next_operation(
         &mut self,
         cancellation: &CancellationToken,
     ) -> Result<(), String> {
         self.ensure_connected(cancellation)
+    }
+
+    pub(crate) fn requires_restart(&self) -> bool {
+        self.process
+            .as_ref()
+            .is_none_or(|process| !process.is_usable())
     }
 
     pub fn ask(&mut self, request: InterviewRequest<'_>) -> Result<String, String> {

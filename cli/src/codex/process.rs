@@ -1384,7 +1384,9 @@ mod tests {
                 .unwrap_err()
                 .contains("closed stdout")
         );
+        assert!(session.requires_restart());
         assert_eq!(session.ask(request()).unwrap(), "What invariant holds?");
+        assert!(!session.requires_restart());
         drop(session);
 
         let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
