@@ -104,19 +104,23 @@ impl CodexWorker {
                 match command {
                     CodexWorkerCommand::Connect { cancellation } => {
                         let control_pid = thread_control_pid.clone();
-                        let result = std::panic::catch_unwind(move || {
-                            crate::codex::CodexSession::connect_with_control_and_cancellation(
-                                control_pid,
-                                &cancellation,
-                            )
-                        })
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Some(session) = session.as_mut() {
+                                session.prepare_next_operation(&cancellation)
+                            } else {
+                                session = Some(
+                                    crate::codex::CodexSession::connect_with_control_and_cancellation(
+                                        control_pid,
+                                        &cancellation,
+                                    )?,
+                                );
+                                Ok(())
+                            }
+                        }))
                         .unwrap_or_else(|_| Err("Codex worker panicked".into()));
                         *thread_cancellation.lock().expect("Codex cancellation lock") = None;
                         let event = match result {
-                            Ok(connected) => {
-                                session = Some(connected);
-                                Event::CodexConnected(Ok(()))
-                            }
+                            Ok(()) => Event::CodexConnected(Ok(())),
                             Err(error) => Event::CodexConnected(Err(error)),
                         };
                         if event_sender.send(event).is_err() {
