@@ -114,7 +114,105 @@ fn browser_key(key: KeyEvent) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::model::{SolvePane, SolveSession};
     use crate::database::EnabledLanguage;
+    use crate::editor::EditorDocument;
+    use crate::runner::ExecutionPlan;
+    use std::path::PathBuf;
+
+    fn solve_state() -> AppState {
+        let mut state = AppState::new(Vec::new(), 0);
+        state.screen = Screen::Solve;
+        state.solve = Some(SolveSession {
+            problem_id: 1,
+            problem_slug: "p".into(),
+            problem_title: "P".into(),
+            statement: String::new(),
+            language: "python".into(),
+            plan: ExecutionPlan {
+                root: PathBuf::from("/tmp"),
+                language: "python".into(),
+                problem_slug: "p".into(),
+                set_slug: None,
+                runner_path: PathBuf::from("/tmp/run"),
+                solution_path: PathBuf::from("/tmp/p.py"),
+            },
+            editor: EditorDocument::new("x".into()).unwrap(),
+            pane: SolvePane::Editor,
+            output: String::new(),
+            output_scroll: 0,
+            problem_scroll: 0,
+            running: None,
+            cancellation: None,
+            pending_save: None,
+            stale: false,
+            latest_run_revision: None,
+            quit_after_save: None,
+            discard_confirmation: None,
+            refresh_after_submit: false,
+        });
+        state
+    }
+
+    #[test]
+    fn solve_run_leader_and_pane_keys_are_mapped() {
+        let mut state = solve_state();
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+                Action::SaveTest,
+            ),
+            (
+                KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+                Action::Submit,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                Action::SaveTest,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Action::Cancel,
+            ),
+            (
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                Action::NextFocus,
+            ),
+            (
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                Action::PreviousFocus,
+            ),
+        ] {
+            assert_eq!(action_for_key(key, &mut state), Some(expected));
+        }
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::Back)
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Output;
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state),
+            Some(Action::Down)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::Down)
+        );
+    }
+
     #[test]
     fn documented_keys_are_mapped() {
         let mut state = AppState::new(

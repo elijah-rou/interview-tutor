@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
@@ -11,6 +12,25 @@ fn binary_help_documents_startup_flags() {
     assert!(stdout.contains("--db"));
     assert!(stdout.contains("--set"));
     assert!(stdout.contains("--language"));
+}
+
+#[test]
+fn linux_pty_solve_edit_test_submit_and_quit() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("CLI crate has repository parent")
+        .to_path_buf();
+    let status = Command::new("python3")
+        .arg("tests/pty_solve_smoke.py")
+        .arg(env!("CARGO_BIN_EXE_interview-tutor"))
+        .arg(env!("CARGO_BIN_EXE_practice"))
+        .arg(repository_root)
+        .status()
+        .expect("Python PTY smoke starts");
+    assert!(status.success(), "PTY smoke failed with {status}");
 }
 
 #[test]
