@@ -63,6 +63,135 @@ struct RunnerServices {
     record: Arc<RecordService>,
 }
 
+enum CodexWorkerCommand {
+    Connect,
+    Turn {
+        operation: crate::app::model::OperationId,
+        revision: u64,
+        mode: crate::codex::prompt::Mode,
+        statement: String,
+        source: String,
+        output: String,
+        question: String,
+        solved: bool,
+    },
+    Reset,
+    Cancel,
+    Shutdown,
+}
+
+struct CodexWorker {
+    sender: SyncSender<CodexWorkerCommand>,
+    events: Receiver<Event>,
+    join: Option<JoinHandle<()>>,
+    control_pid: Arc<std::sync::atomic::AtomicI32>,
+}
+impl CodexWorker {
+    fn start() -> Self {
+        let (sender, commands) = mpsc::sync_channel(2);
+        let (event_sender, events) = mpsc::sync_channel(64);
+        let control_pid = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let thread_control_pid = control_pid.clone();
+        let join = thread::spawn(move || {
+            let mut session: Option<crate::codex::CodexSession> = None;
+            while let Ok(command) = commands.recv() {
+                match command {
+                    CodexWorkerCommand::Connect => {
+                        let control_pid = thread_control_pid.clone();
+                        let result = std::panic::catch_unwind(move || {
+                            crate::codex::CodexSession::connect_with_control(control_pid)
+                        })
+                        .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        let event = match result {
+                            Ok(connected) => {
+                                session = Some(connected);
+                                Event::CodexConnected(Ok(()))
+                            }
+                            Err(error) => Event::CodexConnected(Err(error)),
+                        };
+                        if event_sender.send(event).is_err() {
+                            break;
+                        }
+                    }
+                    CodexWorkerCommand::Turn {
+                        operation,
+                        revision,
+                        mode,
+                        statement,
+                        source,
+                        output,
+                        question,
+                        solved,
+                    } => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let session = session.as_mut().ok_or("Codex is not connected")?;
+                            session.ask(crate::codex::InterviewRequest {
+                                mode,
+                                statement: &statement,
+                                source: &source,
+                                latest_output: &output,
+                                question: &question,
+                                source_revision: revision,
+                                solved,
+                            })
+                        }))
+                        .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        if event_sender
+                            .send(Event::CodexFinished(operation, revision, mode, result))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    CodexWorkerCommand::Reset | CodexWorkerCommand::Cancel => session = None,
+                    CodexWorkerCommand::Shutdown => break,
+                }
+            }
+        });
+        Self {
+            sender,
+            events,
+            join: Some(join),
+            control_pid,
+        }
+    }
+    fn poll(&mut self) -> Vec<Event> {
+        let mut result = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            result.push(event);
+        }
+        result
+    }
+    fn send(&self, command: CodexWorkerCommand) -> Result<(), String> {
+        if matches!(
+            command,
+            CodexWorkerCommand::Cancel | CodexWorkerCommand::Reset
+        ) {
+            let pid = self.control_pid.load(std::sync::atomic::Ordering::SeqCst);
+            if pid > 0 {
+                unsafe {
+                    libc::kill(-pid, libc::SIGTERM);
+                }
+            }
+        }
+        self.sender
+            .try_send(command)
+            .map_err(|_| "Codex worker is busy or stopped".into())
+    }
+    fn shutdown(mut self) {
+        let pid = self.control_pid.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+        }
+        let _ = self.sender.send(CodexWorkerCommand::Shutdown);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
@@ -243,6 +372,7 @@ fn apply_effects(
     repository: &Repository,
     root: &Path,
     worker: &mut RunnerWorker,
+    codex_worker: &mut CodexWorker,
     mut effects: Vec<Effect>,
 ) {
     while let Some(effect) = effects.pop() {
@@ -323,6 +453,43 @@ fn apply_effects(
                 }
             }
             Effect::CancelRun { operation } => worker.cancel(operation),
+            Effect::ConnectCodex => {
+                if let Err(error) = codex_worker.send(CodexWorkerCommand::Connect) {
+                    effects.extend(reduce(state, Event::CodexConnected(Err(error))));
+                }
+            }
+            Effect::CodexTurn {
+                operation,
+                revision,
+                mode,
+                statement,
+                source,
+                output,
+                question,
+                solved,
+            } => {
+                if let Err(error) = codex_worker.send(CodexWorkerCommand::Turn {
+                    operation,
+                    revision,
+                    mode,
+                    statement,
+                    source,
+                    output,
+                    question,
+                    solved,
+                }) {
+                    effects.extend(reduce(
+                        state,
+                        Event::CodexFinished(operation, revision, mode, Err(error)),
+                    ));
+                }
+            }
+            Effect::CancelCodex => {
+                let _ = codex_worker.send(CodexWorkerCommand::Cancel);
+            }
+            Effect::ResetCodex => {
+                let _ = codex_worker.send(CodexWorkerCommand::Reset);
+            }
             Effect::LeaveSolve => worker.leave(),
         }
     }
@@ -339,9 +506,17 @@ pub fn run(
         return Err("interview requires an interactive terminal".into());
     }
     let mut worker = RunnerWorker::start(root.clone(), database_path);
+    let mut codex_worker = CodexWorker::start();
     let initial = requested_set.map_or(Event::Command(crate::app::Action::Reload), Event::OpenSet);
     let effects = reduce(&mut state, initial);
-    apply_effects(&mut state, &repository, &root, &mut worker, effects);
+    apply_effects(
+        &mut state,
+        &repository,
+        &root,
+        &mut worker,
+        &mut codex_worker,
+        effects,
+    );
     let result = (|| {
         let _guard = TerminalGuard::enter()?;
         let backend = CrosstermBackend::new(io::stdout());
@@ -352,9 +527,16 @@ pub fn run(
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
         while !state.quit {
-            for event in worker.poll() {
+            for event in worker.poll().into_iter().chain(codex_worker.poll()) {
                 let effects = reduce(&mut state, event);
-                apply_effects(&mut state, &repository, &root, &mut worker, effects);
+                apply_effects(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut worker,
+                    &mut codex_worker,
+                    effects,
+                );
                 needs_draw = true
             }
             if needs_draw {
@@ -372,7 +554,14 @@ pub fn run(
                 TerminalEvent::Key(key) => {
                     if let Some(action) = input::action_for_key(key, &mut state) {
                         let effects = reduce(&mut state, Event::Command(action));
-                        apply_effects(&mut state, &repository, &root, &mut worker, effects);
+                        apply_effects(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut worker,
+                            &mut codex_worker,
+                            effects,
+                        );
                         needs_draw = true
                     }
                 }
@@ -384,7 +573,14 @@ pub fn run(
                             crate::app::EditorAction::Paste(text),
                         )),
                     );
-                    apply_effects(&mut state, &repository, &root, &mut worker, effects);
+                    apply_effects(
+                        &mut state,
+                        &repository,
+                        &root,
+                        &mut worker,
+                        &mut codex_worker,
+                        effects,
+                    );
                     needs_draw = true
                 }
                 TerminalEvent::FocusGained | TerminalEvent::FocusLost | TerminalEvent::Mouse(_) => {
@@ -394,6 +590,7 @@ pub fn run(
         Ok(())
     })();
     worker.shutdown();
+    codex_worker.shutdown();
     result
 }
 

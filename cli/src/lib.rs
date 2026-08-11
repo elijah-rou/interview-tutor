@@ -1,5 +1,6 @@
 pub mod app;
 pub mod catalog;
+pub mod codex;
 pub mod config;
 pub mod database;
 pub mod editor;

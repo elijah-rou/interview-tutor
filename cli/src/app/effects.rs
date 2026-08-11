@@ -14,7 +14,7 @@ pub enum RunIntent {
     Submit,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Effect {
     Load {
         operation: OperationId,
@@ -39,6 +39,19 @@ pub enum Effect {
     CancelRun {
         operation: OperationId,
     },
+    ConnectCodex,
+    CodexTurn {
+        operation: OperationId,
+        revision: u64,
+        mode: crate::codex::prompt::Mode,
+        statement: String,
+        source: String,
+        output: String,
+        question: String,
+        solved: bool,
+    },
+    CancelCodex,
+    ResetCodex,
     LeaveSolve,
 }
 
@@ -77,10 +90,17 @@ pub enum Action {
     SaveTest,
     Submit,
     Cancel,
+    InterviewFocus,
+    InterviewChar(char),
+    InterviewBackspace,
+    InterviewSend,
+    InterviewEscape,
+    InterviewDisclosure(bool),
+    Hint,
+    ResetInterview,
     Editor(EditorAction),
 }
 
-#[derive(Debug)]
 pub enum Event {
     Command(Action),
     OpenSet(String),
@@ -92,5 +112,12 @@ pub enum Event {
         RunIntent,
         Option<String>,
         Result<ExecutionResult, String>,
+    ),
+    CodexConnected(Result<(), String>),
+    CodexFinished(
+        OperationId,
+        u64,
+        crate::codex::prompt::Mode,
+        Result<String, String>,
     ),
 }
