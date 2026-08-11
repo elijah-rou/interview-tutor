@@ -105,45 +105,66 @@ fn child_exit_observation_does_not_override_concurrent_cancellation() {
 }
 
 #[test]
-fn signal_during_final_drain_records_cancellation_with_matching_status() {
+fn signal_during_sqlite_recording_updates_the_exact_attempt_and_matching_status() {
     for (signal, expected_status) in [(libc::SIGINT, 130), (libc::SIGTERM, 143)] {
-        for _ in 0..3 {
-            let fixture = Fixture::new();
-            let child = Command::new(env!("CARGO_BIN_EXE_practice"))
-                .args([
-                    "--db",
-                    fixture.database.to_str().unwrap(),
-                    "run",
-                    "python",
-                    "signal-final-drain",
-                ])
-                .env("PRACTICE_ROOT", &fixture.root)
-                .env("PRACTICE_DESCENDANT_PID_FILE", &fixture.descendant_pid_file)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            wait_for_descendant(&fixture.descendant_pid_file);
-            assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
-            let output = child.wait_with_output().unwrap();
+        let fixture = Fixture::new();
+        let initialized = Command::new(env!("CARGO_BIN_EXE_practice"))
+            .args([
+                "--db",
+                fixture.database.to_str().unwrap(),
+                "problems",
+                "list",
+            ])
+            .env("PRACTICE_ROOT", &fixture.root)
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
 
-            assert_eq!(
-                output.status.code(),
-                Some(expected_status),
-                "stdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let connection = rusqlite::Connection::open(&fixture.database).unwrap();
-            let attempts: Vec<String> = connection
-                .prepare("SELECT result FROM attempts")
-                .unwrap()
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
-            assert_eq!(attempts, vec!["cancelled"]);
-        }
+        let release_file = fixture.root.join("release-recording");
+        let child = Command::new(env!("CARGO_BIN_EXE_practice"))
+            .args([
+                "--db",
+                fixture.database.to_str().unwrap(),
+                "run",
+                "python",
+                "signal-final-drain",
+            ])
+            .env("PRACTICE_ROOT", &fixture.root)
+            .env("PRACTICE_DESCENDANT_PID_FILE", &fixture.descendant_pid_file)
+            .env("PRACTICE_RECORD_RELEASE_FILE", &release_file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_descendant(&fixture.descendant_pid_file);
+
+        let lock = rusqlite::Connection::open(&fixture.database).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        fs::write(&release_file, "release\n").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+        lock.execute_batch("COMMIT").unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(expected_status),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+        let attempts: Vec<(String, Option<i32>)> = connection
+            .prepare("SELECT result, exit_code FROM attempts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            attempts,
+            vec![("cancelled".to_string(), Some(expected_status))]
+        );
     }
 }
 

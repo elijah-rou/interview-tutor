@@ -67,8 +67,8 @@ case "$mode" in
     exit 0
     ;;
   signal-final-drain)
-    (trap 'printf "%s\n" "$$" > "$PRACTICE_DESCENDANT_PID_FILE"; trap "" TERM; sleep 30' TERM
-     while :; do sleep 30; done) &
+    printf '%s\n' "$$" > "$PRACTICE_DESCENDANT_PID_FILE"
+    while [ ! -f "$PRACTICE_RECORD_RELEASE_FILE" ]; do sleep 0.01; done
     exit 0
     ;;
   split-sequences)

@@ -243,6 +243,10 @@ fn unterminated_hostile_osc_keeps_execution_and_discovery_bounded() {
     assert!(execution_elapsed < Duration::from_secs(10));
     assert!(result.display_output.len() <= hostile.display_output_bytes);
     assert!(result.omitted_bytes > 8 * 1024 * 1024 - 128);
+    assert!(!result.display_output.contains('x'));
+    assert!(events.iter().all(|event| match event {
+        ExecutionEvent::Stdout(text) | ExecutionEvent::Stderr(text) => !text.contains('x'),
+    }));
     assert!(events.len() <= hostile.event_queue_capacity);
 
     fs::write(
@@ -378,11 +382,39 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
 
     let result = execute(&fixture, "exit-0");
     let plan = fixture.plan("tagged");
-    runner::record_execution(&connection, &plan, &result).unwrap();
+    let attempt_id = runner::record_execution(&connection, &plan, &result).unwrap();
+    assert!(attempt_id > 0);
     let attempts: i64 = connection
         .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
         .unwrap();
     assert_eq!(attempts, 1);
+}
+
+#[test]
+fn cancellation_finalization_updates_only_the_recorded_attempt() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let plan = runner::plan_execution(&connection, &fixture.root, "python", "tagged", Some("set"))
+        .unwrap();
+    let result = execute(&fixture, "exit-0");
+    let first = runner::record_execution(&connection, &plan, &result).unwrap();
+    let second = runner::record_execution(&connection, &plan, &result).unwrap();
+
+    database::finalize_attempt_cancelled(&connection, second, 143).unwrap();
+    let attempts: Vec<(i64, String, Option<i32>)> = connection
+        .prepare("SELECT id, result, exit_code FROM attempts ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        attempts,
+        vec![
+            (first, "pass".to_string(), Some(0)),
+            (second, "cancelled".to_string(), Some(143)),
+        ]
+    );
 }
 
 #[test]
@@ -423,6 +455,33 @@ fn adapter_discovery_is_bounded() {
     )
     .unwrap_err();
     assert!(error.contains("exceeded 128 output bytes"));
+
+    fs::write(
+        fixture.root.join("python/run"),
+        "#!/bin/sh\npython3 -c 'import sys; sys.stdout.buffer.write(b\"\\xff\" * 128)'\n",
+    )
+    .unwrap();
+    let error = runner::discover_adapters(
+        &fixture.root.join("python/run"),
+        &output_limits,
+        &CancellationToken::new(),
+    )
+    .unwrap_err();
+    assert!(error.contains("exceeded 128 output bytes"));
+
+    fs::write(
+        fixture.root.join("python/run"),
+        "#!/bin/sh\nprintf 'requested\\n' >&2\nprintf 'different\\n'\n",
+    )
+    .unwrap();
+    let adapters = runner::discover_adapters(
+        &fixture.root.join("python/run"),
+        &limits(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(adapters, vec!["different"]);
+    assert!(!adapters.iter().any(|slug| slug == "requested"));
 }
 
 #[test]
@@ -446,7 +505,12 @@ fn final_output_cap_handles_invalid_utf8_split_sequences_and_stream_tags() {
     .unwrap();
     assert!(alternating.display_output.len() <= capped.display_output_bytes);
     assert!(alternating.omitted_bytes > 0);
-    assert!(alternating.display_output.contains("bytes omitted"));
+    assert_eq!(
+        alternating.display_output.matches("bytes omitted").count(),
+        1
+    );
+    assert!(alternating.display_output.contains("[stdout]"));
+    assert!(alternating.display_output.contains("[stderr]"));
 }
 
 #[test]
