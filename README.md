@@ -1,108 +1,106 @@
-# Local algorithm practice harness
+# Interview Tutor
 
-A language-independent local judge with a Rust control plane, a global problem catalog, reusable ordered problem sets, and shared progress. Blind 75 is the first seeded set, not the application boundary.
+Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional Codex interviewer. Blind 75 is the first shipped set; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
 
-Problems have one global identity. A problem can appear in Blind 75, NeetCode 150, NeetCode 250, and custom sets without duplicating solutions or completion state.
+## Requirements and build
 
-## Run problems
+Required on Linux:
 
-Use a global problem slug:
+- a current stable Rust toolchain with Cargo, rustfmt, and Clippy
+- Python 3.12 or newer
+- GNU Make and GNU coreutils (`timeout` and `readlink -f`)
+- a UTF-8, `xterm-256color`-compatible terminal for the TUI
 
-```console
-./run python two-sum
-./run rust two-sum
-```
-
-Or qualify the problem by set and select it by slug or 1-based set index:
+SQLite is bundled into the Rust CLI. Turso and Codex are optional.
 
 ```console
-./run python blind75 two-sum
-./run rust blind75 16
+git clone https://github.com/elijah-rou/interview-tutor.git
+cd interview-tutor
+rustup component add rustfmt clippy
+cargo build --manifest-path cli/Cargo.toml --bins --locked
+cargo build --manifest-path rust/Cargo.toml --locked
+./practice --help
+./interview --help
 ```
 
-The two-argument form is always a global slug. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`, so resolution does not guess based on collisions. A zero exit status means the local suite passed. The root runner captures and sanitizes output, enforces a 30 second timeout, terminates the runner process group on interruption, and records exactly one attempt after execution.
+The `./practice`, `./run`, and `./interview` launchers also build their Rust binary on demand.
 
-The language-local wrappers remain available for direct adapter work:
+## First run and configuration
 
-```console
-cd python && ./run two-sum
-cd rust && ./run two-sum
-```
+`./practice` and `./interview` create `.turso/progress.db` on first use, migrate an older supported schema, and reconcile the checked-in global catalog and ordered problem sets. The database stores local custom catalog changes, attempts, and progress; the checked-in files remain the source for shipped metadata. Inspect the selected path with `./practice db`. A Turso server is not required, but `turso dev --db-file .turso/progress.db` can expose the same local file.
 
-## Interview TUI
+Database precedence is:
 
-`./interview` opens the local catalog browser, bounded native solve editor, and opt-in Codex Interview pane. Save/test never records progress; explicit submit records one attempt and, after that record succeeds, may request a review of the exact submitted revision. Codex transcripts remain memory-only and local solve stays available when Codex is declined, offline, unauthenticated, interrupted, or fails. See [docs/interview-tui.md](docs/interview-tui.md) for exact keys, privacy limits, responsive layout, and cancellation semantics.
+1. `--db PATH`
+2. `PRACTICE_DATABASE_URL`
+3. `PRACTICE_DB_PATH`
+4. legacy `BLIND75_DATABASE_URL` and `BLIND75_DB_PATH`
+5. `.turso/progress.db`
 
-## Browse sets and progress
+Relative paths are resolved from the repository root; `file:` URLs and `~/` are accepted. TUI startup flags take precedence over defaults: `--set ID` opens that set instead of the set menu, `--language ID` selects an enabled language instead of Python (or the first enabled language), and `--no-codex` prevents any Codex version probe or process spawn. The `./run` launcher also accepts `--db`.
+
+## Practice flow
+
+Browse a set, inspect progress, open a problem, then solve it in the TUI:
 
 ```console
 ./practice sets list
 ./practice --set blind75 list
 ./practice --set blind75 show 16
-./practice --set blind75 stats
 ./practice --set blind75 stats --language python
-./practice stats --global --language python
+./practice stats --global --language rust
+./interview --set blind75 --language python --no-codex
 ```
 
-Completion belongs to the global problem and language at its current test revision. Passing `two-sum` once immediately counts in every set containing it. Set indexes are only selectors; attempts retain the stable problem identity.
+In `./interview`, choose a set and problem with `j`/`k` and Enter, then press Enter from problem detail to open the planned source. F5 or Ctrl-S atomically saves and tests without recording progress. F9 or `:submit` saves, tests, and records exactly one attempt after execution terminates. See [the TUI guide](docs/interview-tui.md) for all keys, responsive layouts, stale/error states, and guarded exit behavior.
 
-## Add problems and compose sets
+Run a problem directly by global slug, or by set plus slug/1-based index:
 
-Problem metadata is independent of membership:
+```console
+./run python two-sum
+./run rust blind75 16
+```
+
+The two-argument form is always `LANGUAGE GLOBAL_SLUG`. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`. A zero exit status means the local suite passed. Direct runs record one attempt after execution; spawn/preflight failures do not.
+
+Completion belongs to a global problem and language at the problem's current test revision. Passing a shared problem counts in every set containing it. Set indexes are selectors only; attempt history retains stable problem identity.
+
+## Catalog administration
+
+Problem metadata is independent of ordered set membership:
 
 ```console
 ./practice problems add custom-pair-sum \
-  --title "Custom Pair Sum" \
-  --difficulty Easy \
-  --topic "Arrays & Hashing" \
+  --title "Custom Pair Sum" --difficulty Easy --topic "Arrays & Hashing" \
   --statement-file ./custom-pair-sum.md
-./practice problems update custom-pair-sum --test-revision 2
-
+./practice problems adapter custom-pair-sum python python/problems/easy/custom_pair_sum.py
 ./practice sets create favorites --name "Favorites"
-./practice sets update favorites --description "Problems to revisit"
 ./practice sets add favorites two-sum
 ./practice sets add favorites custom-pair-sum --index 1
-./practice sets move favorites two-sum --index 1
-./practice sets remove favorites custom-pair-sum
 ./practice --set favorites list
 ```
 
-A metadata-only problem is valid and can belong to sets, but cannot run until a language adapter and local test dispatch exist. Register the source path after adding that adapter:
+`problems` and `sets` also provide list, show, update, move/remove, and guarded delete operations. A custom metadata-only problem is valid but cannot run until a language adapter and local test dispatch exist. Shipped resources are read-only through local CRUD; custom resources remain editable.
 
-```console
-./practice problems adapter custom-pair-sum python python/problems/easy/custom_pair_sum.py
-```
+## Optional Codex interviewer
 
-`problems` and `sets` provide list, show, update, and guarded delete operations. Delete requires `--yes`; a problem with membership or attempt history cannot be deleted. Checked-in problems and sets are read-only through local CRUD, while custom resources remain editable.
+Codex is opt-in after an in-app disclosure. Install a trusted Codex CLI, authenticate it with `codex login`, verify with `codex login status`, and run `./interview`. This stack accepts exactly Codex CLI 0.146.0 and 0.147.0. `INTERVIEW_TUTOR_CODEX_EXECUTABLE` can select another trusted executable path; version compatibility is not executable provenance.
 
-## Catalog and database ownership
+Interview Tutor does not read API keys or login tokens. After consent, the configured Codex process sends the disclosed statement, source, bounded latest test output, bounded memory-only transcript, and question to OpenAI. Its read-only tools, MCP servers, and configuration may access other readable local paths; this is not total process isolation. Use a dedicated Codex profile/home with minimal configuration when that boundary is too broad. Local editing, tests, and submission remain available with `--no-codex` or when Codex is declined, unauthenticated, offline, interrupted, or incompatible. See [Codex compatibility and privacy](docs/codex-compatibility.md).
+
+## Repository and contracts
 
 ```text
-catalog/problems.json       global shipped problem metadata and adapter paths
-problem_sets/blind75.json   ordered references to global problem slugs
-cli/                        standalone Rust control-plane crate
-practice                    Rust CLI launcher
-run                         terse Rust execution launcher
-python/problems/            Python solution starters
-rust/src/problems/          Rust solution starters
-.turso/progress.db          local runtime database
+catalog/problems.json       shipped global metadata, statements, and adapter paths
+problem_sets/*.json         ordered references to global problem slugs
+cli/                        Rust CLI, TUI, runner, database, and Codex boundary
+python/                     Python starters, adapters, and representative cases
+rust/                       Rust starters, adapters, and representative cases
+.turso/progress.db          local runtime database (created on first use)
 ```
 
-Checked-in catalogs reconcile managed resources once per catalog revision. Managed problems or adapters omitted by a later revision are retired, while custom resources and attempt rows remain intact. Retiring a managed set clears that set's optional `invoked_set_id` context from historical attempts through `ON DELETE SET NULL`. SQLite is the runtime authority for custom CRUD. The normalized schema stores global problems, ordered set membership, languages, implementations, attempts, statement Markdown, and solution paths. The Rust `cli` crate is the control-plane API boundary for a future TUI, which can reuse its catalog, database, selector, and runner modules instead of parsing CLI tables. See `docs/architecture.md` for the ownership, schema, and execution boundaries.
+Starter APIs follow LeetCode where an official public template exists; otherwise they use the documented conventional local representation. Local tests are representative public contracts, not LeetCode's private hidden corpus. Starter solutions intentionally remain incomplete and can fail the full language suite.
 
-The database is SQLite/libSQL-compatible. The Turso server is optional:
+Shipped statement briefs remain in `catalog/problems.json`. They were independently written from checked-in interfaces, data structures, and public executable cases; executable cases are authoritative if a brief conflicts. [Catalog provenance](catalog/README.md) and the [original Blind 75 local brief](problem_sets/blind75.md) remain checked in and visible.
 
-```console
-./practice db
-turso dev --db-file .turso/progress.db
-```
-
-Database precedence is `--db`, then `PRACTICE_DATABASE_URL`, then `PRACTICE_DB_PATH`, then the legacy Blind 75 environment names, then `.turso/progress.db`.
-
-Existing v1 databases migrate automatically to the global v2 schema. Historical attempts and stale removed problems are retained. Parked legacy problems are archived, remain visible with `problems list --all`, and do not inflate active global progress.
-
-## Interface and test policy
-
-Starter APIs follow LeetCode. Premium and Rust APIs without official templates use their conventional NeetCode/LintCode-compatible representation. Tests use public contracts and representative examples; LeetCode's private hidden corpus is not available locally.
-
-The split-pane TUI uses the same statement, source-path, runner, and progress boundaries as the CLI. Its optional Codex layer sends only the disclosed bounded payload and never replaces local runner authority. See `docs/architecture.md` for exact resource limits, termination states, attempt-outcome mapping, and the Codex process boundary.
+See [architecture](docs/architecture.md), [testing](docs/testing.md), and [security](SECURITY.md) for implementation boundaries and verification gates.

@@ -1,47 +1,86 @@
 # Architecture
 
-## Ownership
+Interview Tutor separates a small control plane from bounded local data and process boundaries. The Rust `cli` crate is the authority shared by the noninteractive CLI and TUI; language runners never own catalog or progress state.
 
-The checked-in distribution has two independent layers:
+## Components and ownership
 
-1. `catalog/problems.json` defines global problems and installed language adapter source paths.
-2. `problem_sets/*.json` defines ordered references to global problem slugs.
+1. **Distribution catalog:** `catalog/problems.json` defines global problem metadata, local statement briefs, test revision, and installed language source paths. `problem_sets/*.json` defines only metadata plus ordered global slugs. A catalog revision triggers one managed reconciliation.
+2. **SQLite repository:** `.turso/progress.db` by default stores global/custom problems, set membership, languages, implementations, attempts, and derived progress inputs. It is authoritative for custom CRUD. Shipped rows are managed/read-only through local CRUD; a later catalog revision may retire omitted managed rows but never deletes custom resources or attempt history.
+3. **Execution planning:** `database::resolve_problem` and `runner::plan_execution` turn stable language/problem/set selectors into an explicit project root, runner, source path, and invoked-set context. Neither the TUI nor the root launchers infer an adapter from display text.
+4. **Source/editor:** `source` performs Linux-anchored load/save of exactly the planned regular file. `editor` owns bounded Unicode-grapheme text, modes, revision/dirty state, and highlighting.
+5. **Local runner:** `runner` executes the selected language adapter without a shell, sanitizes/bounds output, controls the process group, and returns one authoritative result. Recording is a separate explicit database operation.
+6. **Application/TUI:** `app` is the state/reducer/effect boundary. `tui` owns terminal entry/restoration, input/rendering, the repository connection on the main thread, and bounded runner/Codex workers.
+7. **Codex boundary:** `codex` validates one trusted configured executable and exact app-server version, constructs the disclosed payload, enforces protocol/resource bounds, and retains only a memory transcript. It cannot alter runner results or progress directly.
 
-A catalog revision seeds or upgrades the local database once. Each upgrade reconciles the exact managed catalog and retires managed resources that were omitted, without changing custom resources or deleting attempt rows. Retiring a managed set clears its optional invoked-set context from historical attempts through `ON DELETE SET NULL`. The database is the runtime authority for user-created problems and sets; opening the CLI does not continuously overwrite local CRUD. Shipped problems and sets are marked managed and read-only through local CRUD. Custom resources are fully editable.
+## Catalog and database model
 
-## Runtime schema
+SQLite schema v2 uses durable integer keys internally:
 
-SQLite v2 uses durable integer keys internally:
+- `problems`: global metadata, local statement Markdown, test revision, managed/archive state
+- `problem_sets`: named collections
+- `problem_set_members`: many-to-many membership and contiguous 1-based ordinal
+- `languages`: installed runner commands
+- `problem_implementations`: per-problem source paths and adapter availability
+- `attempts`: problem/language outcome and optional invoked-set context
 
-- `problems`: global metadata, statement Markdown, test revision, and archival state.
-- `problem_sets`: named collections.
-- `problem_set_members`: many-to-many membership plus a contiguous 1-based ordinal.
-- `languages`: installed runner commands.
-- `problem_implementations`: per-problem source paths and adapter availability.
-- `attempts`: global problem/language results with optional invoked-set context.
+Completion is derived from a passing attempt whose revision matches the problem's current test revision. It is not stored per set. Removing/reordering membership cannot remove learning history. Retiring a managed set clears only its optional attempt context through `ON DELETE SET NULL`.
 
-Completion is derived from a passing attempt whose revision matches the global problem's current test revision. It is never stored per set. Removing or reordering a membership cannot delete learning history; deleting a retired set only clears the attempt's optional invoked-set context.
+Database open validates the catalog before use, enables a 5-second SQLite busy timeout and WAL journaling, performs schema migration/seed reconciliation transactionally, re-enables foreign keys, and verifies them. A TUI submit opens a separate repository connection only after execution returns. Each accepted submit records one attempt atomically; signal finalization may update that exact attempt to Cancelled before completion is published.
 
-## Execution
+## Control plane and data plane
 
-`practice_cli::database::resolve_problem` resolves either a global slug or an exact set slug/index. `practice_cli::runner::plan_execution` preserves the project root, runner path, solution path, problem, language, and optional invoked set. `execute` invokes the set-agnostic language protocol without a shell, while `record_execution` remains an explicit operation that writes exactly one central attempt. Spawn and preflight failures do not record. Language-local wrappers suppress their compatibility recorder during central execution.
+Control messages are small, typed values: selectors, `ExecutionPlan`, operation ID, source revision, run intent, cancellation token, and reducer effects/events. They determine which immutable snapshot an operation owns. Stale operation IDs are ignored; a stale source revision may be displayed but cannot describe the current buffer or enter a Codex transcript.
 
-The Linux executor starts one direct child in a new process group and captures both pipes. Defaults are a 30 second wall timeout, 250 millisecond TERM grace, 256 KiB of final rendered display output, 8 KiB pipe reads, and 64 queued events. Limits are validated and bounded. Persistent per-stream VTE parsers decode arbitrary UTF-8 chunk boundaries and discard CSI, OSC, and dangerous controls while preserving newlines and tabs. Parser output is drained immediately into bounded, already-sanitized prefix/tail retention, so truncated raw terminal sequences are never reparsed from ground state. The final UTF-8 result, including stream tags and one deterministic omission marker, never exceeds the display cap. A separate bounded raw-byte accounting path reports exact bytes beyond the retention cap in `omitted_bytes`. Normal execution retains at most 1.5 times the display cap of sanitized text. Discovery adds at most 1.5 times the cap for each separately retained stdout and stderr stream, for a 4.5-times aggregate sanitized-text maximum, and parses stdout only.
+Data values are explicitly bounded at ingress: statement/source text, source snapshots, stdout/stderr chunks, rendered output, composer text, protocol lines, assistant responses, transcript entries, and temporary submitted-source copies. The TUI never parses CLI tables. The local runner never writes progress. Codex never executes the language adapter and cannot mark a problem complete.
 
-`Termination` distinguishes a numeric exit from caller cancellation, timeout, and external signal. Exit 0 maps to `pass`, exit 2 to `error`, every other numeric exit including 130 to `fail`, explicit cancellation to `cancelled`, and timeout or signal to `error`. Timeout, cancellation, failures after spawn, and remaining descendants trigger process-group TERM, a bounded grace, then KILL. The direct child is reaped before pipe shutdown. Nonblocking readers receive a bounded final drain window, observe a shutdown flag, and are always joined, so a `setsid` descendant retaining a pipe cannot hang execution. A `setsid` descendant can escape group termination on Linux and may continue running, but closing the local pipes bounds its impact.
+## Threads and channels
 
-Optional progress events use a caller-provided bounded `SyncSender` with nonblocking `try_send`. Full and disconnected consumers cause counted drops and cannot delay timeout, cancellation, reap, drain, or join. The final `ExecutionResult` is authoritative. The CLI registers SIGINT and SIGTERM against the execution's `CancellationToken`. Before SQLite recording, after runner threads have joined, it blocks both signals on the remaining main thread. It records once, inspects the cancellation flag and pending signals, unregisters the handlers, and updates that exact attempt to `cancelled` with exit code 130 or 143 when needed. The signals remain blocked through process exit, closing the post-recording race. The synchronous API is intended to run on a TUI worker thread and does not require an async runtime.
+The main thread owns `AppState`, the primary SQLite connection, Crossterm/Ratatui, input polling, rendering, and reducer application. It never blocks on a local test or model turn.
 
-Adapter `--list` discovery uses the same process-group implementation with a five second CLI timeout and 64 KiB retained-output cap before any database mutation. It parses only sanitized stdout, ignores stderr as slug input while including it in execution errors, and rejects truncated stdout instead of parsing partial lines. This plan/result boundary lets the future TUI reuse statement and runner APIs without parsing CLI tables.
+- One runner worker has a command channel of 2 and event channel of 64. It serializes source save, synchronous execute, and optional attempt record/finalization. App state retains at most the newest queued save/test; submit is rejected while a run is active.
+- During execution, the local runner creates at most two pipe reader threads. Their bounded channel uses the configured event capacity (64 by default). The coordinator continuously drains into sanitized bounded retention. Optional caller progress uses nonblocking `try_send`; full/disconnected consumers increment a drop count and cannot delay cleanup. All reader threads are joined.
+- One Codex worker has a command channel of 2 and event channel of 64. It owns one app-server process/session and serializes connect/turn/reset. The process reader channel holds 64 protocol messages, and pending request IDs are capped at 16. Interviewer/reviewer and hinter use two separate ephemeral app-server conversation threads; these are protocol resources, not additional application authority.
+
+Worker events carry operation/revision/role identity. A Codex response is held pending until the reducer explicitly accepts the matching current turn; cancellation, edit, reset, or stale identity discards it before transcript commit. Both workers are cancelled and joined before terminal restoration.
+
+## Resource bounds
+
+Catalog/TUI queries are capped at 10,000 rows. Statements accept at most 1,000,000 characters and rendered Markdown at most 100,000 characters. The editor accepts at most 1 MiB, 100,000 lines, 32 undo snapshots, and a 256-byte command. TUI local output is capped at 256 KiB and the composer at 16 KiB.
+
+The local executor defaults to a 30-second wall timeout, 250-ms TERM grace, 256-KiB display cap, 8-KiB reads, and 64 reader/progress events. Configurable limits are validated: wall time 10 ms to 1 hour, TERM grace at most 10 seconds, display output 64 bytes to 16 MiB, reads 256 bytes to 64 KiB, and event capacity at most 1024.
+
+Persistent per-stream VTE parsers decode arbitrary UTF-8 chunk boundaries and remove CSI, OSC, and dangerous controls while retaining newlines/tabs. Sanitized prefix/tail retention emits one deterministic omission marker. The final UTF-8 display never exceeds its cap; raw accounting reports exact omitted bytes. Normal execution retains at most 1.5 times the display cap in sanitized text. Discovery can retain separate stdout/stderr and has a 4.5-times aggregate maximum; it parses stdout only and rejects truncation.
+
+Codex bounds are a 10-second version probe/startup, 120-second turn, 2-second interrupt/shutdown acknowledgement, 1-second kill/reap, 250-ms reader drain, 64-KiB version output, 1-MiB stderr ring, 2-MiB protocol line, 64-KiB assistant response, 16-KiB question, 128 transcript entries, and 256-KiB transcript. TUI prompt output includes only the most recent 16 KiB. Hints stop at three per source revision.
+
+## Local execution and process cleanup
+
+The executor starts one direct child in a new Linux process group and captures stdout/stderr. `Termination` distinguishes numeric exit, cancellation, timeout, and external signal. Exit 0 maps to pass, exit 2 to error, every other numeric exit to fail, explicit cancellation to cancelled, and timeout/signal to error.
+
+Timeout, cancellation, post-spawn failure, or residual descendants trigger group TERM, bounded grace, then KILL. The direct child is reaped before pipe shutdown. Nonblocking readers observe shutdown and have a 100-ms final drain, then are joined. A descendant that deliberately calls `setsid` escapes group signaling and may continue, but pipe closure bounds reader impact. Tests explicitly track and reap such fixture descendants rather than claiming containment.
+
+Adapter `--list` discovery uses the same process implementation with a 5-second CLI timeout and 64-KiB output. It parses only sanitized stdout, ignores stderr as slug input while including it in errors, and rejects partial/truncated stdout before database mutation.
+
+## Source and atomic write boundary
+
+`source` canonicalizes and opens the project root as a directory descriptor. Relative catalog paths must contain only normal components. Linux `openat2` applies beneath, no-symlink, and no-magic-link resolution to both load and save. The target must remain a regular file; root escapes, symlinks, FIFOs, invalid UTF-8, and bound violations fail closed.
+
+A save opens the anchored parent descriptor, verifies the existing target, creates an exclusive mode-0600 same-directory temporary, writes exact bytes, preserves target mode through `fchmod`, flushes and `fsync`s the temporary, renames within that same anchored parent, then `fsync`s the directory. Failure before rename removes the temporary. This gives atomic replacement and ordered durability without reopening an attacker-substitutable path.
+
+## Signals and terminal lifecycle
+
+CLI execution registers scoped SIGINT/SIGTERM handlers against its cancellation token. After all runner threads join and an attempt is recorded, the remaining main thread blocks both signals, checks cancellation plus pending signals, restores handlers, consumes pending signals, and restores the mask. A signal observed at this cutoff rewrites that attempt to Cancelled with exit 130/143. A later signal cannot rewrite a published run.
+
+The TUI shares signal state with the runner worker. Immediately after a submit record and before `RunFinished`, the worker performs the same completion cutoff. Runtime SIGINT/SIGTERM cancels active work, resets Codex, joins workers, restores alternate screen/raw mode/cursor and prior signal dispositions/mask, then exits 130/143. Panic and startup-error paths use the same terminal guard.
+
+## Codex privacy boundary
+
+Only after disclosure consent does the Codex worker start the configured process. Its application payload has five fields: statement, source, bounded latest output, bounded in-memory transcript, and question. Hint turns omit transcript. Submission review uses the exact captured submitted revision after recording and wipes that temporary copy when dropped.
+
+Each process gets an empty mode-0700 temporary cwd and a cleared environment containing only `HOME`, `CODEX_HOME`, `PATH`, locale, proxy, and certificate variables. Threads request and verify ephemeral/null-path storage, exact cwd, read-only sandbox, no sandbox network, disabled web search, and never-approve. The wrapper rejects command/file/permission/user-input/MCP requests and reads no API key or token.
+
+This is payload minimization, not total isolation. The trusted configured executable can use read-only tools, config, MCP, and other locally readable paths allowed by its own sandbox/configuration because `HOME`/`CODEX_HOME` remain available. A dedicated minimal profile/home is the stronger operational boundary. Transcript state is cleared on reset/exit. Temporary-cwd cleanup during normal reset/exit is best effort because it runs through `Drop`; explicit shutdown paths surface cleanup failures.
 
 ## Extension path
 
-Adding NeetCode 150 or 250 consists of importing any missing global problems, installing their language adapters, then creating a new ordered problem set that references both existing and new slugs. Overlapping problems retain one implementation and one completion identity.
-
-## Solve-mode boundary
-
-The main terminal thread owns `AppState`, Ratatui, and the repository connection. Pure reducer effects carry `OperationId`, source generation, and `RunIntent`. One bounded worker thread performs atomic source saves and synchronous process-group execution; explicit submit opens a separate SQLite connection only after execution terminates to record exactly one attempt. The runtime cancels and joins this worker before restoring the terminal. Stale operation IDs are ignored, and stale source generations may be displayed but cannot describe the current buffer.
-
-`source` accepts only the planned regular solution file beneath the canonical root and rejects symlinks, escapes, oversized data, and invalid UTF-8. `editor` owns a bounded Unicode document and 32-snapshot undo history. The built-in Rust/Python lexer emits only keyword, string, comment, and plain spans.
-
-The optional Codex worker starts only after disclosure acceptance. Connect and turn events carry operation IDs; turns additionally require the stored source revision and role to match, and a response is committed to the in-memory transcript only while that revision is still current. A protocol or turn failure invalidates the process without replaying the failed request; an explicit retry may use one fresh process for the next operation. The interviewer and hinter use separate ephemeral threads. Application prompts contain only statement, source, bounded latest output, bounded transcript, and question; hint prompts omit transcript. Automatic submission review captures the bounded source with the successful record operation, sends that exact revision rather than a later editor buffer, then wipes the temporary captured buffer. Reset, leaving solve mode, and process exit drop all transcript state; no transcript is written by the application.
+Adding another set imports any missing global problems/adapters and then adds ordered slug references. Shared problems keep one source and completion identity. Adding another language installs a set-agnostic runner plus catalog source mappings; it does not add set-specific execution logic.

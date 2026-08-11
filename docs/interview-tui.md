@@ -1,21 +1,84 @@
 # Interview TUI
 
-Run `./interview` in an interactive Linux terminal. Select a set and problem, open its detail, then press Enter again to load the selected language's planned source file into solve mode.
+Run `./interview` in an interactive Linux terminal. Optional startup flags are `--db PATH`, `--set ID`, `--language ID`, and `--no-codex`. Without `--set`, the TUI opens the set menu; otherwise it opens that set's problem list.
 
-## Solve mode
+## Browser keys
 
-The native editor supports a deliberately small Vim-style subset. Normal mode: `h j k l`, `w b`, `0 $`, `gg G`, `i a o O`, `x`, `dd`, `u`, and Ctrl-R. Insert mode: Unicode text, arrows, Backspace, Delete, Enter, and Esc. Command mode supports only `:w`, `:wq`, `:q`, and `:submit`. Unsupported commands report an error. Visual mode, search, macros, registers, plugins, and Vimscript are not supported. No Vim or Neovim process is launched.
+The set list, problem list, and detail screens use:
 
-Ctrl-S and F5 atomically save and run local tests without recording an attempt. A clean save still tests. F9 or `:submit` saves, tests, and records exactly one attempt after the runner terminates. Repeating submit records a new attempt. A failed save starts no runner. Ctrl-C cancels Codex when it is the only active operation or when both operations are active and Interview is focused; otherwise it cancels the local runner. Edits may continue while a test runs. STALE appears only when displayed run output belongs to an older revision; edits before the first run are not stale. `:wq` exits only when the saved and tested bytes still equal the current buffer, so edits made during that run remain open and dirty. Revisions never repeat across edits, undo, or redo, while dirty state compares saved bytes. At most the newest queued save/test is retained. Tab and Shift-Tab cycle Editor, Problem, Output, and Interview panes. Focused Problem, Output, and Interview panes accept Up/Down; Interview scroll is bounded from latest to oldest transcript content and resets to the latest message on append or clear. Outside Editor, `i` focuses the Interview composer; in focused Editor Normal mode it retains Vim insert behavior. `Space h` requests a hint from any solve pane except Editor Insert/Command and the active composer. Use `Space b` to leave solve mode or `Space q` to quit from Editor Normal mode. With a dirty buffer, the first invocation shows a confirmation and the second identical invocation discards; edits or other actions clear confirmation. Esc never discards. `:q` rejects a dirty buffer, while `:wq` saves, tests, and exits only after the matching revision succeeds.
+- `j`/`k` or Down/Up: move the current selection or scroll detail
+- Enter: open the selected set/problem; from problem detail, load the selected language source into solve mode
+- Esc or Backspace: go back
+- `l`: cycle the enabled language
+- `r`: reload catalog/progress data
+- Tab/Shift-Tab: cycle the browser's main and progress focus
+- `?`: open help; Esc closes it
+- `q`: quit outside solve mode
 
-Cursor motion, deletion, insertion, and rendering use Unicode grapheme clusters, including combining marks and emoji ZWJ sequences. Normal mode addresses a grapheme; Insert mode addresses an insertion point.
+The status line reports the selected language and current operation. Errors remain visible rather than silently changing screens.
 
-On Linux, the source boundary anchors the canonical root and target parent with directory descriptors and uses `openat2` beneath/no-symlink/no-magic-link resolution. Only the catalog-planned regular file is accepted; symlinks, root escapes, FIFOs, invalid UTF-8, files over 1 MiB, and documents over 100,000 lines are rejected. Saves create an exclusive same-directory temporary through the parent descriptor, preserve mode through the file descriptor, sync data, rename within the anchored parent, and sync that parent. The editor keeps at most 32 undo snapshots.
+## Solve panes and keys
 
-Run `make test-pty` for the serial Linux PTY acceptance gate. It fetches locked Cargo dependencies before switching builds to locked/offline mode, uses only the copied local runner and explicitly configured fake Codex executable, removes `OPENAI_API_KEY` from fixture environments, bounds each case to 20 seconds and the matrix to 90 seconds during execution, and verifies terminal restoration, 120x40 and 80x24 behavior, resize preservation, hostile process cleanup, Codex degradation, configuration boundaries, attempt rows, and in-memory-only transcript behavior. This fixture isolation prevents model calls; it is not a kernel network namespace and does not claim to block arbitrary networking by a compromised fixture. The ordinary Cargo suite keeps shorter PTY smokes and does not duplicate this matrix. Run `make test-harness` for injected timeout, cleanup, and Make fail-fast self-tests. Run `make test-race` separately to repeat runtime cancellation races and both PTY cancellation paths ten times. Descendants that deliberately call `setsid` are outside process-group containment; the fixture records that PID and the gate explicitly kills and reaps it rather than claiming containment.
+Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. Tab and Shift-Tab cycle them. Focused Problem, Output, and Interview panes scroll with Up/Down; Interview scrolls from newest toward older bounded transcript content and returns to newest when a message is appended or the session is cleared. Outside the Editor, `i` focuses the Interview composer. In the Editor it retains Vim insert behavior.
 
-Rust and Python receive deterministic keyword, string, and comment highlighting from the built-in bounded lexer. Other languages use plain text. A small lexer is used instead of Tree-sitter because only these three lexical classes are promised; this avoids grammar/runtime dependencies and is covered by exact unit and render-style tests.
+Global solve actions are:
 
-At 100x30 and larger, Problem/Examples, Editor, Interview, and full-width Output/Test panes are visible. At 80x24, one selected pane is shown behind tabs. Below 60x20, only the resize panel is shown; it still reports the guarded `Space q` behavior and any active error.
+- Ctrl-S or F5: save the current revision atomically and run local tests
+- F9: submit the current revision
+- Ctrl-C: cancel the operation selected by focus; Interview wins when it is focused and both Codex and the local runner are active, otherwise the local runner is cancelled
+- `Space h`: request a hint outside Editor Insert/Command mode and outside the active composer
+- `Space r`: clear the Interview session when Interview is focused
+- `Space b`: go back from Editor Normal mode
+- `Space q`: quit from Editor Normal mode
 
-In the Interview pane, press `i` to open the memory-only composer. The first Codex turn per launch discloses the five application-supplied fields and that the configured executable is a trusted user-selected boundary, while version checks establish compatibility rather than provenance. The selected process may also access read-only tools, config, MCP, and other locally readable paths allowed by its sandbox/config because `HOME` and `CODEX_HOME` remain available. A dedicated Codex profile/home provides stronger isolation. `y`/Enter accepts and `n`/Esc declines. Enter sends a nonempty question, Esc leaves the composer, `Space h` requests the next of three hints for the current revision, and `Space r` clears the in-memory session. A turn response is accepted only when its operation, source revision, role, and current editor revision still match; editing during a turn discards the response from both UI and transcript. Submission review starts only after attempt recording succeeds and uses the exact captured source bytes and revision from that runner operation, even if the editor changed while submission ran. The runner worker checks the shared OS-signal state immediately after recording and before publishing completion; that check is the completion cutoff. SIGINT or SIGTERM observed by the cutoff rewrites that exact attempt to Cancelled with exit code 130 or 143, while a later signal applies only to runtime teardown and cannot rewrite an already published completion. Protocol and turn failures surface an error; pressing `i` explicitly reconnects for the next operation, with no reset or failed-content replay. Ctrl-C requests a bounded turn interrupt according to the footer's current target. Authentication guidance uses the official `codex login` command. Codex failures never disable local editing, testing, or submission. See [Codex compatibility](codex-compatibility.md) for exact versions and the privacy boundary; this is not a claim of executable provenance or total process isolation.
+Back and quit are guarded when the buffer is dirty. The first identical action warns; the second discards. An edit or different action clears the confirmation. Esc never discards solve changes. `:q` rejects a dirty buffer.
+
+## Native editor subset
+
+No Vim or Neovim process is launched. The built-in editor supports this exact subset:
+
+- Normal mode: arrow keys, `h j k l`, `w b`, `0 $`, `gg G`, `i a o O`, `x`, `dd`, `u`, Ctrl-R, and `:`
+- Insert mode: Unicode text and paste, arrows, Backspace, Delete, Enter, and Esc
+- Command mode: `:w`, `:wq`, `:q`, and `:submit`; Esc cancels command entry
+
+Visual mode, search, macros, registers, counts, plugins, Vimscript, and every other command are unsupported and produce an error where applicable. Cursor motion, insertion, deletion, and display use Unicode grapheme clusters, including combining marks and emoji ZWJ sequences. Normal mode addresses a grapheme; Insert mode addresses an insertion point. The document is bounded to 1 MiB, 100,000 lines, 32 undo snapshots, and a 256-byte command.
+
+## Test, save, and submit semantics
+
+Ctrl-S, F5, and `:w` atomically save if dirty and run the local suite. They never create an attempt row. A clean buffer still runs. If another local run is active, only the newest requested save/test revision is retained; submit is rejected until that run completes. A failed save starts no runner.
+
+F9 and `:submit` save, run, then record exactly one attempt after the runner returns an execution result. Pass, fail, timeout, and explicit cancellation outcomes are recorded; preflight/spawn failures that produce no execution result are not. Repeating submit records another attempt. Local runner results remain authoritative even when Codex is enabled.
+
+`:wq` starts save/test and exits only after that operation returns and the saved/tested bytes still equal the current buffer. It does not require a passing test. If the buffer changes while the run is active, the newer dirty revision stays open. Edits are allowed during any run. Revisions increase monotonically across edits, undo, and redo, while dirty state compares bytes against the last saved bytes.
+
+Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, Codex errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
+
+## Layout
+
+- At 100x30 and larger: Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible.
+- At 80x24: one selected pane appears behind tabs.
+- Below 60x20: only a resize panel appears. It still reports the guarded `Space q` behavior and any active error.
+
+Resizing preserves the editor buffer, cursor state, operations, and displayed status.
+
+## Local source and process boundary
+
+Source loading and saving are Linux-specific. The application anchors the canonical repository root and target parent with directory descriptors, then uses `openat2` beneath/no-symlink/no-magic-link resolution. Only the catalog-planned regular file is accepted. Root escapes, symlinks, FIFOs, invalid UTF-8, oversized files, and oversized documents are rejected. Saves create an exclusive same-directory temporary file, preserve mode through file descriptors, sync data, rename within the anchored parent, then sync the parent directory.
+
+The local runner starts one direct child in a new process group with no shell. Defaults are a 30-second wall timeout, 250-ms TERM grace, 256-KiB displayed output, 8-KiB pipe reads, and 64 queued events. Timeout, cancellation, and cleanup failures send TERM and then KILL to the group; the direct child is reaped and reader threads have bounded drains and joins. A descendant that deliberately calls `setsid` escapes process-group containment and may continue after its pipes are closed. The PTY fixture records, kills, and reaps that escaped PID; this is a tested boundary, not a containment claim.
+
+## Codex interaction
+
+The first Codex action per launch shows a disclosure. Enter/`y` accepts; Esc/`n` declines. After acceptance, `i` opens the composer, Enter sends a nonempty question, and Esc leaves it. `Space h` provides at most three progressively stronger hints per source revision: invariant/question, technique/counterexample, then pseudocode direction. Editing resets that revision's hint allowance. Hints use a separate ephemeral Codex thread and receive no interviewer transcript.
+
+The interviewer asks one focused question at a time. Automatic submission review starts only after the attempt row is recorded and receives the exact captured source and revision from that submission, even if the editor changed during the run. Review covers correctness, complexity, edge cases, and communication; it cannot change the local result.
+
+A response is accepted only if operation ID, role, captured source revision, and current editor revision still match. Editing during a turn discards the response from both UI and transcript. The transcript is bounded and memory-only; `Space r`, leaving solve mode, and process exit clear it. No transcript is written by Interview Tutor.
+
+Protocol/authentication/turn failures show an error without disabling local solve. Press `i` to explicitly reconnect for the next distinct operation. Failed content is not replayed, and a session gets at most one replacement process. Ctrl-C requests a bounded app-server turn interrupt; a missing acknowledgement invalidates and kills the process. Use `--no-codex` to disable all probing and spawning. See [Codex setup, privacy, and troubleshooting](codex-compatibility.md).
+
+## Signals and verification
+
+SIGINT and SIGTERM cancel active work, join workers, restore terminal state and prior signal dispositions, and exit with 130 or 143. For submit, the runner worker checks shared signal state immediately after recording and before publishing completion. A signal observed by that cutoff rewrites that exact attempt to Cancelled; a later signal applies only to runtime teardown.
+
+Run `make test-pty` for the 32-case serial acceptance matrix and `make test-race` for the 20-case cancellation matrix plus repeated Rust race tests. Both use only local fake fixtures, including an explicitly configured fake Codex executable. Exact bounds and gate contents are documented in [testing](testing.md).
