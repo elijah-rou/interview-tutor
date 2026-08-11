@@ -429,6 +429,17 @@ mod tests {
         }
     }
 
+    fn poll_one(worker: &mut RunnerWorker) -> Event {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = worker.poll().into_iter().next() {
+                return event;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker event timeout");
+            thread::yield_now();
+        }
+    }
+
     fn run_once(worker: &mut RunnerWorker, operation: u64, intent: RunIntent) -> Event {
         worker
             .run(
@@ -440,7 +451,7 @@ mod tests {
                 true,
             )
             .unwrap();
-        worker.events.recv_timeout(Duration::from_secs(2)).unwrap()
+        poll_one(worker)
     }
 
     #[test]
@@ -464,6 +475,7 @@ mod tests {
             Termination::Exited(1),
             Termination::TimedOut,
             Termination::Cancelled,
+            Termination::Signalled(15),
         ]
         .into_iter()
         .enumerate()
@@ -471,6 +483,7 @@ mod tests {
             let records = Arc::new(AtomicUsize::new(0));
             let mut worker =
                 RunnerWorker::start_with_services(services(termination, records.clone()));
+            assert_eq!(records.load(Ordering::SeqCst), 0);
             assert!(matches!(
                 run_once(&mut worker, index as u64 + 3, RunIntent::Submit),
                 Event::RunFinished(_, _, RunIntent::Submit, Some(_), Ok(_))
@@ -481,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_reports_save_record_and_panic_failures() {
+    fn worker_reports_save_and_record_failures() {
         let save_failure = RunnerServices {
             save: Arc::new(|_, _, _| Err("save failed".into())),
             execute: Arc::new(|_, _| panic!("execute must not run")),
@@ -505,6 +518,13 @@ mod tests {
             matches!(run_once(&mut worker, 2, RunIntent::Submit), Event::RunFinished(_, _, _, Some(_), Err(error)) if error == "record failed")
         );
         worker.shutdown();
+    }
+
+    #[test]
+    fn worker_panic_clears_reducer_state_renders_error_and_joins() {
+        use crate::app::model::Screen;
+        use crate::editor::EditorDocument;
+        use ratatui::{Terminal, backend::TestBackend};
 
         let panic_services = RunnerServices {
             save: Arc::new(|_, _, _| Ok(())),
@@ -512,9 +532,62 @@ mod tests {
             record: Arc::new(|_, _| Ok(())),
         };
         let mut worker = RunnerWorker::start_with_services(panic_services);
-        assert!(
-            matches!(run_once(&mut worker, 3, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "runner worker panicked")
-        );
+        let mut state = AppState::new(Vec::new(), 0);
+        state.screen = Screen::Solve;
+        state.solve = Some(SolveSession {
+            problem_id: 1,
+            problem_slug: "p".into(),
+            problem_title: "P".into(),
+            statement: "statement".into(),
+            language: "python".into(),
+            plan: plan(),
+            editor: EditorDocument::new("source".into()).unwrap(),
+            pane: SolvePane::Editor,
+            output: String::new(),
+            output_scroll: 0,
+            problem_scroll: 0,
+            running: Some((OperationId(3), 0, RunIntent::Test)),
+            cancellation: None,
+            pending_save: None,
+            stale: false,
+            latest_run_revision: None,
+            quit_after_save: None,
+            discard_confirmation: None,
+            refresh_after_submit: false,
+        });
+        worker
+            .run(
+                OperationId(3),
+                0,
+                RunIntent::Test,
+                plan(),
+                "source".into(),
+                false,
+            )
+            .unwrap();
+
+        let event = poll_one(&mut worker);
+        assert!(worker.active.is_none());
+        let effects = reduce(&mut state, event);
+        assert!(effects.is_empty());
+        assert!(state.solve.as_ref().unwrap().running.is_none());
+        assert_eq!(state.status, "Run failed");
+        assert_eq!(state.error.as_deref(), Some("runner worker panicked"));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render::render(frame, &state))
+            .unwrap();
+        let view = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(view.contains("runner worker panicked"));
+
         worker.shutdown();
     }
 
