@@ -162,7 +162,16 @@ impl CodexWorker {
                             break;
                         }
                     }
-                    CodexWorkerCommand::Reset => session = None,
+                    CodexWorkerCommand::Reset => {
+                        if session
+                            .as_ref()
+                            .is_some_and(|session| session.requires_restart())
+                        {
+                            session.as_mut().expect("session checked").clear();
+                        } else {
+                            session = None;
+                        }
+                    }
                     CodexWorkerCommand::Cancel => {}
                     CodexWorkerCommand::Shutdown => break,
                 }
