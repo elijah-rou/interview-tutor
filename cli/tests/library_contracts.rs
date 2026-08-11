@@ -27,7 +27,7 @@ impl Fixture {
         fs::write(root.join("python/shipped.py"), "# shipped\n").unwrap();
         fs::write(
             root.join("catalog/problems.json"),
-            r#"{
+            r###"{
               "schema_version": 2,
               "catalog_revision": 1,
               "problems": [{
@@ -39,14 +39,14 @@ impl Fixture {
                 "premium": false,
                 "leetcode_url": "https://example.com/shipped",
                 "neetcode_url": "https://example.com/shipped",
-                "statement_markdown": "",
+                "statement_markdown": "## Task\n\nReturn the shipped result.\n\n## Example\n\nInput: sample. Output: sample.",
                 "test_revision": 2,
                 "adapters": [{
                   "language": "python",
                   "solution_path": "python/shipped.py"
                 }]
               }]
-            }"#,
+            }"###,
         )
         .unwrap();
         fs::write(
@@ -93,6 +93,30 @@ fn add_custom_problem(connection: &rusqlite::Connection, root: &Path) {
     .unwrap();
     fs::write(root.join("python/custom.py"), "# custom\n").unwrap();
     database::add_implementation(connection, "custom", "python", "python/custom.py").unwrap();
+}
+
+#[test]
+fn shipped_catalog_rejects_blank_statements_without_restricting_custom_problems() {
+    let fixture = Fixture::new();
+    let catalog_path = fixture.root.join("catalog/problems.json");
+    let catalog = fs::read_to_string(&catalog_path).unwrap();
+    fs::write(
+        &catalog_path,
+        catalog.replace(
+            "## Task\\n\\nReturn the shipped result.\\n\\n## Example\\n\\nInput: sample. Output: sample.",
+            "   ",
+        ),
+    )
+    .unwrap();
+
+    let error = database::open_database(&fixture.database, &fixture.root).unwrap_err();
+    assert!(error.contains("problem statement must not be blank"));
+
+    fs::write(&catalog_path, catalog).unwrap();
+    let connection = fixture.connection();
+    add_custom_problem(&connection, &fixture.root);
+    let custom = database::resolve_problem(&connection, "custom", None).unwrap();
+    assert!(custom.problem.statement_markdown.is_empty());
 }
 
 #[test]
