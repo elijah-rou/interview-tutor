@@ -3,19 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
-import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = ROOT / "catalog" / "problems.json"
 BLIND75_PATH = ROOT / "problem_sets" / "blind75.json"
 MAX_STATEMENT_LENGTH = 1_000_000
-
-sys.path.insert(0, str(ROOT / "python"))
-from local_judge.registry import PROBLEMS as PYTHON_PROBLEMS  # noqa: E402
-
-sys.path.insert(0, str(ROOT / "python" / "tests"))
-from cases import CUSTOM_TESTS, SIMPLE_CASES  # noqa: E402
 
 
 class CatalogContentTests(unittest.TestCase):
@@ -42,8 +35,28 @@ class CatalogContentTests(unittest.TestCase):
             {member["problem_slug"] for member in members}, set(self.by_slug)
         )
 
-    def test_every_problem_has_exactly_the_registered_python_and_rust_adapters(self) -> None:
-        python_paths = {problem.slug: problem.path for problem in PYTHON_PROBLEMS}
+    def test_every_problem_has_exactly_the_registered_python_and_rust_adapters(
+        self,
+    ) -> None:
+        python_contract = json.loads(
+            subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    (
+                        "import json; from local_judge.registry import PROBLEMS; "
+                        "from tests.cases import CUSTOM_TESTS, SIMPLE_CASES; "
+                        "print(json.dumps({'paths': {p.slug: p.path for p in PROBLEMS}, "
+                        "'cases': sorted(set(SIMPLE_CASES) | set(CUSTOM_TESTS))}))"
+                    ),
+                ],
+                cwd=ROOT / "python",
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        python_paths = python_contract["paths"]
         rust_slugs = set(
             subprocess.run(
                 [str(ROOT / "rust" / "run"), "--list"],
@@ -53,13 +66,16 @@ class CatalogContentTests(unittest.TestCase):
                 text=True,
             ).stdout.splitlines()
         )
-        case_slugs = set(SIMPLE_CASES) | set(CUSTOM_TESTS)
+        case_slugs = set(python_contract["cases"])
 
         self.assertEqual(set(self.by_slug), set(python_paths))
         self.assertEqual(set(self.by_slug), case_slugs)
         self.assertEqual(set(self.by_slug), rust_slugs)
         for slug, problem in self.by_slug.items():
-            adapters = {adapter["language"]: adapter["solution_path"] for adapter in problem["adapters"]}
+            adapters = {
+                adapter["language"]: adapter["solution_path"]
+                for adapter in problem["adapters"]
+            }
             self.assertEqual(set(adapters), {"python", "rust"})
             self.assertEqual(adapters["python"], f"python/{python_paths[slug]}")
             self.assertTrue((ROOT / adapters["python"]).is_file())

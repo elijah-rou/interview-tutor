@@ -73,6 +73,7 @@
           },
           "statement_markdown": {
             "type": "string",
+            "pattern": "\\S",
             "maxLength": 1000000
           },
           "test_revision": {
