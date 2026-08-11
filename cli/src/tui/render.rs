@@ -74,7 +74,7 @@ fn header(state: &AppState) -> Paragraph<'static> {
         .map_or("none", |item| item.display_name.as_str());
     let solve_badges = state.solve.as_ref().map_or(String::new(), |solve| {
         format!(
-            "  {:?}{}{}  Codex {}",
+            "  {:?}{}{}",
             solve.editor.mode,
             if solve.editor.dirty() {
                 " · DIRTY"
@@ -82,14 +82,19 @@ fn header(state: &AppState) -> Paragraph<'static> {
                 " · SAVED"
             },
             if solve.stale { " · STALE" } else { "" },
-            state.codex.status.label()
         )
     });
-    Paragraph::new(format!(
+    let mut lines = vec![Line::from(format!(
         " Interview Tutor  Language: {language}  Progress: {}/{}  {}{}",
         state.data.progress.completed, state.data.progress.total, state.status, solve_badges
-    ))
-    .style(
+    ))];
+    if state.solve.is_some() {
+        lines.push(Line::from(format!(
+            " Codex: {} · memory only",
+            state.codex.status.label()
+        )));
+    }
+    Paragraph::new(lines).style(
         Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
@@ -106,6 +111,67 @@ fn footer_text(width: u16) -> &'static str {
     } else {
         COMPACT
     }
+}
+
+fn solve_footer_text(state: &AppState, width: u16) -> String {
+    let solve = state
+        .solve
+        .as_ref()
+        .expect("solve footer requires solve state");
+    let base = if solve.pane == SolvePane::Interview
+        && state.codex.status == crate::app::model::CodexStatus::Disclosure
+    {
+        "y/Enter accept · n/Esc decline".to_string()
+    } else if solve.pane == SolvePane::Interview && state.codex.composer_focused {
+        "Type question · Enter send · Esc close".to_string()
+    } else {
+        match (solve.pane, solve.editor.mode) {
+            (SolvePane::Editor, Mode::Normal) => {
+                "i insert · Space-h hint · F5 test · F9 submit · Tab panes".into()
+            }
+            (SolvePane::Editor, Mode::Insert) => {
+                "Esc normal · F5 test · F9 submit · Tab panes".into()
+            }
+            (SolvePane::Editor, Mode::Command) => "Enter command · Esc normal · Tab panes".into(),
+            (SolvePane::Interview, _)
+                if matches!(
+                    state.codex.status,
+                    crate::app::model::CodexStatus::ProtocolError
+                        | crate::app::model::CodexStatus::Disconnected
+                ) =>
+            {
+                "i retry · Space-h hint · Space-r reset · Tab panes".into()
+            }
+            (SolvePane::Interview, _) => "i ask · ↑/↓ scroll · Space-h hint · Space-r reset".into(),
+            (SolvePane::Problem | SolvePane::Output, _) => {
+                "i interview · ↑/↓ scroll · Space-h hint · Tab panes".into()
+            }
+        }
+    };
+    let codex_active = state.codex.active.is_some() || state.codex.connecting.is_some();
+    let runner_active = solve.running.is_some();
+    let cancel = if codex_active && (solve.pane == SolvePane::Interview || !runner_active) {
+        Some("Codex")
+    } else if runner_active {
+        Some("runner")
+    } else {
+        None
+    };
+    let expanded = cancel.map_or_else(
+        || base.clone(),
+        |target| format!("{base} · Ctrl-C {target}"),
+    );
+    if UnicodeWidthStr::width(expanded.as_str()) <= usize::from(width) {
+        return expanded;
+    }
+    if let Some(target) = cancel {
+        let compact = format!("F5 test · F9 submit · Tab panes · Ctrl-C {target}");
+        if UnicodeWidthStr::width(compact.as_str()) <= usize::from(width) {
+            return compact;
+        }
+    }
+    assert!(UnicodeWidthStr::width(base.as_str()) <= 60);
+    base
 }
 
 fn progress(state: &AppState) -> Paragraph<'static> {
@@ -360,7 +426,7 @@ fn solve_output(state: &AppState) -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
         .scroll((solve.output_scroll, 0))
 }
-fn solve_interview(state: &AppState) -> Paragraph<'static> {
+fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
     let mut lines = vec![Line::from(format!(
         "Codex {} · Transcript memory only · not saved",
@@ -416,6 +482,22 @@ fn solve_interview(state: &AppState) -> Paragraph<'static> {
             ));
         }
     }
+    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
+    let visible_rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let wrapped_rows = lines
+        .iter()
+        .map(|line| {
+            let width = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>();
+            width.max(1).div_ceil(inner_width)
+        })
+        .sum::<usize>();
+    let latest_offset = wrapped_rows.saturating_sub(visible_rows);
+    let retained_below = usize::from(state.codex.scroll).min(latest_offset);
+    let offset = latest_offset.saturating_sub(retained_below);
     Paragraph::new(lines)
         .block(block(if solve.pane == SolvePane::Interview {
             "Interview [active]"
@@ -423,7 +505,7 @@ fn solve_interview(state: &AppState) -> Paragraph<'static> {
             "Interview"
         }))
         .wrap(Wrap { trim: false })
-        .scroll((state.codex.scroll, 0))
+        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
 }
 fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let solve = state.solve.as_ref().unwrap();
@@ -438,7 +520,7 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         .split(vertical[0]);
         frame.render_widget(solve_problem(state), upper[0]);
         solve_editor(frame, state, upper[1]);
-        frame.render_widget(solve_interview(state), upper[2]);
+        frame.render_widget(solve_interview(state, upper[2]), upper[2]);
         frame.render_widget(solve_output(state), vertical[1]);
     } else {
         let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
@@ -462,30 +544,29 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             SolvePane::Editor => solve_editor(frame, state, chunks[1]),
             SolvePane::Problem => frame.render_widget(solve_problem(state), chunks[1]),
             SolvePane::Output => frame.render_widget(solve_output(state), chunks[1]),
-            SolvePane::Interview => frame.render_widget(solve_interview(state), chunks[1]),
+            SolvePane::Interview => {
+                frame.render_widget(solve_interview(state, chunks[1]), chunks[1])
+            }
         }
     }
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
+    let header_height = if state.screen == Screen::Solve { 2 } else { 1 };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(header_height),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .split(area);
     frame.render_widget(header(state), vertical[0]);
     let footer = if state.screen == Screen::Solve {
-        if area.width >= 80 {
-            "F5 test F9 submit Tab panes i ask Space-h hint Ctrl-C cancel Space-q quit"
-        } else {
-            "F5 test F9 submit Tab panes i ask Space-h hint Space-q quit"
-        }
+        solve_footer_text(state, area.width)
     } else {
-        footer_text(area.width)
+        footer_text(area.width).to_string()
     };
     frame.render_widget(Paragraph::new(footer), vertical[2]);
 
@@ -569,7 +650,20 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     if state.show_help && !undersized {
         let popup = centered(70, 55, area);
         frame.render_widget(Clear, popup);
-        frame.render_widget(Paragraph::new("Help\n\n↑/k up  ↓/j down  Enter open\nEsc back  Tab/Shift-Tab pane\nl language  r reload  ? close  q quit").block(block("Keyboard help")).wrap(Wrap { trim: true }), popup);
+        let help = if state.screen == Screen::Solve {
+            format!(
+                "Solve help\n\nCurrent: {}\nEditor Normal: i inserts\nProblem/Output/Interview: i focuses Interview\nSpace-h hints outside Insert/Command/composer\n↑/↓ scrolls the focused non-editor pane\nTab/Shift-Tab changes pane · F5 test · F9 submit",
+                solve_footer_text(state, popup.width.saturating_sub(2))
+            )
+        } else {
+            "Help\n\n↑/k up  ↓/j down  Enter open\nEsc back  Tab/Shift-Tab pane\nl language  r reload  ? close  q quit".into()
+        };
+        frame.render_widget(
+            Paragraph::new(help)
+                .block(block("Keyboard help"))
+                .wrap(Wrap { trim: true }),
+            popup,
+        );
     } else if let Some(error) = &state.error {
         let popup = centered(70, 35, area);
         frame.render_widget(Clear, popup);
@@ -617,6 +711,24 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn rendered_row(state: &AppState, width: u16, height: u16, row: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .nth(usize::from(row))
+            .unwrap()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 
     fn rendered_footer(state: &AppState, width: u16) -> String {
@@ -811,6 +923,7 @@ mod tests {
             quit_after_save: None,
             discard_confirmation: None,
             refresh_after_submit: false,
+            submitted_source: None,
         });
         state
     }
@@ -862,13 +975,86 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, &state)).unwrap();
-        let keyword = &terminal.backend().buffer()[(37, 2)];
+        let keyword = &terminal.backend().buffer()[(37, 3)];
         assert_eq!(keyword.symbol(), "d");
         assert_eq!(keyword.fg, Color::Magenta);
         state.solve.as_mut().unwrap().editor =
             EditorDocument::new(format!("{}END", "界".repeat(100))).unwrap();
         state.solve.as_mut().unwrap().editor.normal('$').unwrap();
         assert!(rendered(&state, 80, 24).contains("END"));
+    }
+
+    #[test]
+    fn solve_header_preserves_exact_codex_state_and_memory_badge_at_supported_widths() {
+        let mut state = solve_state();
+        for status in [
+            crate::app::model::CodexStatus::Offline,
+            crate::app::model::CodexStatus::AuthRequired,
+            crate::app::model::CodexStatus::Ready,
+            crate::app::model::CodexStatus::Thinking,
+            crate::app::model::CodexStatus::ProtocolError,
+        ] {
+            state.codex.status = status;
+            for width in [60_u16, 80, 120] {
+                let row = rendered_row(&state, width, 24, 1);
+                assert_eq!(
+                    row,
+                    format!(" Codex: {} · memory only", status.label()),
+                    "width {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interview_scroll_reaches_oldest_and_latest_messages_at_both_layouts() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.status = crate::app::model::CodexStatus::Feedback;
+        for index in 0..48 {
+            let message = if index == 0 {
+                "OLDEST-SENTINEL".into()
+            } else if index == 47 {
+                "LATEST-SENTINEL".into()
+            } else {
+                format!("message-{index}: {}", "wrapped content ".repeat(3))
+            };
+            state.codex.push_message("Interviewer".into(), message);
+        }
+        for (width, height) in [(120, 40), (80, 24)] {
+            state.codex.scroll = 0;
+            let latest = rendered(&state, width, height);
+            assert!(latest.contains("LATEST-SENTINEL"), "{width}x{height}");
+            assert!(!latest.contains("OLDEST-SENTINEL"), "{width}x{height}");
+            state.codex.scroll = u16::MAX;
+            let oldest = rendered(&state, width, height);
+            assert!(oldest.contains("OLDEST-SENTINEL"), "{width}x{height}");
+            assert!(!oldest.contains("LATEST-SENTINEL"), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn solve_footer_reports_context_and_cancel_target_without_clipping() {
+        let mut state = solve_state();
+        assert!(rendered_footer(&state, 80).contains("i insert"));
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        assert!(rendered_footer(&state, 80).contains("i interview"));
+        state.solve.as_mut().unwrap().running = Some((
+            crate::app::model::OperationId(1),
+            0,
+            crate::app::RunIntent::Test,
+        ));
+        assert!(rendered_footer(&state, 80).contains("Ctrl-C runner"));
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.active = Some((
+            crate::app::model::OperationId(2),
+            0,
+            crate::codex::prompt::Mode::Interviewer,
+        ));
+        assert!(rendered_footer(&state, 80).contains("Ctrl-C Codex"));
+        for width in [60_u16, 80, 120] {
+            assert!(rendered_footer(&state, width).width() <= usize::from(width));
+        }
     }
 
     #[test]

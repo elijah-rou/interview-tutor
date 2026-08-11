@@ -19,7 +19,7 @@ cargo test --manifest-path cli/Cargo.toml
 
 ## Solve editor
 
-Run `../interview`. From problem detail, Enter opens solve mode. Ctrl-S/F5 atomically save and test without an attempt; F9 submits and records one attempt; Ctrl-C cancels. The editor is bounded to 1 MiB, 100,000 lines, and 32 undo snapshots. See `docs/interview-tui.md` for the exact supported Vim-style subset. Interviewing remains explicitly offline until Stack 7.
+Run `../interview`. From problem detail, Enter opens solve mode. Ctrl-S/F5 atomically save and test without an attempt; F9 submits and records one attempt; Ctrl-C cancels the context-selected active operation. The editor is bounded to 1 MiB, 100,000 lines, and 32 undo snapshots. The opt-in Codex Interview pane keeps a bounded memory-only transcript, offers three hints per source revision, and reviews only a successfully recorded submission using that runner operation's exact source bytes. Local solve does not depend on Codex. See `docs/interview-tui.md` for the supported Vim-style subset, key routing, and privacy boundary.
 
 ## Modules
 

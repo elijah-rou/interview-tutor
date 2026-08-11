@@ -44,11 +44,21 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
                 _ => None,
             };
         }
+    }
+    if solve.pane != crate::app::model::SolvePane::Editor || mode == Mode::Normal {
         if state.leader_pending {
             state.leader_pending = false;
             return match key.code {
                 KeyCode::Char('h') => Some(Action::Hint),
-                KeyCode::Char('r') => Some(Action::ResetInterview),
+                KeyCode::Char('r') if solve.pane == crate::app::model::SolvePane::Interview => {
+                    Some(Action::ResetInterview)
+                }
+                KeyCode::Char('q') if solve.pane == crate::app::model::SolvePane::Editor => {
+                    Some(Action::Quit)
+                }
+                KeyCode::Char('b') if solve.pane == crate::app::model::SolvePane::Editor => {
+                    Some(Action::Back)
+                }
                 _ => None,
             };
         }
@@ -56,9 +66,9 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             state.leader_pending = true;
             return None;
         }
-        if key.code == KeyCode::Char('i') {
-            return Some(Action::InterviewFocus);
-        }
+    }
+    if solve.pane != crate::app::model::SolvePane::Editor && key.code == KeyCode::Char('i') {
+        return Some(Action::InterviewFocus);
     }
     if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
         || key.code == KeyCode::BackTab
@@ -107,18 +117,6 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         Mode::Normal => {
             if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Some(Action::Editor(EditorAction::Redo));
-            }
-            if state.leader_pending {
-                state.leader_pending = false;
-                return match key.code {
-                    KeyCode::Char('q') => Some(Action::Quit),
-                    KeyCode::Char('b') => Some(Action::Back),
-                    _ => None,
-                };
-            }
-            if key.code == KeyCode::Char(' ') {
-                state.leader_pending = true;
-                return None;
             }
             match key.code {
                 KeyCode::Esc => Some(Action::Editor(EditorAction::Escape)),
@@ -187,6 +185,7 @@ mod tests {
             quit_after_save: None,
             discard_confirmation: None,
             refresh_after_submit: false,
+            submitted_source: None,
         });
         state
     }
@@ -247,6 +246,55 @@ mod tests {
                 &mut state
             ),
             Some(Action::Down)
+        );
+    }
+
+    #[test]
+    fn solve_i_hint_and_cancel_routing_is_contextual() {
+        let mut state = solve_state();
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::Editor(EditorAction::Normal('i')))
+        );
+
+        for pane in [SolvePane::Problem, SolvePane::Output, SolvePane::Interview] {
+            state.solve.as_mut().unwrap().pane = pane;
+            assert_eq!(
+                action_for_key(
+                    KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                    &mut state
+                ),
+                Some(Action::InterviewFocus)
+            );
+            state.codex.composer_focused = false;
+            assert_eq!(
+                action_for_key(
+                    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                    &mut state
+                ),
+                None
+            );
+            assert_eq!(
+                action_for_key(
+                    KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                    &mut state
+                ),
+                Some(Action::Hint)
+            );
+        }
+
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        state.solve.as_mut().unwrap().editor.normal('i').unwrap();
+        assert_eq!(state.solve.as_ref().unwrap().editor.mode, Mode::Insert);
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::Editor(EditorAction::Insert(' ')))
         );
     }
 

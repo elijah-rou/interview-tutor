@@ -92,6 +92,23 @@ impl CodexSession {
         request: InterviewRequest<'_>,
         cancellation: &CancellationToken,
     ) -> Result<String, String> {
+        self.ask_internal(request, cancellation, true)
+    }
+
+    pub(crate) fn ask_deferred_with_cancellation(
+        &mut self,
+        request: InterviewRequest<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<String, String> {
+        self.ask_internal(request, cancellation, false)
+    }
+
+    fn ask_internal(
+        &mut self,
+        request: InterviewRequest<'_>,
+        cancellation: &CancellationToken,
+        record_response: bool,
+    ) -> Result<String, String> {
         self.ensure_connected(cancellation)?;
         if request.question.len() > session::MAX_USER_BYTES {
             return Err("question exceeds 16 KiB".into());
@@ -150,10 +167,7 @@ impl CodexSession {
             cancellation,
         ) {
             Ok(raw) => raw,
-            Err(error) => {
-                self.note_process_state();
-                return Err(error);
-            }
+            Err(error) => return Err(self.invalidate_after_turn_failure(error)),
         };
         let response = match prompt::parse_response(mode, &raw) {
             Ok(response) => response,
@@ -166,31 +180,60 @@ impl CodexSession {
                     cancellation,
                 ) {
                     Ok(raw) => raw,
-                    Err(error) => {
-                        self.note_process_state();
-                        return Err(error);
-                    }
+                    Err(error) => return Err(self.invalidate_after_turn_failure(error)),
                 };
-                prompt::parse_response(mode, &raw)
-                    .map_err(|_| "Codex returned malformed structured output twice")?
+                match prompt::parse_response(mode, &raw) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return Err(self.invalidate_after_turn_failure(
+                            "Codex returned malformed structured output twice".into(),
+                        ));
+                    }
+                }
             }
         };
+        if record_response {
+            self.commit_response(
+                mode,
+                request.source_revision,
+                request.question,
+                response.clone(),
+            );
+        }
+        Ok(response)
+    }
+
+    pub(crate) fn commit_response(
+        &mut self,
+        mode: Mode,
+        source_revision: u64,
+        question: &str,
+        response: String,
+    ) {
         match mode {
             Mode::Hint(_) => {
-                self.hint_count += 1;
-                self.transcript.push(Speaker::Hinter, response.clone())?;
+                if self.hint_revision != Some(source_revision) {
+                    self.hint_revision = Some(source_revision);
+                    self.hint_count = 0;
+                }
+                self.hint_count = self.hint_count.saturating_add(1);
+                self.transcript
+                    .push(Speaker::Hinter, response)
+                    .expect("validated hinter response");
             }
             Mode::Interviewer => {
                 self.transcript
-                    .push(Speaker::User, request.question.to_string())?;
+                    .push(Speaker::User, question.to_string())
+                    .expect("validated interviewer question");
                 self.transcript
-                    .push(Speaker::Interviewer, response.clone())?;
+                    .push(Speaker::Interviewer, response)
+                    .expect("validated interviewer response");
             }
             Mode::SubmissionReview => self
                 .transcript
-                .push(Speaker::SubmissionReview, response.clone())?,
+                .push(Speaker::SubmissionReview, response)
+                .expect("validated submission review"),
         }
-        Ok(response)
     }
 
     fn ensure_connected(&mut self, cancellation: &CancellationToken) -> Result<(), String> {
@@ -219,14 +262,16 @@ impl CodexSession {
         Ok(())
     }
 
-    fn note_process_state(&mut self) {
-        if self
+    fn invalidate_after_turn_failure(&mut self, primary: String) -> String {
+        self.interviewer_thread.clear();
+        self.hinter_thread.clear();
+        let cleanup = self
             .process
-            .as_ref()
-            .is_some_and(|process| !process.is_usable())
-        {
-            self.interviewer_thread.clear();
-            self.hinter_thread.clear();
+            .as_mut()
+            .map_or(Ok(()), crate::codex::process::CodexProcess::shutdown);
+        match cleanup {
+            Ok(()) => primary,
+            Err(error) => format!("{primary}; cleanup failed: {error}"),
         }
     }
 

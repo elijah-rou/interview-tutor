@@ -39,7 +39,9 @@ pub enum Effect {
     CancelRun {
         operation: OperationId,
     },
-    ConnectCodex,
+    ConnectCodex {
+        operation: OperationId,
+    },
     CodexTurn {
         operation: OperationId,
         revision: u64,
@@ -49,6 +51,12 @@ pub enum Effect {
         output: String,
         question: String,
         solved: bool,
+    },
+    FinalizeCodexTurn {
+        operation: OperationId,
+        revision: u64,
+        mode: crate::codex::prompt::Mode,
+        accepted: bool,
     },
     CancelCodex,
     ResetCodex,
@@ -113,7 +121,7 @@ pub enum Event {
         Option<String>,
         Result<ExecutionResult, String>,
     ),
-    CodexConnected(Result<(), String>),
+    CodexConnected(OperationId, Result<(), String>),
     CodexFinished(
         OperationId,
         u64,

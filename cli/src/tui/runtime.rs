@@ -65,6 +65,7 @@ struct RunnerServices {
 
 enum CodexWorkerCommand {
     Connect {
+        operation: crate::app::model::OperationId,
         cancellation: CancellationToken,
     },
     Turn {
@@ -78,9 +79,20 @@ enum CodexWorkerCommand {
         solved: bool,
         cancellation: CancellationToken,
     },
+    FinalizeTurn {
+        operation: crate::app::model::OperationId,
+        revision: u64,
+        mode: crate::codex::prompt::Mode,
+        accepted: bool,
+    },
     Reset,
     Cancel,
     Shutdown,
+}
+
+fn catch_codex_worker_panic<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+        .unwrap_or_else(|_| Err("Codex worker panicked".into()))
 }
 
 struct CodexWorker {
@@ -100,11 +112,21 @@ impl CodexWorker {
         let thread_cancellation = Arc::clone(&active_cancellation);
         let join = thread::spawn(move || {
             let mut session: Option<crate::codex::CodexSession> = None;
+            let mut pending_response: Option<(
+                crate::app::model::OperationId,
+                u64,
+                crate::codex::prompt::Mode,
+                String,
+                String,
+            )> = None;
             while let Ok(command) = commands.recv() {
                 match command {
-                    CodexWorkerCommand::Connect { cancellation } => {
+                    CodexWorkerCommand::Connect {
+                        operation,
+                        cancellation,
+                    } => {
                         let control_pid = thread_control_pid.clone();
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let result = catch_codex_worker_panic(|| {
                             if let Some(session) = session.as_mut() {
                                 session.prepare_next_operation(&cancellation)
                             } else {
@@ -116,12 +138,11 @@ impl CodexWorker {
                                 );
                                 Ok(())
                             }
-                        }))
-                        .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        });
                         *thread_cancellation.lock().expect("Codex cancellation lock") = None;
                         let event = match result {
-                            Ok(()) => Event::CodexConnected(Ok(())),
-                            Err(error) => Event::CodexConnected(Err(error)),
+                            Ok(()) => Event::CodexConnected(operation, Ok(())),
+                            Err(error) => Event::CodexConnected(operation, Err(error)),
                         };
                         if event_sender.send(event).is_err() {
                             break;
@@ -138,9 +159,11 @@ impl CodexWorker {
                         solved,
                         cancellation,
                     } => {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        assert!(pending_response.is_none());
+                        let question_for_commit = question.clone();
+                        let result = catch_codex_worker_panic(|| {
                             let session = session.as_mut().ok_or("Codex is not connected")?;
-                            session.ask_with_cancellation(
+                            session.ask_deferred_with_cancellation(
                                 crate::codex::InterviewRequest {
                                     mode,
                                     statement: &statement,
@@ -152,9 +175,17 @@ impl CodexWorker {
                                 },
                                 &cancellation,
                             )
-                        }))
-                        .unwrap_or_else(|_| Err("Codex worker panicked".into()));
+                        });
                         *thread_cancellation.lock().expect("Codex cancellation lock") = None;
+                        if let Ok(response) = result.as_ref() {
+                            pending_response = Some((
+                                operation,
+                                revision,
+                                mode,
+                                question_for_commit,
+                                response.clone(),
+                            ));
+                        }
                         if event_sender
                             .send(Event::CodexFinished(operation, revision, mode, result))
                             .is_err()
@@ -162,7 +193,43 @@ impl CodexWorker {
                             break;
                         }
                     }
+                    CodexWorkerCommand::FinalizeTurn {
+                        operation,
+                        revision,
+                        mode,
+                        accepted,
+                    } => {
+                        let pending = pending_response.take();
+                        if let Some((
+                            pending_operation,
+                            pending_revision,
+                            pending_mode,
+                            question,
+                            response,
+                        )) = pending
+                        {
+                            if (pending_operation, pending_revision, pending_mode)
+                                == (operation, revision, mode)
+                            {
+                                if accepted {
+                                    session
+                                        .as_mut()
+                                        .expect("successful turn requires session")
+                                        .commit_response(mode, revision, &question, response);
+                                }
+                            } else {
+                                pending_response = Some((
+                                    pending_operation,
+                                    pending_revision,
+                                    pending_mode,
+                                    question,
+                                    response,
+                                ));
+                            }
+                        }
+                    }
                     CodexWorkerCommand::Reset => {
+                        pending_response = None;
                         if session
                             .as_ref()
                             .is_some_and(|session| session.requires_restart())
@@ -194,7 +261,7 @@ impl CodexWorker {
     }
     fn send(&self, command: CodexWorkerCommand) -> Result<(), String> {
         let replacement = match &command {
-            CodexWorkerCommand::Connect { cancellation }
+            CodexWorkerCommand::Connect { cancellation, .. }
             | CodexWorkerCommand::Turn { cancellation, .. } => Some(cancellation.clone()),
             CodexWorkerCommand::Cancel | CodexWorkerCommand::Reset => {
                 if let Some(cancellation) = self
@@ -207,7 +274,7 @@ impl CodexWorker {
                 }
                 None
             }
-            CodexWorkerCommand::Shutdown => None,
+            CodexWorkerCommand::FinalizeTurn { .. } | CodexWorkerCommand::Shutdown => None,
         };
         let previous = replacement.as_ref().map(|cancellation| {
             self.active_cancellation
@@ -232,6 +299,22 @@ impl CodexWorker {
             return Err(format!("Codex worker is busy or stopped: {error}"));
         }
         Ok(())
+    }
+    fn finalize_turn(
+        &self,
+        operation: crate::app::model::OperationId,
+        revision: u64,
+        mode: crate::codex::prompt::Mode,
+        accepted: bool,
+    ) -> Result<(), String> {
+        self.sender
+            .send(CodexWorkerCommand::FinalizeTurn {
+                operation,
+                revision,
+                mode,
+                accepted,
+            })
+            .map_err(|_| "Codex worker stopped before finalizing the turn".into())
     }
     fn shutdown(mut self) {
         if let Some(cancellation) = self
@@ -494,6 +577,7 @@ fn apply_effects(
                         quit_after_save: None,
                         discard_confirmation: None,
                         refresh_after_submit: false,
+                        submitted_source: None,
                     }))
                 })();
                 effects.extend(reduce(state, Event::SolveOpened(operation, result)));
@@ -516,11 +600,12 @@ fn apply_effects(
                 }
             }
             Effect::CancelRun { operation } => worker.cancel(operation),
-            Effect::ConnectCodex => {
+            Effect::ConnectCodex { operation } => {
                 if let Err(error) = codex_worker.send(CodexWorkerCommand::Connect {
+                    operation,
                     cancellation: CancellationToken::new(),
                 }) {
-                    effects.extend(reduce(state, Event::CodexConnected(Err(error))));
+                    effects.extend(reduce(state, Event::CodexConnected(operation, Err(error))));
                 }
             }
             Effect::CodexTurn {
@@ -548,6 +633,18 @@ fn apply_effects(
                         state,
                         Event::CodexFinished(operation, revision, mode, Err(error)),
                     ));
+                }
+            }
+            Effect::FinalizeCodexTurn {
+                operation,
+                revision,
+                mode,
+                accepted,
+            } => {
+                if let Err(error) = codex_worker.finalize_turn(operation, revision, mode, accepted)
+                {
+                    state.codex.status = crate::app::model::CodexStatus::ProtocolError;
+                    state.error = Some(error);
                 }
             }
             Effect::CancelCodex => {
@@ -817,6 +914,7 @@ mod tests {
             quit_after_save: None,
             discard_confirmation: None,
             refresh_after_submit: false,
+            submitted_source: None,
         });
         worker
             .run(
@@ -867,6 +965,12 @@ mod tests {
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());
+    }
+
+    #[test]
+    fn codex_worker_panic_is_converted_to_a_recoverable_error() {
+        let result = catch_codex_worker_panic::<()>(|| panic!("injected Codex panic"));
+        assert_eq!(result.unwrap_err(), "Codex worker panicked");
     }
 
     #[test]
