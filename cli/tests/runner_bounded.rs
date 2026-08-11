@@ -272,7 +272,7 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
     assert_eq!(plan.problem_slug, "tagged");
     assert_eq!(plan.language, "python");
 
-    plan.runner_path = fixture.root.join("fixture/missing");
+    plan.runner_path = fixture.root.join("python/missing");
     let error = runner::execute(
         &plan,
         &fixture.database,
@@ -282,6 +282,24 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
     )
     .unwrap_err();
     assert!(error.contains("runner"));
+
+    plan.runner_path = fixture.root.join("python/run");
+    let mut permissions = fs::metadata(&plan.runner_path).unwrap().permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&plan.runner_path, permissions).unwrap();
+    let error = runner::execute(
+        &plan,
+        &fixture.database,
+        &limits(),
+        &CancellationToken::new(),
+        |_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.contains("not executable"));
+    let mut permissions = fs::metadata(&plan.runner_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&plan.runner_path, permissions).unwrap();
+
     let attempts: i64 = connection
         .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
         .unwrap();
@@ -306,4 +324,32 @@ fn adapter_discovery_is_bounded() {
     )
     .unwrap();
     assert_eq!(adapters, vec!["tagged", "exit-0"]);
+
+    fs::write(fixture.root.join("python/run"), "#!/bin/sh\nsleep 30\n").unwrap();
+    let mut timeout_limits = limits();
+    timeout_limits.wall_timeout = Duration::from_millis(50);
+    let started = Instant::now();
+    let error = runner::discover_adapters(
+        &fixture.root.join("python/run"),
+        &timeout_limits,
+        &CancellationToken::new(),
+    )
+    .unwrap_err();
+    assert!(error.contains("TimedOut"));
+    assert!(started.elapsed() < Duration::from_secs(2));
+
+    fs::write(
+        fixture.root.join("python/run"),
+        "#!/bin/sh\nhead -c 32768 /dev/zero | tr '\\000' x\n",
+    )
+    .unwrap();
+    let mut output_limits = limits();
+    output_limits.display_output_bytes = 128;
+    let error = runner::discover_adapters(
+        &fixture.root.join("python/run"),
+        &output_limits,
+        &CancellationToken::new(),
+    )
+    .unwrap_err();
+    assert!(error.contains("exceeded 128 output bytes"));
 }
