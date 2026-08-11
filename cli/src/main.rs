@@ -1,3 +1,4 @@
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
 use database::{AttemptOutcome, Difficulty, NewProblem, Problem, ProblemUpdate, ProgressScope};
 use practice_cli::{config, database, runner};
@@ -6,6 +7,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
+use std::str::FromStr;
+
+fn difficulty_parser() -> impl TypedValueParser<Value = Difficulty> {
+    PossibleValuesParser::new(["Easy", "Medium", "Hard"])
+        .map(|value| Difficulty::from_str(&value).expect("possible difficulty values parse"))
+}
+
+fn attempt_outcome_parser() -> impl TypedValueParser<Value = AttemptOutcome> {
+    PossibleValuesParser::new(["pass", "fail", "error", "cancelled"]).map(|value| {
+        AttemptOutcome::from_str(&value).expect("possible attempt outcome values parse")
+    })
+}
 
 #[derive(Parser)]
 #[command(
@@ -83,6 +96,7 @@ struct RunArgs {
 struct RecordArgs {
     language: String,
     problem: String,
+    #[arg(value_parser = attempt_outcome_parser())]
     result: AttemptOutcome,
     duration_ms: i64,
     #[arg(long = "problem-set")]
@@ -119,7 +133,7 @@ struct ProblemAddArgs {
     problem: String,
     #[arg(long, required = true)]
     title: String,
-    #[arg(long, required = true)]
+    #[arg(long, required = true, value_parser = difficulty_parser())]
     difficulty: Difficulty,
     #[arg(long, required = true)]
     topic: String,
@@ -142,7 +156,7 @@ struct ProblemUpdateArgs {
     problem: String,
     #[arg(long)]
     title: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_parser = difficulty_parser())]
     difficulty: Option<Difficulty>,
     #[arg(long)]
     topic: Option<String>,

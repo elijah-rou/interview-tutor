@@ -27,7 +27,7 @@ pub fn plan_execution(
 ) -> Result<ExecutionPlan, String> {
     let problem = database::resolve_problem(connection, problem_reference, set_slug)?.problem;
     let implementation = database::get_implementation(connection, problem.id, language)?;
-    let runner_path = root.join(implementation.runner_path);
+    let runner_path = root.join(implementation.language.runner_path);
     let solution_path = root.join(implementation.solution_path);
     if !runner_path.is_file() {
         return Err(format!(
