@@ -422,10 +422,17 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     frame.render_widget(Paragraph::new(footer), vertical[2]);
 
     if area.width < 60 || area.height < 20 {
+        let quit_key = if state.screen == Screen::Solve {
+            "Space-q"
+        } else {
+            "q"
+        };
         frame.render_widget(
-            Paragraph::new("Terminal too small\nResize to at least 60 × 20\nPress Space-q to quit")
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(block("Resize required")),
+            Paragraph::new(format!(
+                "Terminal too small\nResize to at least 60 × 20\nPress {quit_key} to quit"
+            ))
+            .alignment(ratatui::layout::Alignment::Center)
+            .block(block("Resize required")),
             vertical[1],
         );
         return;
@@ -579,7 +586,7 @@ mod tests {
         state.show_help = true;
         let view = rendered(&state, 59, 19);
         assert!(view.contains("Terminal too small"));
-        assert!(view.contains("Press Space-q to quit"));
+        assert!(view.contains("Press q to quit"));
         assert!(!view.contains("Keyboard help"));
         reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
