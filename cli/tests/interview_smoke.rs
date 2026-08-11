@@ -12,6 +12,7 @@ fn binary_help_documents_startup_flags() {
     assert!(stdout.contains("--db"));
     assert!(stdout.contains("--set"));
     assert!(stdout.contains("--language"));
+    assert!(stdout.contains("--no-codex"));
 }
 
 #[test]
@@ -31,6 +32,27 @@ fn linux_pty_solve_edit_test_submit_and_quit() {
         .status()
         .expect("Python PTY smoke starts");
     assert!(status.success(), "PTY smoke failed with {status}");
+}
+
+#[test]
+fn linux_tui_cleanup_restores_terminal_and_no_codex_never_spawns() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("CLI crate has repository parent")
+        .to_path_buf();
+    let status = Command::new("python3")
+        .arg("tests/tui_runtime_cleanup.py")
+        .arg(env!("CARGO_BIN_EXE_interview-tutor"))
+        .arg(repository_root)
+        .status()
+        .expect("Python terminal cleanup test starts");
+    assert!(
+        status.success(),
+        "terminal cleanup test failed with {status}"
+    );
 }
 
 #[test]

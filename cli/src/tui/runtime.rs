@@ -18,6 +18,70 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+struct RuntimeSignalHandlers {
+    registrations: Vec<signal_hook::SigId>,
+    received: Arc<std::sync::atomic::AtomicI32>,
+}
+
+impl RuntimeSignalHandlers {
+    fn register() -> Result<Self, String> {
+        let received = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let mut registrations = Vec::with_capacity(2);
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            let handler_received = Arc::clone(&received);
+            // SAFETY: the handler performs only a lock-free atomic compare-exchange through an owned Arc.
+            let registration = unsafe {
+                signal_hook::low_level::register(signal, move || {
+                    let _ = handler_received.compare_exchange(
+                        0,
+                        signal,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    );
+                })
+            }
+            .map_err(|error| format!("cannot register terminal signal handler: {error}"));
+            match registration {
+                Ok(registration) => registrations.push(registration),
+                Err(error) => {
+                    for registration in registrations {
+                        signal_hook::low_level::unregister(registration);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        assert_eq!(registrations.len(), 2);
+        Ok(Self {
+            registrations,
+            received,
+        })
+    }
+
+    fn received(&self) -> Option<i32> {
+        match self.received.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+
+    fn exit_code(&self) -> Option<u8> {
+        self.received().map(|signal| match signal {
+            signal_hook::consts::SIGINT => 130,
+            signal_hook::consts::SIGTERM => 143,
+            _ => unreachable!("only SIGINT and SIGTERM are registered"),
+        })
+    }
+}
+
+impl Drop for RuntimeSignalHandlers {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            let _ = signal_hook::low_level::unregister(registration);
+        }
+    }
+}
+
 struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self, String> {
@@ -42,10 +106,10 @@ enum WorkerCommand {
         operation: crate::app::model::OperationId,
         revision: u64,
         intent: crate::app::RunIntent,
-        plan: runner::ExecutionPlan,
+        plan: Box<runner::ExecutionPlan>,
         source: String,
         write_source: bool,
-        cancellation: CancellationToken,
+        cancellation: RunCancellation,
     },
     Shutdown,
 }
@@ -54,13 +118,49 @@ type ExecuteService = dyn Fn(&runner::ExecutionPlan, &CancellationToken) -> Resu
     + Send
     + Sync;
 type RecordService =
-    dyn Fn(&runner::ExecutionPlan, &runner::ExecutionResult) -> Result<(), String> + Send + Sync;
+    dyn Fn(&runner::ExecutionPlan, &runner::ExecutionResult) -> Result<i64, String> + Send + Sync;
+type FinalizeCancelledService = dyn Fn(i64, i32) -> Result<(), String> + Send + Sync;
+
+#[derive(Default)]
+struct RunCancellationState {
+    exit_code: Option<i32>,
+    completed: bool,
+}
+
+#[derive(Clone, Default)]
+struct RunCancellation {
+    token: CancellationToken,
+    state: Arc<std::sync::Mutex<RunCancellationState>>,
+}
+
+impl RunCancellation {
+    fn cancel(&self, exit_code: i32) {
+        assert!(matches!(exit_code, 130 | 143));
+        let mut state = self.state.lock().expect("run cancellation lock");
+        if state.completed {
+            return;
+        }
+        state.exit_code.get_or_insert(exit_code);
+        self.token.cancel();
+    }
+
+    fn finish(&self) -> Option<i32> {
+        let mut state = self.state.lock().expect("run cancellation lock");
+        state.completed = true;
+        state.exit_code
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
 
 #[derive(Clone)]
 struct RunnerServices {
     save: Arc<SaveService>,
     execute: Arc<ExecuteService>,
     record: Arc<RecordService>,
+    finalize_cancelled: Arc<FinalizeCancelledService>,
 }
 
 enum CodexWorkerCommand {
@@ -208,6 +308,7 @@ fn catch_codex_worker_panic<T>(operation: impl FnOnce() -> Result<T, String>) ->
 }
 
 struct CodexWorker {
+    enabled: bool,
     sender: Option<SyncSender<CodexWorkerCommand>>,
     events: Option<Receiver<Event>>,
     join: Option<JoinHandle<()>>,
@@ -224,11 +325,21 @@ struct CodexWorker {
 }
 impl CodexWorker {
     fn start() -> Self {
-        Self::start_with_backend(Arc::new(|| Box::new(SessionCodexBackend::default())))
+        Self::new(Arc::new(|| Box::new(SessionCodexBackend::default())), true)
     }
 
+    fn disabled() -> Self {
+        Self::new(Arc::new(|| Box::new(SessionCodexBackend::default())), false)
+    }
+
+    #[cfg(test)]
     fn start_with_backend(backend_factory: Arc<CodexBackendFactory>) -> Self {
+        Self::new(backend_factory, true)
+    }
+
+    fn new(backend_factory: Arc<CodexBackendFactory>, enabled: bool) -> Self {
         let mut worker = Self {
+            enabled,
             sender: None,
             events: None,
             join: None,
@@ -242,11 +353,14 @@ impl CodexWorker {
             #[cfg(test)]
             queued_event_operation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
-        worker.spawn();
+        if enabled {
+            worker.spawn();
+        }
         worker
     }
 
     fn spawn(&mut self) {
+        assert!(self.enabled, "disabled Codex worker must not spawn");
         assert!(self.join.is_none());
         assert!(self.sender.is_none());
         assert!(self.events.is_none());
@@ -484,6 +598,9 @@ impl CodexWorker {
     }
 
     fn send(&mut self, command: CodexWorkerCommand) -> Result<(), String> {
+        if !self.enabled {
+            return Err("Codex is disabled".into());
+        }
         if self.join.is_none() && matches!(&command, CodexWorkerCommand::Connect { .. }) {
             self.spawn();
         }
@@ -647,13 +764,14 @@ impl CodexWorker {
 
     fn shutdown(mut self) {
         self.reset();
-        if let Some(sender) = self.sender.as_ref() {
-            let _ = sender.send(CodexWorkerCommand::Shutdown);
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.try_send(CodexWorkerCommand::Shutdown);
+            drop(sender);
         }
+        self.kill_control_process();
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
-        self.kill_control_process();
     }
 }
 
@@ -665,7 +783,7 @@ struct RunnerWorker {
         crate::app::model::OperationId,
         u64,
         crate::app::RunIntent,
-        CancellationToken,
+        RunCancellation,
     )>,
 }
 impl RunnerWorker {
@@ -673,7 +791,9 @@ impl RunnerWorker {
         let save_root = root.clone();
         let execute_database = database_path.clone();
         let record_root = root;
+        let finalize_root = record_root.clone();
         let record_database = database_path;
+        let finalize_database = record_database.clone();
         Self::start_with_services(RunnerServices {
             save: Arc::new(move |_, solution_path, source| {
                 source::atomic_save(&save_root, solution_path, source)
@@ -689,7 +809,12 @@ impl RunnerWorker {
             }),
             record: Arc::new(move |plan, result| {
                 let connection = crate::database::open_database(&record_database, &record_root)?;
-                runner::record_execution(&connection, plan, result).map(|_| ())
+                runner::record_execution(&connection, plan, result)
+            }),
+            finalize_cancelled: Arc::new(move |attempt_id, exit_code| {
+                let connection =
+                    crate::database::open_database(&finalize_database, &finalize_root)?;
+                crate::database::finalize_attempt_cancelled(&connection, attempt_id, exit_code)
             }),
         })
     }
@@ -723,9 +848,23 @@ impl RunnerWorker {
                                     Ok(()) => (
                                         Some(source_for_save),
                                         (|| {
-                                            let result = (services.execute)(&plan, &cancellation)?;
+                                            let mut result =
+                                                (services.execute)(&plan, &cancellation.token)?;
+                                            if cancellation.is_cancelled() {
+                                                result.termination = runner::Termination::Cancelled;
+                                            }
                                             if intent == crate::app::RunIntent::Submit {
-                                                (services.record)(&plan, &result)?;
+                                                let attempt_id = (services.record)(&plan, &result)?;
+                                                assert!(attempt_id > 0);
+                                                if let Some(exit_code) = cancellation.finish() {
+                                                    (services.finalize_cancelled)(
+                                                        attempt_id, exit_code,
+                                                    )?;
+                                                    result.termination =
+                                                        runner::Termination::Cancelled;
+                                                }
+                                            } else if cancellation.finish().is_some() {
+                                                result.termination = runner::Termination::Cancelled;
                                             }
                                             Ok(result)
                                         })(),
@@ -734,6 +873,9 @@ impl RunnerWorker {
                             }));
                         let (saved, result) = outcome
                             .unwrap_or_else(|_| (None, Err("runner worker panicked".into())));
+                        if result.is_err() {
+                            cancellation.finish();
+                        }
                         if event_sender
                             .send(Event::RunFinished(
                                 operation, revision, intent, saved, result,
@@ -762,13 +904,13 @@ impl RunnerWorker {
         source: String,
         write_source: bool,
     ) -> Result<(), String> {
-        let cancellation = CancellationToken::new();
+        let cancellation = RunCancellation::default();
         self.sender
             .send(WorkerCommand::Run {
                 operation,
                 revision,
                 intent,
-                plan,
+                plan: Box::new(plan),
                 source,
                 write_source,
                 cancellation: cancellation.clone(),
@@ -778,15 +920,20 @@ impl RunnerWorker {
         Ok(())
     }
     fn cancel(&mut self, operation: crate::app::model::OperationId) {
-        if let Some((active, _, _, token)) = &self.active
+        if let Some((active, _, _, cancellation)) = &self.active
             && *active == operation
         {
-            token.cancel();
+            cancellation.cancel(130);
+        }
+    }
+    fn interrupt_active(&mut self, exit_code: i32) {
+        if let Some((_, _, _, cancellation)) = &self.active {
+            cancellation.cancel(exit_code);
         }
     }
     fn leave(&mut self) {
-        if let Some((_, _, _, token)) = &self.active {
-            token.cancel();
+        if let Some((_, _, _, cancellation)) = &self.active {
+            cancellation.cancel(130);
         }
         if self.active.is_some() {
             let _ = self.events.recv();
@@ -822,13 +969,57 @@ impl RunnerWorker {
         events
     }
     fn shutdown(mut self) {
-        if let Some((_, _, _, token)) = &self.active {
-            token.cancel();
+        if let Some((_, _, _, cancellation)) = &self.active {
+            cancellation.cancel(130);
         }
-        let _ = self.sender.send(WorkerCommand::Shutdown);
-        if let Some(join) = self.join.take() {
+        let _ = self.sender.try_send(WorkerCommand::Shutdown);
+        let join = self.join.take();
+        drop(self.sender);
+        if let Some(join) = join {
             let _ = join.join();
         }
+    }
+}
+
+struct RuntimeWorkers {
+    runner: Option<RunnerWorker>,
+    codex: Option<CodexWorker>,
+}
+
+impl RuntimeWorkers {
+    fn start(root: PathBuf, database_path: PathBuf, codex_enabled: bool) -> Self {
+        let mut workers = Self {
+            runner: Some(RunnerWorker::start(root, database_path)),
+            codex: None,
+        };
+        workers.codex = Some(if codex_enabled {
+            CodexWorker::start()
+        } else {
+            CodexWorker::disabled()
+        });
+        workers
+    }
+
+    fn parts(&mut self) -> (&mut RunnerWorker, &mut CodexWorker) {
+        (
+            self.runner.as_mut().expect("runtime runner exists"),
+            self.codex.as_mut().expect("runtime Codex worker exists"),
+        )
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(worker) = self.runner.take() {
+            worker.shutdown();
+        }
+        if let Some(worker) = self.codex.take() {
+            worker.shutdown();
+        }
+    }
+}
+
+impl Drop for RuntimeWorkers {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -983,24 +1174,33 @@ pub fn run(
     requested_set: Option<String>,
     root: PathBuf,
     database_path: PathBuf,
-) -> Result<(), String> {
+) -> Result<u8, String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("interview requires an interactive terminal".into());
     }
-    let mut worker = RunnerWorker::start(root.clone(), database_path);
-    let mut codex_worker = CodexWorker::start();
+    let signal_handlers = RuntimeSignalHandlers::register()?;
+    let mut workers = RuntimeWorkers::start(root.clone(), database_path, state.codex.enabled);
     let initial = requested_set.map_or(Event::Command(crate::app::Action::Reload), Event::OpenSet);
     let effects = reduce(&mut state, initial);
+    let (runner_worker, codex_worker) = workers.parts();
     apply_effects(
         &mut state,
         &repository,
         &root,
-        &mut worker,
-        &mut codex_worker,
+        runner_worker,
+        codex_worker,
         effects,
     );
-    let result = (|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = TerminalGuard::enter()?;
+        #[cfg(debug_assertions)]
+        if std::env::var_os("INTERVIEW_TUTOR_TEST_PANIC_AFTER_ENTER").is_some() {
+            panic!("injected TUI runtime panic");
+        }
+        #[cfg(debug_assertions)]
+        if std::env::var_os("INTERVIEW_TUTOR_TEST_ERROR_AFTER_ENTER").is_some() {
+            return Err("injected TUI startup error".into());
+        }
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal =
             Terminal::new(backend).map_err(|e| format!("cannot initialize terminal: {e}"))?;
@@ -1009,14 +1209,30 @@ pub fn run(
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
         while !state.quit {
-            for event in worker.poll().into_iter().chain(codex_worker.poll()) {
+            if let Some(signal) = signal_handlers.received() {
+                let (runner_worker, codex_worker) = workers.parts();
+                runner_worker.interrupt_active(128 + signal);
+                codex_worker.reset();
+                state.quit = true;
+                continue;
+            }
+            let events = {
+                let (runner_worker, codex_worker) = workers.parts();
+                runner_worker
+                    .poll()
+                    .into_iter()
+                    .chain(codex_worker.poll())
+                    .collect::<Vec<_>>()
+            };
+            for event in events {
                 let effects = reduce(&mut state, event);
+                let (runner_worker, codex_worker) = workers.parts();
                 apply_effects(
                     &mut state,
                     &repository,
                     &root,
-                    &mut worker,
-                    &mut codex_worker,
+                    runner_worker,
+                    codex_worker,
                     effects,
                 );
                 needs_draw = true
@@ -1036,12 +1252,13 @@ pub fn run(
                 TerminalEvent::Key(key) => {
                     if let Some(action) = input::action_for_key(key, &mut state) {
                         let effects = reduce(&mut state, Event::Command(action));
+                        let (runner_worker, codex_worker) = workers.parts();
                         apply_effects(
                             &mut state,
                             &repository,
                             &root,
-                            &mut worker,
-                            &mut codex_worker,
+                            runner_worker,
+                            codex_worker,
                             effects,
                         );
                         needs_draw = true
@@ -1055,12 +1272,13 @@ pub fn run(
                             crate::app::EditorAction::Paste(text),
                         )),
                     );
+                    let (runner_worker, codex_worker) = workers.parts();
                     apply_effects(
                         &mut state,
                         &repository,
                         &root,
-                        &mut worker,
-                        &mut codex_worker,
+                        runner_worker,
+                        codex_worker,
                         effects,
                     );
                     needs_draw = true
@@ -1070,10 +1288,15 @@ pub fn run(
             }
         }
         Ok(())
-    })();
-    worker.shutdown();
-    codex_worker.shutdown();
-    result
+    }));
+    workers.shutdown();
+    let exit_code = signal_handlers.exit_code().unwrap_or(0);
+    drop(signal_handlers);
+    match result {
+        Ok(Ok(())) => Ok(exit_code),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("TUI runtime panicked; terminal state was restored".into()),
+    }
 }
 
 #[cfg(test)]
@@ -1103,8 +1326,23 @@ mod tests {
             }),
             record: Arc::new(move |_, _| {
                 records.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(1)
             }),
+            finalize_cancelled: Arc::new(|_, _| Ok(())),
+        }
+    }
+
+    fn current_signal_mask() -> (bool, bool) {
+        // SAFETY: pthread_sigmask initializes mask when the set argument is null, then
+        // sigismember only reads that initialized value.
+        unsafe {
+            let mut mask = std::mem::zeroed();
+            let error = libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask);
+            assert_eq!(error, 0);
+            (
+                libc::sigismember(&mask, libc::SIGINT) == 1,
+                libc::sigismember(&mask, libc::SIGTERM) == 1,
+            )
         }
     }
 
@@ -1381,11 +1619,92 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_during_recording_finalizes_exact_attempt_with_matching_interrupt() {
+        for exit_code in [130, 143] {
+            let signal_mask_before = current_signal_mask();
+            let (record_started, record_started_receiver) = mpsc::sync_channel(1);
+            let release_record = Arc::new(AtomicBool::new(false));
+            let record_release = Arc::clone(&release_record);
+            let records = Arc::new(AtomicUsize::new(0));
+            let record_count = Arc::clone(&records);
+            let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let finalized_attempts = Arc::clone(&finalized);
+            let services = RunnerServices {
+                save: Arc::new(|_, _, _| Ok(())),
+                execute: Arc::new(|_, _| {
+                    Ok(ExecutionResult::test_result(Termination::Exited(0), "pass"))
+                }),
+                record: Arc::new(move |_, _| {
+                    record_started.send(()).unwrap();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    while !record_release.load(Ordering::Acquire) {
+                        assert!(std::time::Instant::now() < deadline);
+                        thread::yield_now();
+                    }
+                    record_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(41)
+                }),
+                finalize_cancelled: Arc::new(move |attempt_id, exit_code| {
+                    finalized_attempts
+                        .lock()
+                        .expect("finalized attempts lock")
+                        .push((attempt_id, exit_code));
+                    Ok(())
+                }),
+            };
+            let mut worker = RunnerWorker::start_with_services(services);
+            worker
+                .run(
+                    OperationId(17),
+                    4,
+                    RunIntent::Submit,
+                    plan(),
+                    "source".into(),
+                    false,
+                )
+                .unwrap();
+            record_started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            if exit_code == 130 {
+                worker.cancel(OperationId(17));
+            } else {
+                worker.interrupt_active(exit_code);
+            }
+            release_record.store(true, Ordering::Release);
+            assert!(matches!(
+                poll_one(&mut worker),
+                Event::RunFinished(
+                    OperationId(17),
+                    4,
+                    RunIntent::Submit,
+                    Some(_),
+                    Ok(ExecutionResult {
+                        termination: Termination::Cancelled,
+                        ..
+                    })
+                )
+            ));
+            assert_eq!(records.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                finalized
+                    .lock()
+                    .expect("finalized attempts lock")
+                    .as_slice(),
+                &[(41, exit_code)]
+            );
+            assert_eq!(current_signal_mask(), signal_mask_before);
+            worker.shutdown();
+        }
+    }
+
+    #[test]
     fn worker_reports_save_and_record_failures() {
         let save_failure = RunnerServices {
             save: Arc::new(|_, _, _| Err("save failed".into())),
             execute: Arc::new(|_, _| panic!("execute must not run")),
             record: Arc::new(|_, _| panic!("record must not run")),
+            finalize_cancelled: Arc::new(|_, _| panic!("finalize must not run")),
         };
         let mut worker = RunnerWorker::start_with_services(save_failure);
         assert!(
@@ -1399,6 +1718,7 @@ mod tests {
                 Ok(ExecutionResult::test_result(Termination::Exited(0), "pass"))
             }),
             record: Arc::new(|_, _| Err("record failed".into())),
+            finalize_cancelled: Arc::new(|_, _| panic!("finalize must not run")),
         };
         let mut worker = RunnerWorker::start_with_services(record_failure);
         assert!(
@@ -1416,7 +1736,8 @@ mod tests {
         let panic_services = RunnerServices {
             save: Arc::new(|_, _, _| Ok(())),
             execute: Arc::new(|_, _| panic!("injected panic")),
-            record: Arc::new(|_, _| Ok(())),
+            record: Arc::new(|_, _| Ok(1)),
+            finalize_cancelled: Arc::new(|_, _| Ok(())),
         };
         let mut worker = RunnerWorker::start_with_services(panic_services);
         let mut state = AppState::new(Vec::new(), 0);
@@ -1484,7 +1805,12 @@ mod tests {
         let records = Arc::new(AtomicUsize::new(0));
         let mut worker =
             RunnerWorker::start_with_services(services(Termination::Exited(0), records));
-        worker.active = Some((OperationId(9), 4, RunIntent::Test, CancellationToken::new()));
+        worker.active = Some((
+            OperationId(9),
+            4,
+            RunIntent::Test,
+            RunCancellation::default(),
+        ));
         worker.sender.send(WorkerCommand::Shutdown).unwrap();
         assert!(worker.events.recv_timeout(Duration::from_secs(2)).is_err());
         assert!(
@@ -1492,6 +1818,35 @@ mod tests {
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());
+    }
+
+    #[test]
+    fn disabled_codex_worker_has_no_thread_and_never_constructs_backend() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&factory_calls);
+        let factory: Arc<CodexBackendFactory> = Arc::new(move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Box::new(SessionCodexBackend::default())
+        });
+        let mut worker = CodexWorker::new(factory, false);
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.join.is_none());
+        assert!(worker.sender.is_none());
+        assert!(worker.poll().is_empty());
+        assert_eq!(
+            worker
+                .send(CodexWorkerCommand::Connect {
+                    operation: OperationId(1),
+                    generation: worker.generation(),
+                    cancellation: CancellationToken::new(),
+                })
+                .unwrap_err(),
+            "Codex is disabled"
+        );
+        assert!(worker.join.is_none());
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        worker.shutdown();
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1740,7 +2095,8 @@ mod tests {
                     "cancelled",
                 ))
             }),
-            record: Arc::new(|_, _| Ok(())),
+            record: Arc::new(|_, _| Ok(1)),
+            finalize_cancelled: Arc::new(|_, _| Ok(())),
         };
         let mut worker = RunnerWorker::start_with_services(services);
         worker

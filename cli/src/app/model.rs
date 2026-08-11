@@ -14,6 +14,7 @@ pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodexStatus {
+    Disabled,
     Offline,
     Disclosure,
     Connecting,
@@ -29,6 +30,7 @@ pub enum CodexStatus {
 impl CodexStatus {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Disabled => "Disabled",
             Self::Offline => "offline",
             Self::Disclosure => "disclosure",
             Self::Connecting => "connecting",
@@ -45,6 +47,7 @@ impl CodexStatus {
 
 #[derive(Clone)]
 pub struct CodexUi {
+    pub enabled: bool,
     pub status: CodexStatus,
     pub disclosure_accepted: bool,
     pub composer_focused: bool,
@@ -62,6 +65,7 @@ pub struct CodexUi {
 impl Default for CodexUi {
     fn default() -> Self {
         Self {
+            enabled: true,
             status: CodexStatus::Offline,
             disclosure_accepted: false,
             composer_focused: false,
@@ -104,7 +108,18 @@ impl CodexUi {
         self.hint_count = 0;
         self.submission_recorded = false;
         self.composer_focused = false;
-        self.status = CodexStatus::Offline;
+        self.status = if self.enabled {
+            CodexStatus::Offline
+        } else {
+            CodexStatus::Disabled
+        };
+    }
+
+    pub fn disable(&mut self) {
+        self.clear_session();
+        self.disclosure_accepted = false;
+        self.enabled = false;
+        self.status = CodexStatus::Disabled;
     }
 }
 
@@ -341,6 +356,10 @@ impl AppState {
             .get(self.language_index)
             .map(|item| item.slug.as_str())
     }
+
+    pub fn disable_codex(&mut self) {
+        self.codex.disable();
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +367,29 @@ mod tests {
     use super::*;
     use crate::runner::ExecutionPlan;
     use std::path::PathBuf;
+
+    #[test]
+    fn disabling_codex_clears_session_state_and_is_sticky_across_solve_sessions() {
+        let mut state = AppState::new(Vec::new(), 0);
+        state.codex.status = CodexStatus::Ready;
+        state.codex.disclosure_accepted = true;
+        state.codex.composer_focused = true;
+        state.codex.composer = "private question".into();
+        state
+            .codex
+            .push_message("Interviewer".into(), "private response".into());
+
+        state.disable_codex();
+        assert!(!state.codex.enabled);
+        assert_eq!(state.codex.status, CodexStatus::Disabled);
+        assert!(!state.codex.disclosure_accepted);
+        assert!(!state.codex.composer_focused);
+        assert!(state.codex.composer.is_empty());
+        assert!(state.codex.messages.is_empty());
+
+        state.codex.clear_session();
+        assert_eq!(state.codex.status, CodexStatus::Disabled);
+    }
 
     #[test]
     fn run_output_bound_includes_utf8_truncation_marker() {

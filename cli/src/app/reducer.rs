@@ -72,6 +72,7 @@ fn next_operation(state: &mut AppState) -> OperationId {
 }
 
 fn start_codex_connect(state: &mut AppState) -> Vec<Effect> {
+    assert!(state.codex.enabled, "disabled Codex must not connect");
     let operation = next_operation(state);
     state.codex.connecting = Some(operation);
     state.codex.status = CodexStatus::Connecting;
@@ -111,6 +112,11 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::InterviewFocus => {
             solve.pane = SolvePane::Interview;
+            if !state.codex.enabled {
+                state.codex.status = CodexStatus::Disabled;
+                state.codex.composer_focused = false;
+                return Vec::new();
+            }
             if state.codex.disclosure_accepted {
                 state.codex.composer_focused = true;
                 if matches!(
@@ -1849,6 +1855,44 @@ mod tests {
             next.as_slice(),
             [Effect::CodexTurn {
                 mode: CodexMode::Hint(1),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn disabled_codex_never_discloses_or_requests_a_worker_effect() {
+        let mut state = solve_state();
+        state.disable_codex();
+
+        assert!(reduce(&mut state, Event::Command(Action::InterviewFocus)).is_empty());
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Interview);
+        assert_eq!(state.codex.status, CodexStatus::Disabled);
+        assert!(!state.codex.composer_focused);
+        assert!(reduce(&mut state, Event::Command(Action::Hint)).is_empty());
+        assert!(
+            reduce(&mut state, Event::Command(Action::ResetInterview))
+                .iter()
+                .all(|effect| !matches!(
+                    effect,
+                    Effect::ConnectCodex { .. } | Effect::CodexTurn { .. }
+                ))
+        );
+        assert_eq!(state.codex.status, CodexStatus::Disabled);
+        assert!(matches!(
+            reduce(&mut state, Event::Command(Action::SaveTest)).as_slice(),
+            [Effect::SaveRun {
+                intent: RunIntent::Test,
+                ..
+            }]
+        ));
+
+        let mut submit_state = solve_state();
+        submit_state.disable_codex();
+        assert!(matches!(
+            reduce(&mut submit_state, Event::Command(Action::Submit)).as_slice(),
+            [Effect::SaveRun {
+                intent: RunIntent::Submit,
                 ..
             }]
         ));
