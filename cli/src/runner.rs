@@ -1,6 +1,7 @@
 use crate::database;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::Pid;
 use rusqlite::Connection;
 use std::collections::VecDeque;
@@ -403,6 +404,12 @@ impl Perform for SanitizedText {
     }
 }
 
+fn sanitize_chunk(parser: &mut Parser, output: &mut SanitizedText, bytes: &[u8]) -> String {
+    assert!(output.text.is_empty());
+    parser.advance(output, bytes);
+    std::mem::take(&mut output.text)
+}
+
 fn sanitize_events(events: &[RawEvent]) -> Vec<(Stream, String)> {
     let mut stdout_parser = Parser::new();
     let mut stderr_parser = Parser::new();
@@ -411,16 +418,8 @@ fn sanitize_events(events: &[RawEvent]) -> Vec<(Stream, String)> {
     let mut rendered = Vec::new();
     for event in events {
         let output = match event.stream {
-            Stream::Stdout => {
-                let start = stdout.text.len();
-                stdout_parser.advance(&mut stdout, &event.bytes);
-                stdout.text[start..].to_string()
-            }
-            Stream::Stderr => {
-                let start = stderr.text.len();
-                stderr_parser.advance(&mut stderr, &event.bytes);
-                stderr.text[start..].to_string()
-            }
+            Stream::Stdout => sanitize_chunk(&mut stdout_parser, &mut stdout, &event.bytes),
+            Stream::Stderr => sanitize_chunk(&mut stderr_parser, &mut stderr, &event.bytes),
         };
         if !output.is_empty() {
             rendered.push((event.stream, output));
@@ -463,37 +462,43 @@ fn reader_thread<R: Read + AsRawFd + Send + 'static>(
     chunk_bytes: usize,
     shutdown: Arc<AtomicBool>,
     sender: SyncSender<ReaderMessage>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let result = set_nonblocking(&reader).and_then(|()| {
-            let mut buffer = vec![0_u8; chunk_bytes];
-            loop {
-                if shutdown.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                match reader.read(&mut buffer) {
-                    Ok(0) => return Ok(()),
-                    Ok(count) => {
-                        if sender
-                            .send(ReaderMessage::Output(RawEvent {
-                                stream,
-                                bytes: buffer[..count].to_vec(),
-                            }))
-                            .is_err()
-                        {
-                            return Ok(());
+) -> io::Result<JoinHandle<()>> {
+    let name = match stream {
+        Stream::Stdout => "runner-stdout-reader",
+        Stream::Stderr => "runner-stderr-reader",
+    };
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = set_nonblocking(&reader).and_then(|()| {
+                let mut buffer = vec![0_u8; chunk_bytes];
+                loop {
+                    if shutdown.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    match reader.read(&mut buffer) {
+                        Ok(0) => return Ok(()),
+                        Ok(count) => {
+                            if sender
+                                .send(ReaderMessage::Output(RawEvent {
+                                    stream,
+                                    bytes: buffer[..count].to_vec(),
+                                }))
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
                         }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(POLL_INTERVAL);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(POLL_INTERVAL);
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(error) => return Err(error),
                 }
-            }
-        });
-        let _ = sender.send(ReaderMessage::Finished(stream, result));
-    })
+            });
+            let _ = sender.send(ReaderMessage::Finished(stream, result));
+        })
 }
 
 fn send_group_signal(process_group: Pid, signal: Signal) -> Result<bool, String> {
@@ -539,6 +544,24 @@ fn terminate_group(process_group: Pid, grace: Duration) -> Result<(), String> {
         first_error.get_or_insert(error);
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn child_has_exited(child_pid: Pid) -> Result<bool, String> {
+    assert!(child_pid.as_raw() > 0);
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    match waitid(Id::Pid(child_pid), flags) {
+        Ok(WaitStatus::StillAlive) => Ok(false),
+        Ok(WaitStatus::Exited(observed_pid, _)) | Ok(WaitStatus::Signaled(observed_pid, _, _)) => {
+            if observed_pid != child_pid {
+                return Err(format!(
+                    "observed unexpected runner pid {observed_pid}; expected {child_pid}"
+                ));
+            }
+            Ok(true)
+        }
+        Ok(status) => Err(format!("observed unexpected runner status: {status:?}")),
+        Err(error) => Err(format!("cannot inspect language runner: {error}")),
+    }
 }
 
 fn termination_from_status(status: ExitStatus) -> Result<Termination, String> {
@@ -602,9 +625,7 @@ fn retain_and_deliver(
         Stream::Stdout => (stdout_parser, stdout),
         Stream::Stderr => (stderr_parser, stderr),
     };
-    let start = output.text.len();
-    parser.advance(output, &event.bytes);
-    let text = output.text[start..].to_string();
+    let text = sanitize_chunk(parser, output, &event.bytes);
     if !text.is_empty() {
         deliver_event(event_sender, event.stream, text, dropped_events);
     }
@@ -660,36 +681,50 @@ fn execute_command(
     let process_group = Pid::from_raw(
         i32::try_from(child.id()).expect("Linux process identifiers fit in signed 32 bits"),
     );
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    assert!(process_group.as_raw() > 0);
     let shutdown = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = mpsc::sync_channel(limits.event_queue_capacity);
-    let mut readers = Vec::new();
+    let mut readers = Vec::with_capacity(2);
     let mut pending_error = None;
-    if let Some(stdout) = stdout {
-        readers.push(reader_thread(
+
+    match child.stdout.take() {
+        Some(stdout) => match reader_thread(
             stdout,
             Stream::Stdout,
             limits.read_chunk_bytes,
             Arc::clone(&shutdown),
             sender.clone(),
-        ));
-    } else {
-        pending_error =
-            Some("language runner stdout was not captured after successful spawn".to_string());
+        ) {
+            Ok(reader) => readers.push(reader),
+            Err(error) => {
+                pending_error = Some(format!("cannot start runner stdout reader: {error}"));
+            }
+        },
+        None => {
+            pending_error =
+                Some("language runner stdout was not captured after successful spawn".to_string());
+        }
     }
-    if let Some(stderr) = stderr {
-        readers.push(reader_thread(
-            stderr,
-            Stream::Stderr,
-            limits.read_chunk_bytes,
-            Arc::clone(&shutdown),
-            sender.clone(),
-        ));
-    } else {
-        pending_error.get_or_insert_with(|| {
-            "language runner stderr was not captured after successful spawn".to_string()
-        });
+    if pending_error.is_none() {
+        match child.stderr.take() {
+            Some(stderr) => match reader_thread(
+                stderr,
+                Stream::Stderr,
+                limits.read_chunk_bytes,
+                Arc::clone(&shutdown),
+                sender.clone(),
+            ) {
+                Ok(reader) => readers.push(reader),
+                Err(error) => {
+                    pending_error = Some(format!("cannot start runner stderr reader: {error}"));
+                }
+            },
+            None => {
+                pending_error = Some(
+                    "language runner stderr was not captured after successful spawn".to_string(),
+                );
+            }
+        }
     }
     drop(sender);
 
@@ -699,37 +734,29 @@ fn execute_command(
     let mut event_stdout = SanitizedText::default();
     let mut event_stderr = SanitizedText::default();
     let mut dropped_events = 0_usize;
-    let mut observed_status = None;
+    let mut observed_exit = false;
     let mut requested_termination = None;
     let mut finished_readers = 0_usize;
 
-    while pending_error.is_none() && requested_termination.is_none() && observed_status.is_none() {
+    while pending_error.is_none() && requested_termination.is_none() && !observed_exit {
         if let Some(termination) = priority_termination(cancellation, started, limits.wall_timeout)
         {
             requested_termination = Some(termination);
             break;
         }
-        match child.try_wait() {
-            Ok(status) => {
-                if let Some(termination) =
-                    priority_termination(cancellation, started, limits.wall_timeout)
-                {
-                    requested_termination = Some(termination);
-                } else if let Some(status) = status {
-                    observed_status = Some(status);
-                    break;
-                }
+        let status_observation = child_has_exited(process_group);
+        if let Some(termination) = priority_termination(cancellation, started, limits.wall_timeout)
+        {
+            requested_termination = Some(termination);
+        } else {
+            match status_observation {
+                Ok(true) => observed_exit = true,
+                Ok(false) => {}
+                Err(error) => pending_error = Some(error),
             }
-            Err(error) => {
-                if let Some(termination) =
-                    priority_termination(cancellation, started, limits.wall_timeout)
-                {
-                    requested_termination = Some(termination);
-                } else {
-                    pending_error = Some(format!("cannot inspect language runner: {error}"));
-                }
-                break;
-            }
+        }
+        if requested_termination.is_some() || pending_error.is_some() || observed_exit {
+            break;
         }
         match receiver.recv_timeout(POLL_INTERVAL) {
             Ok(ReaderMessage::Output(event)) => {
@@ -763,21 +790,20 @@ fn execute_command(
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
+                let status_observation = child_has_exited(process_group);
                 if let Some(termination) =
                     priority_termination(cancellation, started, limits.wall_timeout)
                 {
                     requested_termination = Some(termination);
                 } else {
-                    match child.try_wait() {
-                        Ok(Some(status)) => observed_status = Some(status),
-                        Ok(None) => {
+                    match status_observation {
+                        Ok(true) => observed_exit = true,
+                        Ok(false) => {
                             pending_error = Some(
                                 "runner pipes closed before child status was available".to_string(),
                             )
                         }
-                        Err(error) => {
-                            pending_error = Some(format!("cannot inspect language runner: {error}"))
-                        }
+                        Err(error) => pending_error = Some(error),
                     }
                 }
             }
@@ -787,16 +813,11 @@ fn execute_command(
     if let Err(error) = terminate_group(process_group, limits.term_grace) {
         pending_error.get_or_insert(error);
     }
-    let final_status = if let Some(status) = observed_status {
-        Some(status)
-    } else {
-        match child.wait() {
-            Ok(status) => Some(status),
-            Err(error) => {
-                pending_error
-                    .get_or_insert_with(|| format!("cannot reap language runner: {error}"));
-                None
-            }
+    let final_status = match child.wait() {
+        Ok(status) => Some(status),
+        Err(error) => {
+            pending_error.get_or_insert_with(|| format!("cannot reap language runner: {error}"));
+            None
         }
     };
 

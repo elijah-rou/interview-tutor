@@ -27,7 +27,7 @@ impl Fixture {
         fs::create_dir_all(root.join("python")).unwrap();
         fs::write(
             root.join("catalog/problems.json"),
-            r###"{"schema_version":2,"catalog_revision":1,"problems":[{"slug":"descendants","title":"Descendants","difficulty":"Easy","topic":"Testing","leetcode_id":null,"premium":false,"leetcode_url":"https://example.com/descendants","neetcode_url":"https://example.com/descendants","statement_markdown":"## Task\n\nTest cleanup.\n\n## Example\n\nInput: signal. Output: cleanup.","test_revision":1,"adapters":[{"language":"python","solution_path":"python/solution.py"}]}]}"###,
+            r###"{"schema_version":2,"catalog_revision":1,"problems":[{"slug":"descendants","title":"Descendants","difficulty":"Easy","topic":"Testing","leetcode_id":null,"premium":false,"leetcode_url":"https://example.com/descendants","neetcode_url":"https://example.com/descendants","statement_markdown":"## Task\n\nTest cleanup.\n\n## Example\n\nInput: signal. Output: cleanup.","test_revision":1,"adapters":[{"language":"python","solution_path":"python/solution.py"}]},{"slug":"signal-exit-race","title":"Signal Exit Race","difficulty":"Easy","topic":"Testing","leetcode_id":null,"premium":false,"leetcode_url":"https://example.com/signal-exit-race","neetcode_url":"https://example.com/signal-exit-race","statement_markdown":"## Task\n\nTest status priority.\n\n## Example\n\nInput: signal. Output: cancellation.","test_revision":1,"adapters":[{"language":"python","solution_path":"python/signal_exit_race.py"}]}]}"###,
         )
         .unwrap();
         fs::write(
@@ -36,6 +36,7 @@ impl Fixture {
         )
         .unwrap();
         fs::write(root.join("python/solution.py"), "# fixture\n").unwrap();
+        fs::write(root.join("python/signal_exit_race.py"), "# fixture\n").unwrap();
         let runner = root.join("python/run");
         fs::copy("tests/fixtures/runner_fixture.sh", &runner).unwrap();
         let mut permissions = fs::metadata(&runner).unwrap().permissions();
@@ -67,6 +68,39 @@ fn wait_for_descendant(path: &Path) -> i32 {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn child_exit_observation_does_not_override_concurrent_cancellation() {
+    let fixture = Fixture::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_practice"))
+        .args([
+            "--db",
+            fixture.database.to_str().unwrap(),
+            "run",
+            "python",
+            "signal-exit-race",
+        ])
+        .env("PRACTICE_ROOT", &fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let connection = rusqlite::Connection::open(&fixture.database).unwrap();
+    let attempts: Vec<String> = connection
+        .prepare("SELECT result FROM attempts")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(attempts, vec!["cancelled"]);
 }
 
 #[test]

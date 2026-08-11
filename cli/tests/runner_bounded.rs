@@ -191,6 +191,33 @@ fn defaults_are_bounded_and_saturated_events_never_delay_cleanup() {
 }
 
 #[test]
+fn sustained_alternating_output_keeps_results_and_events_bounded() {
+    let fixture = Fixture::new();
+    let mut sustained = limits();
+    sustained.wall_timeout = Duration::from_secs(10);
+    sustained.display_output_bytes = 128;
+    sustained.event_queue_capacity = 4;
+    let (sender, receiver) = mpsc::sync_channel(4);
+
+    let result = runner::execute(
+        &fixture.plan("sustained-alternating"),
+        &fixture.database,
+        &sustained,
+        &CancellationToken::new(),
+        Some(&sender),
+    )
+    .unwrap();
+    drop(sender);
+    let events: Vec<_> = receiver.into_iter().collect();
+
+    assert_eq!(result.termination, Termination::Exited(0));
+    assert!(result.display_output.len() <= sustained.display_output_bytes);
+    assert!(result.omitted_bytes > 32 * 1024 * 1024);
+    assert!(result.dropped_events > 0);
+    assert!(events.len() <= 4);
+}
+
+#[test]
 fn cancellation_and_timeout_return_promptly() {
     let fixture = Fixture::new();
     let cancellation = CancellationToken::new();
