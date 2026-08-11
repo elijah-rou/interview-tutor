@@ -9,6 +9,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn difficulty_parser() -> impl TypedValueParser<Value = Difficulty> {
     PossibleValuesParser::new(["Easy", "Medium", "Hard"])
@@ -425,6 +427,61 @@ fn print_progress_table(group_heading: &str, rows: &[Vec<String>]) -> Result<(),
     )
 }
 
+struct ExecutionSignalHandlers {
+    registrations: Vec<signal_hook::SigId>,
+    received: Arc<AtomicUsize>,
+}
+
+impl ExecutionSignalHandlers {
+    fn register(cancellation: &runner::CancellationToken) -> Result<Self, String> {
+        let received = Arc::new(AtomicUsize::new(0));
+        let mut registrations = Vec::with_capacity(2);
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            let received_for_handler = Arc::clone(&received);
+            let cancellation_flag = cancellation.signal_flag();
+            // SAFETY: the handler only performs lock-free atomic stores through owned Arcs.
+            let registration = unsafe {
+                signal_hook::low_level::register(signal, move || {
+                    received_for_handler.store(signal as usize, Ordering::Release);
+                    cancellation_flag.store(true, Ordering::Release);
+                })
+            }
+            .map_err(|error| format!("cannot register execution signal handler: {error}"));
+            match registration {
+                Ok(registration) => registrations.push(registration),
+                Err(error) => {
+                    for registration in registrations {
+                        signal_hook::low_level::unregister(registration);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        assert_eq!(registrations.len(), 2);
+        Ok(Self {
+            registrations,
+            received,
+        })
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        match self.received.load(Ordering::Acquire) as i32 {
+            signal_hook::consts::SIGINT => Some(130),
+            signal_hook::consts::SIGTERM => Some(143),
+            0 => None,
+            signal => Some(128 + signal),
+        }
+    }
+}
+
+impl Drop for ExecutionSignalHandlers {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
+}
+
 fn run_one(
     context: &Context,
     language: &str,
@@ -438,21 +495,23 @@ fn run_one(
         reference,
         set_slug,
     )?;
-    let result = runner::execute(
+    let cancellation = runner::CancellationToken::new();
+    let signal_handlers = ExecutionSignalHandlers::register(&cancellation)?;
+    let execution = runner::execute(
         &plan,
         &context.database_path,
         &runner::ExecutionLimits::default(),
-        &runner::CancellationToken::new(),
-        |event| {
-            let bytes = match event {
-                runner::ExecutionEvent::Stdout(text) => io::stdout().write_all(text.as_bytes()),
-                runner::ExecutionEvent::Stderr(text) => io::stderr().write_all(text.as_bytes()),
-            };
-            bytes.map_err(|error| format!("cannot write runner output: {error}"))
-        },
-    )?;
+        &cancellation,
+        None,
+    );
+    let signal_exit_code = signal_handlers.exit_code();
+    drop(signal_handlers);
+    let result = execution?;
     runner::record_execution(&context.connection, &plan, &result)?;
-    Ok(result.status_code())
+    io::stderr()
+        .write_all(result.display_output.as_bytes())
+        .map_err(|error| format!("cannot write runner output: {error}"))?;
+    Ok(signal_exit_code.unwrap_or_else(|| result.status_code()))
 }
 
 fn command_run(context: &Context, args: &RunArgs) -> Result<i32, String> {

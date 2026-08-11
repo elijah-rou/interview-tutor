@@ -8,6 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
@@ -81,7 +82,7 @@ fn execute(fixture: &Fixture, problem: &str) -> runner::ExecutionResult {
         &fixture.database,
         &limits(),
         &CancellationToken::new(),
-        |_| Ok(()),
+        None,
     )
     .unwrap()
 }
@@ -89,18 +90,17 @@ fn execute(fixture: &Fixture, problem: &str) -> runner::ExecutionResult {
 #[test]
 fn captures_tagged_output_without_terminal_inheritance() {
     let fixture = Fixture::new();
-    let mut events = Vec::new();
+    let (sender, receiver) = mpsc::sync_channel(8);
     let result = runner::execute(
         &fixture.plan("tagged"),
         &fixture.database,
         &limits(),
         &CancellationToken::new(),
-        |event| {
-            events.push(event);
-            Ok(())
-        },
+        Some(&sender),
     )
     .unwrap();
+    drop(sender);
+    let events: Vec<_> = receiver.into_iter().collect();
 
     assert_eq!(result.termination, Termination::Exited(0));
     assert_eq!(result.outcome(), AttemptOutcome::Pass);
@@ -128,7 +128,7 @@ fn bounds_sanitized_output_with_deterministic_omission_marker() {
         &fixture.database,
         &small,
         &CancellationToken::new(),
-        |_| Ok(()),
+        None,
     )
     .unwrap();
 
@@ -140,10 +140,10 @@ fn bounds_sanitized_output_with_deterministic_omission_marker() {
             .display_output
             .contains(&format!("[... {} bytes omitted ...]", result.omitted_bytes))
     );
-    assert!(result.display_output.len() <= small.display_output_bytes + 64);
+    assert!(result.display_output.len() <= small.display_output_bytes);
 
     let unsafe_result = execute(&fixture, "unsafe");
-    assert!(unsafe_result.display_output.contains("redsafeline"));
+    assert!(unsafe_result.display_output.contains("redsafe\tline"));
     assert!(!unsafe_result.display_output.contains('\u{1b}'));
     assert!(!unsafe_result.display_output.contains('\0'));
 }
@@ -166,7 +166,7 @@ fn derives_outcomes_from_explicit_termination() {
 }
 
 #[test]
-fn defaults_are_bounded_and_callback_failure_terminates_execution() {
+fn defaults_are_bounded_and_saturated_events_never_delay_cleanup() {
     let defaults = ExecutionLimits::default();
     assert_eq!(defaults.wall_timeout, Duration::from_secs(30));
     assert_eq!(defaults.term_grace, Duration::from_millis(250));
@@ -175,20 +175,18 @@ fn defaults_are_bounded_and_callback_failure_terminates_execution() {
     assert_eq!(defaults.event_queue_capacity, 64);
 
     let fixture = Fixture::new();
+    let (sender, _receiver) = mpsc::sync_channel(1);
     let started = Instant::now();
     let result = runner::execute(
-        &fixture.plan("descendants"),
+        &fixture.plan("event-saturation"),
         &fixture.database,
         &limits(),
         &CancellationToken::new(),
-        |_| Err("receiver closed".to_string()),
+        Some(&sender),
     )
     .unwrap();
-    assert_eq!(
-        result.termination,
-        Termination::EventDeliveryFailed("receiver closed".to_string())
-    );
-    assert_eq!(result.outcome(), AttemptOutcome::Error);
+    assert_eq!(result.termination, Termination::Exited(0));
+    assert!(result.dropped_events > 0);
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -207,7 +205,7 @@ fn cancellation_and_timeout_return_promptly() {
         &fixture.database,
         &limits(),
         &cancellation,
-        |_| Ok(()),
+        None,
     )
     .unwrap();
     thread.join().unwrap();
@@ -222,7 +220,7 @@ fn cancellation_and_timeout_return_promptly() {
         &fixture.database,
         &timeout_limits,
         &CancellationToken::new(),
-        |_| Ok(()),
+        None,
     )
     .unwrap();
     assert_eq!(timed_out.termination, Termination::TimedOut);
@@ -244,7 +242,7 @@ fn cancellation_terminates_and_reaps_process_group_descendants() {
         &fixture.database,
         &limits(),
         &cancellation,
-        |_| Ok(()),
+        None,
     )
     .unwrap();
     thread.join().unwrap();
@@ -278,7 +276,7 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
         &fixture.database,
         &limits(),
         &CancellationToken::new(),
-        |_| Ok(()),
+        None,
     )
     .unwrap_err();
     assert!(error.contains("runner"));
@@ -292,7 +290,7 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
         &fixture.database,
         &limits(),
         &CancellationToken::new(),
-        |_| Ok(()),
+        None,
     )
     .unwrap_err();
     assert!(error.contains("not executable"));
@@ -352,4 +350,105 @@ fn adapter_discovery_is_bounded() {
     )
     .unwrap_err();
     assert!(error.contains("exceeded 128 output bytes"));
+}
+
+#[test]
+fn final_output_cap_handles_invalid_utf8_split_sequences_and_stream_tags() {
+    let fixture = Fixture::new();
+    let split = execute(&fixture, "split-sequences");
+    assert!(split.display_output.contains("€redsafe"));
+    assert!(split.display_output.contains("�invalid"));
+    assert!(!split.display_output.contains('\u{1b}'));
+    assert!(!split.display_output.contains("title"));
+
+    let mut capped = limits();
+    capped.display_output_bytes = 96;
+    let alternating = runner::execute(
+        &fixture.plan("alternating"),
+        &fixture.database,
+        &capped,
+        &CancellationToken::new(),
+        None,
+    )
+    .unwrap();
+    assert!(alternating.display_output.len() <= capped.display_output_bytes);
+    assert!(alternating.omitted_bytes > 0);
+    assert!(alternating.display_output.contains("bytes omitted"));
+}
+
+#[test]
+fn escaped_session_pipe_cannot_hang_reader_join() {
+    let fixture = Fixture::new();
+    let started = Instant::now();
+    let result = execute(&fixture, "escaped-descendant");
+    let elapsed = started.elapsed();
+    assert_eq!(result.termination, Termination::Exited(0));
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "cleanup took {elapsed:?}"
+    );
+    let pid = result
+        .display_output
+        .lines()
+        .find_map(|line| line.strip_prefix("[stdout] "))
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+#[test]
+fn normal_exit_still_cleans_up_remaining_group_descendants() {
+    let fixture = Fixture::new();
+    let result = execute(&fixture, "normal-exit-descendant");
+    assert_eq!(result.termination, Termination::Exited(0));
+    let pid = result
+        .display_output
+        .lines()
+        .find_map(|line| line.strip_prefix("[stdout] "))
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+}
+
+#[test]
+fn real_spawn_failure_after_preflight_does_not_record() {
+    let fixture = Fixture::new();
+    let runner_path = fixture.root.join("python/run");
+    fs::write(&runner_path, "#!/definitely/missing/interpreter\n").unwrap();
+    let error = runner::execute(
+        &fixture.plan("tagged"),
+        &fixture.database,
+        &limits(),
+        &CancellationToken::new(),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.contains("cannot execute"));
+    assert!(!fixture.database.exists());
+}
+
+#[test]
+fn explicit_cancellation_wins_at_timeout_boundary() {
+    let fixture = Fixture::new();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let mut boundary = limits();
+    boundary.wall_timeout = Duration::from_millis(10);
+    let result = runner::execute(
+        &fixture.plan("sleep"),
+        &fixture.database,
+        &boundary,
+        &cancellation,
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.termination, Termination::Cancelled);
 }

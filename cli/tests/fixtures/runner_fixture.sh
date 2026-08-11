@@ -22,11 +22,45 @@ case "$mode" in
   exit-130) exit 130 ;;
   sleep) sleep 30 ;;
   descendants)
-    (trap '' TERM; sleep 30) &
+    trap '' TERM
+    (trap '' TERM; exec sleep 30) &
     descendant="$!"
-    trap 'kill -KILL "$descendant" 2>/dev/null || true; wait "$descendant" 2>/dev/null || true; exit 143' TERM
+    if [ -n "${PRACTICE_DESCENDANT_PID_FILE:-}" ]; then
+      printf '%s\n' "$descendant" > "$PRACTICE_DESCENDANT_PID_FILE"
+    fi
     printf '%s\n' "$descendant"
     wait
+    ;;
+  normal-exit-descendant)
+    (trap '' TERM; exec sleep 30) &
+    printf '%s\n' "$!"
+    exit 0
+    ;;
+  escaped-descendant)
+    setsid sh -c 'trap "" TERM; sleep 30' &
+    printf '%s\n' "$!"
+    exit 0
+    ;;
+  event-saturation)
+    index=0
+    while [ "$index" -lt 200 ]; do
+      printf 'out-%s\n' "$index"
+      printf 'err-%s\n' "$index" >&2
+      index=$((index + 1))
+    done
+    ;;
+  split-sequences)
+    printf '\342'; sleep 0.02; printf '\202\254'
+    printf '\033['; sleep 0.02; printf '31mred\033]0;title'; sleep 0.02; printf '\007safe\033[0m\n'
+    printf '\377invalid\n'
+    ;;
+  alternating)
+    index=0
+    while [ "$index" -lt 40 ]; do
+      printf 'o%s\n' "$index"
+      printf 'e%s\n' "$index" >&2
+      index=$((index + 1))
+    done
     ;;
   signal) kill -TERM $$ ;;
   list|--list)
