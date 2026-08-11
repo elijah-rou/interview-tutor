@@ -17,10 +17,16 @@ cargo clippy --manifest-path cli/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path cli/Cargo.toml
 ```
 
+## Solve editor
+
+Run `../interview`. From problem detail, Enter opens solve mode. Ctrl-S/F5 atomically save and test without an attempt; F9 submits and records one attempt; Ctrl-C cancels. The editor is bounded to 1 MiB, 100,000 lines, and 32 undo snapshots. See `docs/interview-tui.md` for the exact supported Vim-style subset. Interviewing remains explicitly offline until Stack 7.
+
 ## Modules
 
 - `catalog.rs`: checked-in catalog parsing and invariant validation.
 - `database.rs`: schema v2, atomic v1 migration, seed reconciliation, CRUD, and progress queries.
+- `editor.rs`: bounded Unicode-safe modal editing and Rust/Python lexical highlighting.
+- `source.rs`: canonical-root-confined loading and atomic same-directory saves.
 - `runner.rs`: execution planning, bounded Linux process-group execution and discovery, cancellation, sanitized output events, and explicit attempt recording.
 - `main.rs`: the `clap` command grammar and presentation layer.
 

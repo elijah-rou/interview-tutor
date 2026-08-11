@@ -37,3 +37,9 @@ Adapter `--list` discovery uses the same process-group implementation with a fiv
 ## Extension path
 
 Adding NeetCode 150 or 250 consists of importing any missing global problems, installing their language adapters, then creating a new ordered problem set that references both existing and new slugs. Overlapping problems retain one implementation and one completion identity.
+
+## Solve-mode boundary
+
+The main terminal thread owns `AppState`, Ratatui, and the repository connection. Pure reducer effects carry `OperationId`, source generation, and `RunIntent`. One bounded worker thread performs atomic source saves and synchronous process-group execution; explicit submit opens a separate SQLite connection only after execution terminates to record exactly one attempt. The runtime cancels and joins this worker before restoring the terminal. Stale operation IDs are ignored, and stale source generations may be displayed but cannot describe the current buffer.
+
+`source` accepts only the planned regular solution file beneath the canonical root and rejects symlinks, escapes, oversized data, and invalid UTF-8. `editor` owns a bounded Unicode document and 32-snapshot undo history. The built-in Rust/Python lexer emits only keyword, string, comment, and plain spans. Interview state is an offline placeholder with no network or persistence boundary until Stack 7.

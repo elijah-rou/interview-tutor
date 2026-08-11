@@ -1,6 +1,9 @@
+use super::effects::RunIntent;
 use crate::database::{
     Difficulty, EnabledLanguage, MAX_STATEMENT_LENGTH, ProblemImplementation, ProgressSummary,
 };
+use crate::editor::EditorDocument;
+use crate::runner::{CancellationToken, ExecutionPlan};
 
 pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
@@ -11,6 +14,50 @@ pub enum Screen {
     SetMenu,
     ProblemList,
     ProblemDetail,
+    Solve,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SolvePane {
+    Editor,
+    Problem,
+    Output,
+    Interview,
+}
+
+#[derive(Clone, Debug)]
+pub struct SolveSession {
+    pub problem_id: i64,
+    pub problem_slug: String,
+    pub problem_title: String,
+    pub statement: String,
+    pub language: String,
+    pub plan: ExecutionPlan,
+    pub editor: EditorDocument,
+    pub pane: SolvePane,
+    pub output: String,
+    pub output_scroll: u16,
+    pub problem_scroll: u16,
+    pub running: Option<(OperationId, u64, RunIntent)>,
+    pub cancellation: Option<CancellationToken>,
+    pub pending_save: Option<(u64, String)>,
+    pub stale: bool,
+    pub quit_after_save: bool,
+}
+
+impl SolveSession {
+    pub fn bounded_output(&mut self, output: String) {
+        const MAX_OUTPUT: usize = 256 * 1024;
+        self.output = if output.len() <= MAX_OUTPUT {
+            output
+        } else {
+            let mut start = output.len() - MAX_OUTPUT;
+            while !output.is_char_boundary(start) {
+                start += 1;
+            }
+            format!("… output truncated …\n{}", &output[start..])
+        };
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,11 +148,13 @@ pub struct AppState {
     pub detail_scroll: u16,
     pub progress_scroll: u16,
     pub data: AppData,
+    pub solve: Option<SolveSession>,
     pub active_operation: Option<OperationId>,
     pub next_operation: u64,
     pub status: String,
     pub error: Option<String>,
     pub show_help: bool,
+    pub leader_pending: bool,
     pub quit: bool,
 }
 
@@ -125,11 +174,13 @@ impl AppState {
             detail_scroll: 0,
             progress_scroll: 0,
             data: AppData::empty(),
+            solve: None,
             active_operation: None,
             next_operation: 1,
             status: "Ready".to_string(),
             error: None,
             show_help: false,
+            leader_pending: false,
             quit: false,
         }
     }
