@@ -79,6 +79,17 @@ fn header(state: &AppState) -> Paragraph<'static> {
     )
 }
 
+fn footer_text(width: u16) -> &'static str {
+    const FULL: &str = "j/k move Enter open Esc back Tab pane l lang r reload ? help q quit";
+    const COMPACT: &str = "j/k move Enter open Esc back Tab pane ? help q quit";
+
+    if usize::from(width) >= FULL.len() {
+        FULL
+    } else {
+        COMPACT
+    }
+}
+
 fn progress(state: &AppState) -> Paragraph<'static> {
     let mut lines = vec![Line::from(format!(
         "Total  {}/{}",
@@ -232,10 +243,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         ])
         .split(area);
     frame.render_widget(header(state), vertical[0]);
-    frame.render_widget(
-        Paragraph::new("↑↓/jk move Enter open Esc back Tab pane l lang r reload ? help q quit"),
-        vertical[2],
-    );
+    frame.render_widget(Paragraph::new(footer_text(area.width)), vertical[2]);
 
     if area.width < 60 || area.height < 20 {
         frame.render_widget(
@@ -351,6 +359,47 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn rendered_footer(state: &AppState, width: u16) -> String {
+        let backend = TestBackend::new(width, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .last()
+            .unwrap()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn footer_is_not_clipped_at_supported_widths() {
+        let state = AppState::new(Vec::new(), 0);
+        for width in [60, 68, 80, 120] {
+            let footer = rendered_footer(&state, width);
+            assert_eq!(footer, footer_text(width));
+            assert!(footer.contains("? help"));
+            assert!(footer.contains("q quit"));
+        }
+    }
+
+    #[test]
+    fn undersized_terminal_replaces_help_with_truthful_quit_cue() {
+        let mut state = AppState::new(Vec::new(), 0);
+        state.show_help = true;
+        let view = rendered(&state, 59, 19);
+        assert!(view.contains("Terminal too small"));
+        assert!(view.contains("Press q to quit"));
+        assert!(!view.contains("Keyboard help"));
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(state.quit);
     }
 
     #[test]
