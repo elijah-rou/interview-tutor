@@ -59,6 +59,7 @@ if codex_home:
         file.write(str(start_count))
 
 thread_number = 0
+turn_number = 0
 for raw in sys.stdin:
     message = json.loads(raw)
     record({"kind": "message", "json": message})
@@ -72,7 +73,10 @@ for raw in sys.stdin:
             sys.stdout.flush()
         result = {"userAgent": "fake"}
     elif method == "account/read":
-        result = {"account": {"type": "chatgpt", "email": None, "planType": "unknown"}, "requiresOpenaiAuth": True}
+        if mode == "auth-required":
+            result = {"account": None, "requiresOpenaiAuth": True}
+        else:
+            result = {"account": {"type": "chatgpt", "email": None, "planType": "unknown"}, "requiresOpenaiAuth": True}
     elif method == "thread/start":
         thread_number += 1
         cwd = "/unexpected-cwd" if mode == "bad-cwd" else os.getcwd()
@@ -83,6 +87,8 @@ for raw in sys.stdin:
             "sandbox": {"type": "readOnly", "networkAccess": False},
         }
     elif method == "turn/start":
+        turn_number += 1
+        turn_id = f"turn-{turn_number}"
         if mode == "child-death" or (mode == "restart" and start_count == 1):
             os._exit(17)
         if mode == "eof":
@@ -95,7 +101,7 @@ for raw in sys.stdin:
         if mode == "oversize":
             print("x" * (2 * 1024 * 1024 + 1), flush=True)
             continue
-        result = {"turn": {"id": "turn-1"}}
+        result = {"turn": {"id": turn_id}}
         print(json.dumps({"id": request_id, "result": result}), flush=True)
         params = message["params"]
         thread_id = params["threadId"]
@@ -110,19 +116,28 @@ for raw in sys.stdin:
             "approval-unknown": "future/serverRequest",
         }
         if mode in request_methods:
-            print(json.dumps({"id": "server-1", "method": request_methods[mode], "params": {"threadId": thread_id, "turnId": "turn-1", "itemId": "item-1"}}), flush=True)
+            print(json.dumps({"id": "server-1", "method": request_methods[mode], "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "item-1"}}), flush=True)
             continue
         if mode == "terminal-error":
-            print(json.dumps({"method": "error", "params": {"threadId": thread_id, "turnId": "turn-1", "willRetry": False, "error": {"message": "terminal"}}}), flush=True)
+            print(json.dumps({"method": "error", "params": {"threadId": thread_id, "turnId": turn_id, "willRetry": False, "error": {"message": "terminal"}}}), flush=True)
             continue
-        text = '{"kind":"question","text":"What invariant holds?","assessment":"continue"}'
+        input_text = params["input"][0]["text"]
+        hint_level = params.get("outputSchema", {}).get("properties", {}).get("level", {}).get("const")
+        if mode == "malformed-envelope" or (mode == "malformed-envelope-restart" and start_count == 1):
+            text = '{}'
+        elif hint_level is not None:
+            text = json.dumps({"kind": "hint", "level": hint_level, "text": f"Level {hint_level} invariant", "reveals_solution": False})
+        elif "Review the explicitly recorded local submission" in input_text:
+            text = '{"kind":"feedback","text":"Submission reviewed","assessment":"pass"}'
+        else:
+            text = '{"kind":"question","text":"What invariant holds?","assessment":"continue"}'
         print(json.dumps({"method": "error", "params": {"threadId": "unrelated", "turnId": "unrelated", "willRetry": False, "error": {"message": "ignore"}}}), flush=True)
-        print(json.dumps({"method": "error", "params": {"threadId": thread_id, "turnId": "turn-1", "willRetry": True, "error": {"message": "retry"}}}), flush=True)
+        print(json.dumps({"method": "error", "params": {"threadId": thread_id, "turnId": turn_id, "willRetry": True, "error": {"message": "retry"}}}), flush=True)
         print(json.dumps({"method": "future/notification", "params": {}}), flush=True)
-        print(json.dumps({"method": "item/started", "params": {"threadId": thread_id, "turnId": "turn-1", "item": {"id": "item-1", "type": "agentMessage", "text": ""}, "startedAtMs": 1}}), flush=True)
-        print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": "turn-1", "itemId": "item-1", "delta": text}}), flush=True)
-        print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": "turn-1", "item": {"id": "item-1", "type": "agentMessage", "text": text}, "completedAtMs": 2}}), flush=True)
-        print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": "turn-1", "status": "completed", "items": []}}}), flush=True)
+        print(json.dumps({"method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id, "item": {"id": "item-1", "type": "agentMessage", "text": ""}, "startedAtMs": 1}}), flush=True)
+        print(json.dumps({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "item-1", "delta": text}}), flush=True)
+        print(json.dumps({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": {"id": "item-1", "type": "agentMessage", "text": text}, "completedAtMs": 2}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "items": []}}}), flush=True)
         continue
     elif method == "turn/interrupt":
         if mode == "interrupt-no-ack":

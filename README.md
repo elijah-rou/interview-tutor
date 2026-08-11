@@ -31,7 +31,7 @@ cd rust && ./run two-sum
 
 ## Interview TUI
 
-`./interview` opens the local catalog browser and bounded native solve editor. Save/test never records progress; explicit submit records one attempt. The Interview pane remains offline until Stack 7. See [docs/interview-tui.md](docs/interview-tui.md) for exact keys, limits, responsive layout, and cancellation semantics.
+`./interview` opens the local catalog browser, bounded native solve editor, and opt-in Codex Interview pane. Save/test never records progress; explicit submit records one attempt and, after that record succeeds, may request a review of the exact submitted revision. Codex transcripts remain memory-only and local solve stays available when Codex is declined, offline, unauthenticated, interrupted, or fails. See [docs/interview-tui.md](docs/interview-tui.md) for exact keys, privacy limits, responsive layout, and cancellation semantics.
 
 ## Browse sets and progress
 
@@ -105,4 +105,4 @@ Existing v1 databases migrate automatically to the global v2 schema. Historical 
 
 Starter APIs follow LeetCode. Premium and Rust APIs without official templates use their conventional NeetCode/LintCode-compatible representation. Tests use public contracts and representative examples; LeetCode's private hidden corpus is not available locally.
 
-LLM hints and the split-pane TUI remain later layers. The schema supports statement Markdown and per-language source paths, and the synchronous bounded runner API is ready for a TUI worker thread. See `docs/architecture.md` for its exact resource limits, termination states, and attempt-outcome mapping.
+The split-pane TUI uses the same statement, source-path, runner, and progress boundaries as the CLI. Its optional Codex layer sends only the disclosed bounded payload and never replaces local runner authority. See `docs/architecture.md` for exact resource limits, termination states, attempt-outcome mapping, and the Codex process boundary.

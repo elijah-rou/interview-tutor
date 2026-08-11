@@ -1,8 +1,9 @@
 use super::effects::RunIntent;
+use crate::codex::prompt::Mode as CodexMode;
 use crate::database::{
     Difficulty, EnabledLanguage, MAX_STATEMENT_LENGTH, ProblemImplementation, ProgressSummary,
 };
-use crate::editor::EditorDocument;
+use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES};
 use crate::runner::{CancellationToken, ExecutionPlan};
 
 pub const MAX_ROWS: usize = 10_000;
@@ -49,8 +50,10 @@ pub struct CodexUi {
     pub composer_focused: bool,
     pub composer: String,
     pub messages: Vec<(String, String)>,
+    /// Number of wrapped transcript rows to retain below the visible viewport.
     pub scroll: u16,
-    pub active: Option<(OperationId, u64)>,
+    pub connecting: Option<OperationId>,
+    pub active: Option<(OperationId, u64, CodexMode)>,
     pub hint_revision: Option<u64>,
     pub hint_count: u8,
     pub submission_recorded: bool,
@@ -65,6 +68,7 @@ impl Default for CodexUi {
             composer: String::new(),
             messages: Vec::new(),
             scroll: 0,
+            connecting: None,
             active: None,
             hint_revision: None,
             hint_count: 0,
@@ -87,12 +91,14 @@ impl CodexUi {
             self.messages.remove(0);
         }
         assert!(self.messages.len() <= 128);
+        self.scroll = 0;
     }
 
     pub fn clear_session(&mut self) {
         self.composer.clear();
         self.messages.clear();
         self.scroll = 0;
+        self.connecting = None;
         self.active = None;
         self.hint_revision = None;
         self.hint_count = 0;
@@ -125,6 +131,41 @@ pub enum DiscardAction {
 }
 
 #[derive(Clone, Debug)]
+pub struct SubmittedSource {
+    pub operation: OperationId,
+    pub revision: u64,
+    source: String,
+}
+
+impl SubmittedSource {
+    pub fn new(operation: OperationId, revision: u64, source: String) -> Self {
+        assert!(source.len() <= MAX_DOCUMENT_BYTES);
+        Self {
+            operation,
+            revision,
+            source,
+        }
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+impl Drop for SubmittedSource {
+    fn drop(&mut self) {
+        // This buffer temporarily duplicates source solely to bind an automatic review to the
+        // recorded run. Volatile writes keep its explicit cleanup from being optimized away.
+        unsafe {
+            for byte in self.source.as_mut_vec() {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+        self.source.clear();
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SolveSession {
     pub problem_id: i64,
     pub problem_slug: String,
@@ -145,6 +186,7 @@ pub struct SolveSession {
     pub quit_after_save: Option<(Option<OperationId>, u64)>,
     pub discard_confirmation: Option<DiscardAction>,
     pub refresh_after_submit: bool,
+    pub submitted_source: Option<SubmittedSource>,
 }
 
 impl SolveSession {
@@ -336,6 +378,7 @@ mod tests {
             quit_after_save: None,
             discard_confirmation: None,
             refresh_after_submit: false,
+            submitted_source: None,
         };
         solve.bounded_output("界".repeat(MAX_RUN_OUTPUT_BYTES));
         assert!(solve.output.starts_with("… output truncated …\n"));

@@ -1875,6 +1875,225 @@ mod tests {
     }
 
     #[test]
+    fn fake_account_states_use_stable_schema_and_auth_required_is_not_ready() {
+        {
+            let (_environment, mut ready) = fake_process("normal");
+            assert!(ready.account_ready().unwrap());
+        }
+        let (_environment, mut auth_required) = fake_process("auth-required");
+        assert!(!auth_required.account_ready().unwrap());
+    }
+
+    #[test]
+    fn session_roles_use_separate_threads_and_only_documented_payload_fields() {
+        let environment = FakeEnvironment::new("normal");
+        let mut session = crate::codex::CodexSession::connect_executable(
+            fake_executable(),
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            session
+                .ask(crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::Interviewer,
+                    statement: "statement",
+                    source: "question-source",
+                    latest_output: "question-output",
+                    question: "question",
+                    source_revision: 7,
+                    solved: false,
+                })
+                .unwrap(),
+            "What invariant holds?"
+        );
+        assert_eq!(
+            session
+                .ask(crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::Hint(1),
+                    statement: "statement",
+                    source: "hint-source",
+                    latest_output: "hint-output",
+                    question: "",
+                    source_revision: 7,
+                    solved: false,
+                })
+                .unwrap(),
+            "Level 1 invariant"
+        );
+        assert_eq!(
+            session
+                .ask(crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::SubmissionReview,
+                    statement: "statement",
+                    source: "recorded-source-bytes",
+                    latest_output: "recorded-output",
+                    question: "",
+                    source_revision: 7,
+                    solved: true,
+                })
+                .unwrap(),
+            "Submission reviewed"
+        );
+        drop(session);
+
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let turns = records
+            .iter()
+            .filter_map(|record| record.get("json"))
+            .filter(|message| message["method"] == "turn/start")
+            .collect::<Vec<_>>();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(
+            turns[0]["params"]["threadId"],
+            turns[2]["params"]["threadId"]
+        );
+        assert_ne!(
+            turns[0]["params"]["threadId"],
+            turns[1]["params"]["threadId"]
+        );
+        for turn in &turns {
+            let input = turn["params"]["input"][0]["text"].as_str().unwrap();
+            let payload: Value =
+                serde_json::from_str(input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+            let mut keys = payload
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "latestTestOutput",
+                    "source",
+                    "statement",
+                    "transcript",
+                    "userQuestion"
+                ]
+            );
+        }
+        let hint_input = turns[1]["params"]["input"][0]["text"].as_str().unwrap();
+        let hint_payload: Value =
+            serde_json::from_str(hint_input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+        assert_eq!(hint_payload["transcript"], "");
+        let review_input = turns[2]["params"]["input"][0]["text"].as_str().unwrap();
+        let review_payload: Value =
+            serde_json::from_str(review_input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+        assert_eq!(review_payload["source"], "recorded-source-bytes");
+        assert_eq!(review_payload["userQuestion"], "");
+    }
+
+    #[test]
+    fn deferred_stale_response_is_absent_from_the_next_prompt_transcript() {
+        let environment = FakeEnvironment::new("normal");
+        let mut session = crate::codex::CodexSession::connect_executable(
+            fake_executable(),
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        session
+            .ask_deferred_with_cancellation(
+                crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::Interviewer,
+                    statement: "statement",
+                    source: "old-source",
+                    latest_output: "output",
+                    question: "stale-question",
+                    source_revision: 1,
+                    solved: false,
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        session
+            .ask(crate::codex::InterviewRequest {
+                mode: crate::codex::prompt::Mode::SubmissionReview,
+                statement: "statement",
+                source: "new-source",
+                latest_output: "output",
+                question: "",
+                source_revision: 2,
+                solved: true,
+            })
+            .unwrap();
+        drop(session);
+
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let turns = records
+            .iter()
+            .filter_map(|record| record.get("json"))
+            .filter(|message| message["method"] == "turn/start")
+            .collect::<Vec<_>>();
+        assert_eq!(turns.len(), 2);
+        let next_input = turns[1]["params"]["input"][0]["text"].as_str().unwrap();
+        let next_payload: Value =
+            serde_json::from_str(next_input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+        assert_eq!(next_payload["transcript"], "");
+        assert!(!next_input.contains("stale-question"));
+        assert!(!next_input.contains("What invariant holds?"));
+    }
+
+    #[test]
+    fn malformed_turn_restarts_once_for_next_distinct_operation_without_replay() {
+        let environment = FakeEnvironment::new("malformed-envelope-restart");
+        let mut session = crate::codex::CodexSession::connect_executable(
+            fake_executable(),
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let request = |question| crate::codex::InterviewRequest {
+            mode: crate::codex::prompt::Mode::Interviewer,
+            statement: "statement",
+            source: "source",
+            latest_output: "output",
+            question,
+            source_revision: 1,
+            solved: false,
+        };
+        assert!(
+            session
+                .ask(request("failed-content"))
+                .unwrap_err()
+                .contains("malformed structured output twice")
+        );
+        assert!(session.requires_restart());
+        assert_eq!(
+            session.ask(request("next-content")).unwrap(),
+            "What invariant holds?"
+        );
+        drop(session);
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let payload_questions = records
+            .iter()
+            .filter_map(|record| record.get("json"))
+            .filter(|message| message["method"] == "turn/start")
+            .filter_map(|message| {
+                let input = message["params"]["input"][0]["text"].as_str()?;
+                let (_, json) = input.split_once("INPUT_JSON:")?;
+                let payload: Value = serde_json::from_str(json).ok()?;
+                payload["userQuestion"].as_str().map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(payload_questions, ["failed-content", "next-content"]);
+    }
+
+    #[test]
     fn session_restarts_once_after_death_without_replaying_failed_turn() {
         let environment = FakeEnvironment::new("restart");
         let mut session = crate::codex::CodexSession::connect_executable(
