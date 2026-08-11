@@ -9,6 +9,7 @@ pub struct ExecutionPlan {
     pub problem_slug: String,
     pub set_slug: Option<String>,
     pub runner_path: PathBuf,
+    pub solution_path: PathBuf,
 }
 
 pub struct ExecutionResult {
@@ -24,7 +25,7 @@ pub fn plan_execution(
     problem_reference: &str,
     set_slug: Option<&str>,
 ) -> Result<ExecutionPlan, String> {
-    let problem = database::resolve_problem(connection, problem_reference, set_slug)?;
+    let problem = database::resolve_problem(connection, problem_reference, set_slug)?.problem;
     let implementation = database::get_implementation(connection, problem.id, language)?;
     let runner_path = root.join(implementation.runner_path);
     let solution_path = root.join(implementation.solution_path);
@@ -45,6 +46,7 @@ pub fn plan_execution(
         problem_slug: problem.slug,
         set_slug: set_slug.map(str::to_string),
         runner_path,
+        solution_path,
     })
 }
 
@@ -71,12 +73,12 @@ pub fn execute_plan(plan: &ExecutionPlan, database_path: &Path) -> Result<Execut
     })
 }
 
-fn outcome(exit_code: Option<i32>) -> &'static str {
+fn outcome(exit_code: Option<i32>) -> database::AttemptOutcome {
     match exit_code {
-        Some(0) => "pass",
-        Some(2) => "error",
-        Some(128..=255) | None => "cancelled",
-        Some(_) => "fail",
+        Some(0) => database::AttemptOutcome::Pass,
+        Some(2) => database::AttemptOutcome::Error,
+        Some(128..=255) | None => database::AttemptOutcome::Cancelled,
+        Some(_) => database::AttemptOutcome::Fail,
     }
 }
 
@@ -103,10 +105,13 @@ mod tests {
 
     #[test]
     fn execution_outcomes_preserve_errors_and_signal_termination() {
-        assert_eq!(outcome(Some(0)), "pass");
-        assert_eq!(outcome(Some(1)), "fail");
-        assert_eq!(outcome(Some(2)), "error");
-        assert_eq!(outcome(Some(130)), "cancelled");
-        assert_eq!(outcome(None), "cancelled");
+        assert_eq!(outcome(Some(0)), crate::database::AttemptOutcome::Pass);
+        assert_eq!(outcome(Some(1)), crate::database::AttemptOutcome::Fail);
+        assert_eq!(outcome(Some(2)), crate::database::AttemptOutcome::Error);
+        assert_eq!(
+            outcome(Some(130)),
+            crate::database::AttemptOutcome::Cancelled
+        );
+        assert_eq!(outcome(None), crate::database::AttemptOutcome::Cancelled);
     }
 }

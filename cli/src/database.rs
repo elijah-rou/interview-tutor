@@ -1,10 +1,14 @@
 use crate::catalog::{
     ProblemSeed, ProblemSetSeed, SeedCatalog, validate_http_url, validate_identifier,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path};
+use std::str::FromStr;
 use std::time::Duration;
 
 pub const MAX_TITLE_LENGTH: usize = 200;
@@ -84,12 +88,129 @@ CREATE INDEX IF NOT EXISTS attempts_problem_language_revision
     ON attempts(problem_id, language_id, test_revision, result, run_at);
 "#;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Difficulty {
+    Easy,
+    Medium,
+    Hard,
+}
+
+impl FromStr for Difficulty {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "Easy" => Ok(Self::Easy),
+            "Medium" => Ok(Self::Medium),
+            "Hard" => Ok(Self::Hard),
+            _ => Err(format!("invalid difficulty: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for Difficulty {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Easy => "Easy",
+            Self::Medium => "Medium",
+            Self::Hard => "Hard",
+        })
+    }
+}
+
+impl FromSql for Difficulty {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_str()?;
+        Self::from_str(value).map_err(|_| {
+            FromSqlError::Other(format!("unknown persisted difficulty: {value}").into())
+        })
+    }
+}
+
+impl ToSql for Difficulty {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.to_string()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptOutcome {
+    Pass,
+    Fail,
+    Error,
+    Cancelled,
+}
+
+impl FromStr for AttemptOutcome {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pass" => Ok(Self::Pass),
+            "fail" => Ok(Self::Fail),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("invalid attempt outcome: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for AttemptOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        })
+    }
+}
+
+impl FromSql for AttemptOutcome {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_str()?;
+        Self::from_str(value).map_err(|_| {
+            FromSqlError::Other(format!("unknown persisted attempt outcome: {value}").into())
+        })
+    }
+}
+
+impl ToSql for AttemptOutcome {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.to_string()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PositiveOrdinal(i64);
+
+impl PositiveOrdinal {
+    pub fn new(value: i64) -> Result<Self, String> {
+        if value > 0 {
+            Ok(Self(value))
+        } else {
+            Err(format!("invalid persisted problem-set ordinal: {value}"))
+        }
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl FromSql for PositiveOrdinal {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let value = value.as_i64()?;
+        Self::new(value).map_err(|error| FromSqlError::Other(error.into()))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Problem {
     pub id: i64,
     pub slug: String,
     pub title: String,
-    pub difficulty: String,
+    pub difficulty: Difficulty,
     pub topic: String,
     pub leetcode_id: Option<i64>,
     pub premium: bool,
@@ -99,7 +220,19 @@ pub struct Problem {
     pub neetcode_url: String,
     pub statement_markdown: String,
     pub test_revision: i64,
-    pub ordinal: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SetMember {
+    pub problem: Problem,
+    pub ordinal: PositiveOrdinal,
+    pub section: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedProblem {
+    pub problem: Problem,
+    pub membership: Option<SetMember>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,8 +244,16 @@ pub struct ProblemSet {
     pub managed: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct Implementation {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnabledLanguage {
+    pub slug: String,
+    pub display_name: String,
+    pub runner_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProblemImplementation {
+    pub language: EnabledLanguage,
     pub runner_path: String,
     pub solution_path: String,
 }
@@ -120,7 +261,35 @@ pub struct Implementation {
 #[derive(Clone, Debug)]
 pub struct ProblemListRow {
     pub problem: Problem,
-    pub languages: String,
+    pub implementations: Vec<ProblemImplementation>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ProgressScope<'a> {
+    Global,
+    ProblemSet(&'a str),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DifficultyProgress {
+    pub difficulty: Difficulty,
+    pub completed: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopicProgress {
+    pub topic: String,
+    pub completed: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgressSummary {
+    pub completed: usize,
+    pub total: usize,
+    pub by_difficulty: Vec<DifficultyProgress>,
+    pub by_topic: Vec<TopicProgress>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +316,14 @@ struct LegacyProblem {
 }
 
 fn sql_error(error: rusqlite::Error) -> String {
-    error.to_string()
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 fn constraint_error(error: rusqlite::Error, message: String) -> String {
@@ -797,7 +973,15 @@ fn problem_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Problem> {
         neetcode_url: row.get(10)?,
         statement_markdown: row.get(11)?,
         test_revision: row.get(12)?,
+    })
+}
+
+fn set_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SetMember> {
+    let problem = problem_from_row(row)?;
+    Ok(SetMember {
+        problem: problem.clone(),
         ordinal: row.get(13)?,
+        section: row.get(14)?,
     })
 }
 
@@ -852,7 +1036,7 @@ pub fn list_problem_sets(connection: &Connection) -> Result<Vec<(ProblemSet, i64
         .map_err(sql_error)
 }
 
-pub fn list_set_members(connection: &Connection, set_slug: &str) -> Result<Vec<Problem>, String> {
+pub fn list_set_members(connection: &Connection, set_slug: &str) -> Result<Vec<SetMember>, String> {
     get_problem_set(connection, set_slug)?;
     let sql = format!(
         "SELECT {PROBLEM_COLUMNS}, m.ordinal, m.section \
@@ -863,7 +1047,7 @@ pub fn list_set_members(connection: &Connection, set_slug: &str) -> Result<Vec<P
     );
     let mut statement = connection.prepare(&sql).map_err(sql_error)?;
     statement
-        .query_map(params![set_slug], problem_from_row)
+        .query_map(params![set_slug], set_member_from_row)
         .map_err(sql_error)?
         .collect::<Result<_, _>>()
         .map_err(sql_error)
@@ -877,51 +1061,59 @@ pub fn resolve_problem(
     connection: &Connection,
     reference: &str,
     set_slug: Option<&str>,
-) -> Result<Problem, String> {
+) -> Result<ResolvedProblem, String> {
     let Some(set_slug) = set_slug else {
         if is_ascii_decimal(reference) {
             return Err("a numeric problem selector requires a problem set".to_string());
         }
-        let sql =
-            format!("SELECT {PROBLEM_COLUMNS}, NULL, NULL FROM problems AS p WHERE p.slug = ?");
-        return connection
+        let sql = format!("SELECT {PROBLEM_COLUMNS} FROM problems AS p WHERE p.slug = ?");
+        let problem = connection
             .query_row(&sql, params![reference], problem_from_row)
             .optional()
             .map_err(sql_error)?
-            .ok_or_else(|| format!("unknown problem: {reference}"));
+            .ok_or_else(|| format!("unknown problem: {reference}"))?;
+        return Ok(ResolvedProblem {
+            problem,
+            membership: None,
+        });
     };
     let problem_set = get_problem_set(connection, set_slug)?;
-    if is_ascii_decimal(reference) {
+    let (selector, selector_value): (&str, rusqlite::types::Value) = if is_ascii_decimal(reference)
+    {
         if reference == "0" || (reference.len() > 1 && reference.starts_with('0')) {
             return Err(format!("invalid 1-based problem index: {reference}"));
         }
         let ordinal: i64 = reference
             .parse()
             .map_err(|_| format!("invalid 1-based problem index: {reference}"))?;
-        let sql = format!(
-            "SELECT {PROBLEM_COLUMNS}, m.ordinal, m.section \
-             FROM problem_set_members AS m \
-             JOIN problems AS p ON p.id = m.problem_id \
-             WHERE m.problem_set_id = ? AND m.ordinal = ?"
-        );
-        return connection
-            .query_row(&sql, params![problem_set.id, ordinal], problem_from_row)
-            .optional()
-            .map_err(sql_error)?
-            .ok_or_else(|| format!("problem index out of range for {set_slug}: {reference}"));
-    }
+        ("m.ordinal", ordinal.into())
+    } else {
+        ("p.slug", reference.to_string().into())
+    };
     let sql = format!(
         "SELECT {PROBLEM_COLUMNS}, m.ordinal, m.section \
          FROM problem_set_members AS m \
          JOIN problems AS p ON p.id = m.problem_id \
-         WHERE m.problem_set_id = ? AND p.slug = ?"
+         WHERE m.problem_set_id = ? AND {selector} = ?"
     );
-    if let Some(problem) = connection
-        .query_row(&sql, params![problem_set.id, reference], problem_from_row)
+    if let Some(member) = connection
+        .query_row(
+            &sql,
+            params![problem_set.id, selector_value],
+            set_member_from_row,
+        )
         .optional()
         .map_err(sql_error)?
     {
-        return Ok(problem);
+        return Ok(ResolvedProblem {
+            problem: member.problem.clone(),
+            membership: Some(member),
+        });
+    }
+    if is_ascii_decimal(reference) {
+        return Err(format!(
+            "problem index out of range for {set_slug}: {reference}"
+        ));
     }
     let global_exists: bool = connection
         .query_row(
@@ -941,7 +1133,7 @@ pub fn get_implementation(
     connection: &Connection,
     problem_id: i64,
     language_slug: &str,
-) -> Result<Implementation, String> {
+) -> Result<ProblemImplementation, String> {
     let language_id: Option<i64> = connection
         .query_row(
             "SELECT id FROM languages WHERE slug = ? AND enabled = 1",
@@ -955,15 +1147,22 @@ pub fn get_implementation(
     };
     let implementation = connection
         .query_row(
-            "SELECT l.runner_path, i.solution_path \
+            "SELECT l.slug, l.display_name, l.runner_path, i.solution_path \
              FROM problem_implementations AS i \
              JOIN languages AS l ON l.id = i.language_id \
-             WHERE i.problem_id = ? AND i.language_id = ? AND i.enabled = 1",
+             WHERE i.problem_id = ? AND i.language_id = ? \
+               AND i.enabled = 1 AND l.enabled = 1",
             params![problem_id, language_id],
             |row| {
-                Ok(Implementation {
-                    runner_path: row.get(0)?,
-                    solution_path: row.get(1)?,
+                let runner_path: String = row.get(2)?;
+                Ok(ProblemImplementation {
+                    language: EnabledLanguage {
+                        slug: row.get(0)?,
+                        display_name: row.get(1)?,
+                        runner_path: runner_path.clone(),
+                    },
+                    runner_path,
+                    solution_path: row.get(3)?,
                 })
             },
         )
@@ -1031,6 +1230,79 @@ pub fn language_is_enabled(connection: &Connection, slug: &str) -> Result<bool, 
         .map_err(sql_error)
 }
 
+pub fn get_enabled_language(
+    connection: &Connection,
+    slug: &str,
+) -> Result<EnabledLanguage, String> {
+    connection
+        .query_row(
+            "SELECT slug, display_name, runner_path FROM languages \
+             WHERE slug = ? AND enabled = 1",
+            params![slug],
+            |row| {
+                Ok(EnabledLanguage {
+                    slug: row.get(0)?,
+                    display_name: row.get(1)?,
+                    runner_path: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .ok_or_else(|| format!("unknown or disabled language: {slug}"))
+}
+
+pub fn list_enabled_languages(connection: &Connection) -> Result<Vec<EnabledLanguage>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT slug, display_name, runner_path FROM languages \
+             WHERE enabled = 1 ORDER BY slug",
+        )
+        .map_err(sql_error)?;
+    statement
+        .query_map([], |row| {
+            Ok(EnabledLanguage {
+                slug: row.get(0)?,
+                display_name: row.get(1)?,
+                runner_path: row.get(2)?,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<Result<_, _>>()
+        .map_err(sql_error)
+}
+
+pub fn list_enabled_implementations(
+    connection: &Connection,
+    problem_id: i64,
+) -> Result<Vec<ProblemImplementation>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT l.slug, l.display_name, l.runner_path, i.solution_path \
+             FROM problem_implementations AS i \
+             JOIN languages AS l ON l.id = i.language_id \
+             WHERE i.problem_id = ? AND i.enabled = 1 AND l.enabled = 1 \
+             ORDER BY l.slug",
+        )
+        .map_err(sql_error)?;
+    statement
+        .query_map(params![problem_id], |row| {
+            let runner_path: String = row.get(2)?;
+            Ok(ProblemImplementation {
+                language: EnabledLanguage {
+                    slug: row.get(0)?,
+                    display_name: row.get(1)?,
+                    runner_path: runner_path.clone(),
+                },
+                runner_path,
+                solution_path: row.get(3)?,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<Result<_, _>>()
+        .map_err(sql_error)
+}
+
 pub fn list_global_problems(
     connection: &Connection,
     include_archived: bool,
@@ -1041,28 +1313,32 @@ pub fn list_global_problems(
         "WHERE p.archived = 0"
     };
     let sql = format!(
-        "SELECT {PROBLEM_COLUMNS}, NULL, NULL, COALESCE(GROUP_CONCAT(l.slug, ', '), '-') \
-         FROM problems AS p \
-         LEFT JOIN problem_implementations AS i ON i.problem_id = p.id AND i.enabled = 1 \
-         LEFT JOIN languages AS l ON l.id = i.language_id AND l.enabled = 1 \
-         {archived_clause} GROUP BY p.id ORDER BY p.slug"
+        "SELECT {PROBLEM_COLUMNS} FROM problems AS p \
+         {archived_clause} ORDER BY p.slug"
     );
-    let mut statement = connection.prepare(&sql).map_err(sql_error)?;
-    statement
-        .query_map([], |row| {
+    let problems = {
+        let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+        statement
+            .query_map([], problem_from_row)
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?
+    };
+    problems
+        .into_iter()
+        .map(|problem| {
+            let implementations = list_enabled_implementations(connection, problem.id)?;
             Ok(ProblemListRow {
-                problem: problem_from_row(row)?,
-                languages: row.get(15)?,
+                problem,
+                implementations,
             })
         })
-        .map_err(sql_error)?
-        .collect::<Result<_, _>>()
-        .map_err(sql_error)
+        .collect()
 }
 
 pub fn list_active_global_problems(connection: &Connection) -> Result<Vec<Problem>, String> {
     let sql = format!(
-        "SELECT {PROBLEM_COLUMNS}, NULL, NULL FROM problems AS p \
+        "SELECT {PROBLEM_COLUMNS} FROM problems AS p \
          WHERE p.archived = 0 ORDER BY p.slug"
     );
     let mut statement = connection.prepare(&sql).map_err(sql_error)?;
@@ -1073,11 +1349,79 @@ pub fn list_active_global_problems(connection: &Connection) -> Result<Vec<Proble
         .map_err(sql_error)
 }
 
+pub fn progress_summary(
+    connection: &Connection,
+    scope: ProgressScope<'_>,
+    language_slug: Option<&str>,
+) -> Result<ProgressSummary, String> {
+    if let Some(language_slug) = language_slug
+        && !language_is_enabled(connection, language_slug)?
+    {
+        return Err(format!("unknown or disabled language: {language_slug}"));
+    }
+    let problems = match scope {
+        ProgressScope::Global => list_active_global_problems(connection)?,
+        ProgressScope::ProblemSet(set_slug) => list_set_members(connection, set_slug)?
+            .into_iter()
+            .map(|member| member.problem)
+            .collect(),
+    };
+    let completed_ids = completed_problem_ids(connection, language_slug)?;
+    let completed = problems
+        .iter()
+        .filter(|problem| completed_ids.contains(&problem.id))
+        .count();
+
+    let mut by_difficulty = Vec::new();
+    for difficulty in [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard] {
+        let scoped = problems
+            .iter()
+            .filter(|problem| problem.difficulty == difficulty)
+            .collect::<Vec<_>>();
+        if !scoped.is_empty() {
+            by_difficulty.push(DifficultyProgress {
+                difficulty,
+                completed: scoped
+                    .iter()
+                    .filter(|problem| completed_ids.contains(&problem.id))
+                    .count(),
+                total: scoped.len(),
+            });
+        }
+    }
+
+    let mut by_topic: Vec<TopicProgress> = Vec::new();
+    for problem in &problems {
+        if let Some(group) = by_topic
+            .iter_mut()
+            .find(|group| group.topic == problem.topic)
+        {
+            group.total += 1;
+            if completed_ids.contains(&problem.id) {
+                group.completed += 1;
+            }
+        } else {
+            by_topic.push(TopicProgress {
+                topic: problem.topic.clone(),
+                completed: usize::from(completed_ids.contains(&problem.id)),
+                total: 1,
+            });
+        }
+    }
+
+    Ok(ProgressSummary {
+        completed,
+        total: problems.len(),
+        by_difficulty,
+        by_topic,
+    })
+}
+
 pub fn record_attempt(
     connection: &Connection,
     problem_slug: &str,
     language_slug: &str,
-    result: &str,
+    result: AttemptOutcome,
     duration_ms: i64,
     exit_code: Option<i32>,
     set_slug: Option<&str>,
@@ -1085,10 +1429,7 @@ pub fn record_attempt(
     if duration_ms < 0 {
         return Err("duration must not be negative".to_string());
     }
-    if !["pass", "fail", "error", "cancelled"].contains(&result) {
-        return Err(format!("invalid result: {result}"));
-    }
-    let problem = resolve_problem(connection, problem_slug, None)?;
+    let problem = resolve_problem(connection, problem_slug, None)?.problem;
     let language_id: Option<i64> = connection
         .query_row(
             "SELECT id FROM languages WHERE slug = ?",
@@ -1129,7 +1470,7 @@ pub fn record_attempt(
 pub struct NewProblem<'a> {
     pub slug: &'a str,
     pub title: &'a str,
-    pub difficulty: &'a str,
+    pub difficulty: Difficulty,
     pub topic: &'a str,
     pub statement_markdown: &'a str,
     pub leetcode_id: Option<i64>,
@@ -1148,9 +1489,6 @@ fn validate_url(label: &str, url: &str) -> Result<(), String> {
 
 pub fn create_problem(connection: &Connection, new: &NewProblem<'_>) -> Result<(), String> {
     validate_identifier(new.slug, "problem slug", true)?;
-    if !["Easy", "Medium", "Hard"].contains(&new.difficulty) {
-        return Err(format!("invalid difficulty: {}", new.difficulty));
-    }
     let title = new.title.trim();
     let topic = new.topic.trim();
     if title.is_empty() {
@@ -1284,7 +1622,7 @@ pub fn add_set_member(
 ) -> Result<(), String> {
     transaction(connection, || {
         let problem_set = mutable_problem_set(connection, set_slug)?;
-        let problem = resolve_problem(connection, problem_slug, None)?;
+        let problem = resolve_problem(connection, problem_slug, None)?.problem;
         let count = validate_member_order(connection, problem_set.id)?;
         if count >= 999_999 {
             return Err("problem set reached its maximum size".to_string());
@@ -1446,7 +1784,7 @@ pub fn add_implementation(
     language_slug: &str,
     solution_path: &str,
 ) -> Result<(), String> {
-    let problem = resolve_problem(connection, problem_slug, None)?;
+    let problem = resolve_problem(connection, problem_slug, None)?.problem;
     if problem.managed {
         return Err(format!("shipped problem is read-only: {problem_slug}"));
     }
@@ -1487,7 +1825,7 @@ pub fn add_implementation(
 
 pub struct ProblemUpdate<'a> {
     pub title: Option<&'a str>,
-    pub difficulty: Option<&'a str>,
+    pub difficulty: Option<Difficulty>,
     pub topic: Option<&'a str>,
     pub statement_markdown: Option<&'a str>,
     pub test_revision: Option<i64>,
@@ -1502,12 +1840,12 @@ pub fn update_problem(
     slug: &str,
     update: &ProblemUpdate<'_>,
 ) -> Result<(), String> {
-    let problem = resolve_problem(connection, slug, None)?;
+    let problem = resolve_problem(connection, slug, None)?.problem;
     if problem.managed {
         return Err(format!("shipped problem is read-only: {slug}"));
     }
     let title = update.title.unwrap_or(&problem.title).trim();
-    let difficulty = update.difficulty.unwrap_or(&problem.difficulty);
+    let difficulty = update.difficulty.unwrap_or(problem.difficulty);
     let topic = update.topic.unwrap_or(&problem.topic).trim();
     let statement = update
         .statement_markdown
@@ -1525,9 +1863,6 @@ pub fn update_problem(
     }
     if leetcode_id.is_some_and(|id| id <= 0) {
         return Err("LeetCode id must be positive".to_string());
-    }
-    if !["Easy", "Medium", "Hard"].contains(&difficulty) {
-        return Err(format!("invalid difficulty: {difficulty}"));
     }
     if title.is_empty() || title.chars().count() > MAX_TITLE_LENGTH {
         return Err("problem title is empty or too long".to_string());
@@ -1573,7 +1908,7 @@ pub fn update_problem(
 }
 
 pub fn delete_problem(connection: &Connection, slug: &str) -> Result<(), String> {
-    let problem = resolve_problem(connection, slug, None)?;
+    let problem = resolve_problem(connection, slug, None)?.problem;
     if problem.managed {
         return Err(format!("shipped problem is read-only: {slug}"));
     }
