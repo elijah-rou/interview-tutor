@@ -81,8 +81,8 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             if solve.running.is_some() {
                 if intent == RunIntent::Test {
                     solve.pending_save =
-                        Some((solve.editor.generation, solve.editor.text().to_string()));
-                    state.status = "Test queued for newest generation".into();
+                        Some((solve.editor.revision, solve.editor.text().to_string()));
+                    state.status = "Test queued for newest revision".into();
                 } else {
                     state.error = Some("a run is already active".into());
                 }
@@ -90,8 +90,11 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
             let operation = next_operation(state);
             let solve = state.solve.as_mut().expect("solve exists");
-            let generation = solve.editor.generation;
-            solve.running = Some((operation, generation, intent));
+            let revision = solve.editor.revision;
+            solve.running = Some((operation, revision, intent));
+            if solve.quit_after_save == Some((None, revision)) {
+                solve.quit_after_save = Some((Some(operation), revision));
+            }
             state.status = if intent == RunIntent::Submit {
                 "Submitting…"
             } else {
@@ -102,7 +105,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 operation,
                 plan: solve.plan.clone(),
                 source: solve.editor.text().to_string(),
-                generation,
+                revision,
                 write_source: solve.editor.dirty(),
                 intent,
             }]
@@ -141,9 +144,15 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Editor(editor_action) if solve.pane == SolvePane::Editor => {
+            let revision_before = solve.editor.revision;
             let result = match editor_action {
                 EditorAction::Normal(key) => solve.editor.normal(key),
                 EditorAction::Insert(character) => solve.editor.insert_char(character),
+                EditorAction::Paste(text) => match solve.editor.mode {
+                    Mode::Insert => solve.editor.insert_text(&text),
+                    Mode::Command => solve.editor.command_text(&text),
+                    Mode::Normal => Err("paste ignored in Normal mode".into()),
+                },
                 EditorAction::CommandChar(character) => {
                     solve.editor.command_char(character);
                     Ok(())
@@ -162,8 +171,8 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     }
                 },
                 EditorAction::Escape => {
-                    solve.editor.mode = Mode::Normal;
-                    solve.editor.command_buffer.clear();
+                    solve.editor.escape();
+                    state.error = None;
                     Ok(())
                 }
                 EditorAction::Enter => solve.editor.enter(),
@@ -185,7 +194,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     let action = match command {
                         EditorCommand::Write => Action::SaveTest,
                         EditorCommand::WriteQuit => {
-                            solve.quit_after_save = true;
+                            solve.quit_after_save = Some((None, solve.editor.revision));
                             Action::SaveTest
                         }
                         EditorCommand::Submit => Action::Submit,
@@ -199,7 +208,13 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 }
             };
             if let Err(error) = result {
+                solve.editor.error = Some(error.clone());
                 state.error = Some(error);
+            } else {
+                state.error = None;
+            }
+            if solve.editor.revision != revision_before {
+                solve.stale = true;
             }
             Vec::new()
         }
@@ -235,29 +250,51 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     }
 }
 
+fn start_pending_test(state: &mut AppState) -> Vec<Effect> {
+    let Some((revision, source)) = state
+        .solve
+        .as_mut()
+        .and_then(|solve| solve.pending_save.take())
+    else {
+        return Vec::new();
+    };
+    let operation = next_operation(state);
+    let solve = state.solve.as_mut().expect("solve exists");
+    solve.running = Some((operation, revision, RunIntent::Test));
+    if solve.quit_after_save == Some((None, revision)) {
+        solve.quit_after_save = Some((Some(operation), revision));
+    }
+    vec![Effect::SaveRun {
+        operation,
+        plan: solve.plan.clone(),
+        source,
+        revision,
+        write_source: true,
+        intent: RunIntent::Test,
+    }]
+}
+
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     if state.screen == Screen::Solve {
         match event {
             Event::Command(action) => return solve_command(state, action),
-            Event::RunFinished(operation, generation, intent, saved, result) => {
+            Event::RunFinished(operation, revision, intent, saved_source, result) => {
                 let Some(solve) = state.solve.as_mut() else {
                     return Vec::new();
                 };
-                if solve.running.map(|item| item.0) != Some(operation) {
+                if solve.running != Some((operation, revision, intent)) {
                     return Vec::new();
                 }
                 solve.running = None;
                 solve.cancellation = None;
-                if saved {
-                    solve.editor.mark_saved(generation);
-                    if solve.quit_after_save && generation == solve.editor.generation {
-                        state.quit = true;
-                    }
+                if let Some(saved_source) = saved_source.as_deref() {
+                    solve.editor.mark_saved(revision, saved_source);
                 }
-                solve.quit_after_save = false;
+                let quit_matches = solve.quit_after_save == Some((Some(operation), revision));
+                let succeeded = result.is_ok();
                 match result {
                     Ok(result) => {
-                        solve.stale = generation != solve.editor.generation;
+                        solve.stale = revision != solve.editor.revision;
                         solve.bounded_output(format!(
                             "{:?} ({} ms){}\n{}",
                             result.termination,
@@ -275,25 +312,20 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Err(error) => {
                         solve.bounded_output(format!("Runner error: {error}"));
                         state.status = "Run failed".into();
+                        state.error = Some(error);
                     }
                 }
-                if let Some((pending_generation, source)) = solve.pending_save.take() {
-                    let operation = next_operation(state);
-                    let solve = state.solve.as_mut().unwrap();
-                    solve.running = Some((operation, pending_generation, RunIntent::Test));
-                    return vec![Effect::SaveRun {
-                        operation,
-                        plan: solve.plan.clone(),
-                        source,
-                        generation: pending_generation,
-                        write_source: true,
-                        intent: RunIntent::Test,
-                    }];
+                if quit_matches {
+                    solve.quit_after_save = None;
+                    if succeeded && saved_source.is_some() {
+                        state.quit = true;
+                    }
                 }
-                if intent == RunIntent::Submit {
+                if intent == RunIntent::Submit && succeeded {
+                    solve.refresh_after_submit = true;
                     return load_effect(state);
                 }
-                return Vec::new();
+                return start_pending_test(state);
             }
             Event::Loaded(operation, result) => {
                 /* progress refresh after submit */
@@ -305,11 +337,17 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Ok(data) => {
                         state.data = *data;
                         state.status = "Submit recorded · progress refreshed".into();
-                        state.error = None
+                        state.error = None;
                     }
-                    Err(error) => state.error = Some(error),
+                    Err(error) => {
+                        state.status = "Progress refresh failed".into();
+                        state.error = Some(error);
+                    }
                 }
-                return Vec::new();
+                if let Some(solve) = state.solve.as_mut() {
+                    solve.refresh_after_submit = false;
+                }
+                return start_pending_test(state);
             }
             Event::SolveOpened(_, _) | Event::OpenSet(_) => return Vec::new(),
         }
@@ -657,7 +695,8 @@ mod tests {
             cancellation: None,
             pending_save: None,
             stale: false,
-            quit_after_save: false,
+            quit_after_save: None,
+            refresh_after_submit: false,
         });
         state
     }
@@ -668,7 +707,7 @@ mod tests {
         let first = reduce(&mut state, Event::Command(Action::SaveTest));
         let Effect::SaveRun {
             operation,
-            generation,
+            revision,
             ..
         } = first[0].clone()
         else {
@@ -703,9 +742,9 @@ mod tests {
             &mut state,
             Event::RunFinished(
                 OperationId(999),
-                generation,
+                revision,
                 RunIntent::Test,
-                true,
+                Some("print(1)".into()),
                 Ok(crate::runner::ExecutionResult::test_result(
                     crate::runner::Termination::Exited(0),
                     "ignored",
@@ -717,9 +756,9 @@ mod tests {
             &mut state,
             Event::RunFinished(
                 operation,
-                generation,
+                revision,
                 RunIntent::Test,
-                true,
+                Some("print(1)".into()),
                 Ok(crate::runner::ExecutionResult::test_result(
                     crate::runner::Termination::Exited(0),
                     "PASS",
@@ -727,10 +766,10 @@ mod tests {
             ),
         );
         assert!(state.solve.as_ref().unwrap().stale);
-        let Effect::SaveRun { generation, .. } = queued[0] else {
+        let Effect::SaveRun { revision, .. } = queued[0] else {
             panic!("expected queued run")
         };
-        assert_eq!(generation, 2);
+        assert_eq!(revision, 2);
     }
 
     #[test]
@@ -756,6 +795,110 @@ mod tests {
         );
         assert!(state.solve.is_none());
         assert_eq!(state.screen, Screen::ProblemDetail);
+    }
+
+    #[test]
+    fn completion_requires_full_operation_revision_intent_tuple() {
+        let mut state = solve_state();
+        let effects = reduce(&mut state, Event::Command(Action::SaveTest));
+        let Effect::SaveRun {
+            operation,
+            revision,
+            ..
+        } = effects[0]
+        else {
+            panic!("expected run")
+        };
+        let ignored = Event::RunFinished(
+            operation,
+            revision + 1,
+            RunIntent::Test,
+            Some("wrong".into()),
+            Ok(crate::runner::ExecutionResult::test_result(
+                crate::runner::Termination::Exited(0),
+                "wrong",
+            )),
+        );
+        assert!(reduce(&mut state, ignored).is_empty());
+        assert_eq!(
+            state.solve.as_ref().unwrap().running,
+            Some((operation, revision, RunIntent::Test))
+        );
+        let ignored = Event::RunFinished(
+            operation,
+            revision,
+            RunIntent::Submit,
+            Some("wrong".into()),
+            Ok(crate::runner::ExecutionResult::test_result(
+                crate::runner::Termination::Exited(0),
+                "wrong",
+            )),
+        );
+        assert!(reduce(&mut state, ignored).is_empty());
+        assert_eq!(
+            state.solve.as_ref().unwrap().running,
+            Some((operation, revision, RunIntent::Test))
+        );
+    }
+
+    #[test]
+    fn write_quit_binds_to_queued_save_and_only_success_quits() {
+        let mut state = solve_state();
+        let first = reduce(&mut state, Event::Command(Action::SaveTest));
+        let Effect::SaveRun {
+            operation: first_operation,
+            revision: first_revision,
+            ..
+        } = first[0]
+        else {
+            panic!("expected run")
+        };
+        reduce(
+            &mut state,
+            Event::Command(Action::Editor(EditorAction::Command(
+                EditorCommand::WriteQuit,
+            ))),
+        );
+        assert_eq!(
+            state.solve.as_ref().unwrap().quit_after_save,
+            Some((None, 0))
+        );
+        let queued = reduce(
+            &mut state,
+            Event::RunFinished(
+                first_operation,
+                first_revision,
+                RunIntent::Test,
+                Some("print(1)".into()),
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "PASS",
+                )),
+            ),
+        );
+        let Effect::SaveRun {
+            operation,
+            revision,
+            ..
+        } = queued[0]
+        else {
+            panic!("expected queued run")
+        };
+        assert_eq!(
+            state.solve.as_ref().unwrap().quit_after_save,
+            Some((Some(operation), revision))
+        );
+        reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Test,
+                None,
+                Err("save failed".into()),
+            ),
+        );
+        assert!(!state.quit);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 fn block(title: &str) -> Block<'static> {
@@ -250,7 +251,7 @@ fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
 
 fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let Some(solve) = &state.solve else { return };
-    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let visible = usize::from(area.height.saturating_sub(3)).max(1);
     let start = if solve.editor.row >= solve.editor.viewport_row.saturating_add(visible) {
         solve.editor.row.saturating_add(1).saturating_sub(visible)
     } else {
@@ -261,7 +262,7 @@ fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let mut viewport_column = solve.editor.viewport_column.min(solve.editor.column);
     while viewport_column < solve.editor.column {
         let visible_prefix = cursor_line
-            .chars()
+            .graphemes(true)
             .skip(viewport_column)
             .take(solve.editor.column - viewport_column)
             .collect::<String>();
@@ -270,25 +271,23 @@ fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         }
         viewport_column += 1;
     }
-    let horizontal_scroll = UnicodeWidthStr::width(
-        cursor_line
-            .chars()
-            .take(viewport_column)
-            .collect::<String>()
-            .as_str(),
-    );
-    let lines = solve
+    let mut lines = solve
         .editor
         .text()
         .split('\n')
         .skip(start)
         .take(visible)
         .map(|line| {
-            let spans = highlight_line(&solve.language, line)
+            let bounded = line
+                .graphemes(true)
+                .skip(viewport_column)
+                .take(visible_columns.saturating_mul(2))
+                .collect::<String>();
+            let spans = highlight_line(&solve.language, &bounded)
                 .into_iter()
                 .map(|item| {
                     Span::styled(
-                        line[item.start..item.end].to_string(),
+                        bounded[item.start..item.end].to_string(),
                         highlight_style(item.kind),
                     )
                 })
@@ -296,19 +295,25 @@ fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             Line::from(spans)
         })
         .collect::<Vec<_>>();
+    let inline = if solve.editor.mode == Mode::Command {
+        format!(":{}", solve.editor.command_buffer)
+    } else if let Some(error) = &solve.editor.error {
+        format!("Error: {error}")
+    } else {
+        String::new()
+    };
+    lines.push(Line::styled(inline, Style::default().fg(Color::Red)));
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block(if solve.pane == SolvePane::Editor {
-                "Editor [active]"
-            } else {
-                "Editor"
-            }))
-            .scroll((0, u16::try_from(horizontal_scroll).unwrap_or(u16::MAX))),
+        Paragraph::new(lines).block(block(if solve.pane == SolvePane::Editor {
+            "Editor [active]"
+        } else {
+            "Editor"
+        })),
         area,
     );
     if solve.pane == SolvePane::Editor && matches!(solve.editor.mode, Mode::Insert | Mode::Normal) {
         let visible_prefix = cursor_line
-            .chars()
+            .graphemes(true)
             .skip(viewport_column)
             .take(solve.editor.column.saturating_sub(viewport_column))
             .collect::<String>();
@@ -406,7 +411,11 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         .split(area);
     frame.render_widget(header(state), vertical[0]);
     let footer = if state.screen == Screen::Solve {
-        "Ctrl-S/F5 save+test  F9 submit  Ctrl-C cancel  Tab panes  Space q quit"
+        if area.width >= 80 {
+            "Ctrl-S/F5 test  F9 submit  Ctrl-C cancel  Tab panes  Space-b back  Space-q quit"
+        } else {
+            "F5 test F9 submit Tab panes Space-b back Space-q quit"
+        }
     } else {
         footer_text(area.width)
     };
@@ -414,7 +423,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
 
     if area.width < 60 || area.height < 20 {
         frame.render_widget(
-            Paragraph::new("Terminal too small\nResize to at least 60 × 20\nPress q to quit")
+            Paragraph::new("Terminal too small\nResize to at least 60 × 20\nPress Space-q to quit")
                 .alignment(ratatui::layout::Alignment::Center)
                 .block(block("Resize required")),
             vertical[1],
@@ -570,7 +579,7 @@ mod tests {
         state.show_help = true;
         let view = rendered(&state, 59, 19);
         assert!(view.contains("Terminal too small"));
-        assert!(view.contains("Press q to quit"));
+        assert!(view.contains("Press Space-q to quit"));
         assert!(!view.contains("Keyboard help"));
         reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
@@ -723,7 +732,8 @@ mod tests {
             cancellation: None,
             pending_save: None,
             stale: false,
-            quit_after_save: false,
+            quit_after_save: None,
+            refresh_after_submit: false,
         });
         let full = rendered(&state, 120, 40);
         assert!(full.contains("Problem / Examples"));
