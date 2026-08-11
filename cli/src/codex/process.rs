@@ -3,11 +3,13 @@ use crate::runner::CancellationToken;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -18,6 +20,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
@@ -32,6 +36,7 @@ pub struct CodexProcess {
     messages: Option<Receiver<Vec<u8>>>,
     stdout_reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<()>>,
+    reader_shutdown: Arc<AtomicBool>,
     reader_failure: Arc<Mutex<Option<String>>>,
     _stderr_ring: Arc<Mutex<StderrRing>>,
     cwd: Option<PathBuf>,
@@ -62,6 +67,9 @@ impl CodexProcess {
         control_pid: Arc<AtomicI32>,
         cancellation: &CancellationToken,
     ) -> Result<Self, String> {
+        let executable = fs::canonicalize(&executable)
+            .map_err(|error| format!("cannot resolve Codex executable: {error}"))?;
+        let probed_identity = trusted_executable_identity(&executable)?;
         validate_version(&executable, cancellation)?;
         if cancellation.is_cancelled() {
             return Err("Codex startup cancelled".into());
@@ -78,21 +86,56 @@ impl CodexProcess {
             .env_clear();
         copy_allowed_environment(&mut command);
         configure_process_group(&mut command);
+        let current_identity = trusted_executable_identity(&executable);
+        if current_identity.as_ref() != Ok(&probed_identity) {
+            let primary = match current_identity {
+                Ok(_) => "Codex executable changed after version probe".to_string(),
+                Err(error) => error,
+            };
+            return Err(combine_cleanup_error(primary, remove_temp_dir(&cwd)));
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                let _ = fs::remove_dir_all(&cwd);
-                return Err(format!("cannot start Codex app-server: {error}"));
+                let primary = format!("cannot start Codex app-server: {error}");
+                return Err(combine_cleanup_error(primary, remove_temp_dir(&cwd)));
             }
         };
-        let input = child.stdin.take().ok_or("Codex stdin unavailable")?;
-        let output = child.stdout.take().ok_or("Codex stdout unavailable")?;
-        let error = child.stderr.take().ok_or("Codex stderr unavailable")?;
+        let (input, output, error) =
+            match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+                (Some(input), Some(output), Some(error)) => (input, output, error),
+                _ => {
+                    let cleanup = cleanup_unmanaged_child(&mut child, &cwd);
+                    return Err(combine_cleanup_error(
+                        "Codex process pipes unavailable".into(),
+                        cleanup,
+                    ));
+                }
+            };
+        if let Err(primary) = set_nonblocking(output.as_raw_fd(), "Codex stdout")
+            .and_then(|()| set_nonblocking(error.as_raw_fd(), "Codex stderr"))
+        {
+            drop(input);
+            drop(output);
+            drop(error);
+            let cleanup = cleanup_unmanaged_child(&mut child, &cwd);
+            return Err(combine_cleanup_error(primary, cleanup));
+        }
         let (sender, messages) = mpsc::sync_channel(PROTOCOL_QUEUE_CAPACITY);
+        let reader_shutdown = Arc::new(AtomicBool::new(false));
         let reader_failure = Arc::new(Mutex::new(None));
-        let stdout_reader = spawn_stdout_reader(output, sender, Arc::clone(&reader_failure));
+        let stdout_reader = spawn_stdout_reader(
+            output,
+            sender,
+            Arc::clone(&reader_failure),
+            Arc::clone(&reader_shutdown),
+        );
         let stderr_ring = Arc::new(Mutex::new(StderrRing::default()));
-        let stderr_reader = spawn_stderr_reader(error, Arc::clone(&stderr_ring));
+        let stderr_reader = spawn_stderr_reader(
+            error,
+            Arc::clone(&stderr_ring),
+            Arc::clone(&reader_shutdown),
+        );
         control_pid.store(child.id() as i32, Ordering::SeqCst);
         let mut process = Self {
             child: Some(child),
@@ -100,6 +143,7 @@ impl CodexProcess {
             messages: Some(messages),
             stdout_reader: Some(stdout_reader),
             stderr_reader: Some(stderr_reader),
+            reader_shutdown,
             reader_failure,
             _stderr_ring: stderr_ring,
             cwd: Some(cwd),
@@ -107,9 +151,9 @@ impl CodexProcess {
             pending_ids: HashSet::with_capacity(MAX_PENDING_IDS),
             control_pid,
         };
-        if let Err(error) = process.initialize(cancellation) {
-            process.shutdown();
-            return Err(error);
+        if let Err(primary) = process.initialize(cancellation) {
+            let cleanup = process.shutdown();
+            return Err(combine_cleanup_error(primary, cleanup));
         }
         Ok(process)
     }
@@ -592,32 +636,52 @@ impl CodexProcess {
     }
 
     fn protocol_failure<T>(&mut self, message: &str) -> Result<T, String> {
-        self.shutdown();
-        Err(message.to_string())
+        let cleanup = self.shutdown();
+        Err(combine_cleanup_error(message.to_string(), cleanup))
     }
 
     pub(crate) fn is_usable(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() && !self.reader_shutdown.load(Ordering::SeqCst)
     }
 
-    fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
         self.input.take();
+        self.reader_shutdown.store(true, Ordering::SeqCst);
         if let Some(child) = self.child.as_mut() {
-            terminate_child_group(child, SHUTDOWN_TIMEOUT);
+            match terminate_child_group(child, SHUTDOWN_TIMEOUT) {
+                Ok(()) => {
+                    self.child.take();
+                    self.control_pid.store(0, Ordering::SeqCst);
+                }
+                Err(error) => errors.push(error),
+            }
+        } else {
+            self.control_pid.store(0, Ordering::SeqCst);
         }
-        self.child.take();
-        self.control_pid.store(0, Ordering::SeqCst);
         self.messages.take();
-        if let Some(reader) = self.stdout_reader.take() {
-            let _ = reader.join();
+        if let Some(reader) = self.stdout_reader.take()
+            && reader.join().is_err()
+        {
+            errors.push("Codex stdout reader panicked".into());
         }
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = reader.join();
+        if let Some(reader) = self.stderr_reader.take()
+            && reader.join().is_err()
+        {
+            errors.push("Codex stderr reader panicked".into());
         }
-        if let Some(cwd) = self.cwd.take() {
-            let _ = fs::remove_dir_all(cwd);
+        if let Some(cwd) = self.cwd.as_ref() {
+            match remove_temp_dir(cwd) {
+                Ok(()) => self.cwd = None,
+                Err(error) => errors.push(error),
+            }
         }
         self.pending_ids.clear();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     #[cfg(test)]
@@ -637,7 +701,9 @@ impl CodexProcess {
 
 impl Drop for CodexProcess {
     fn drop(&mut self) {
-        self.shutdown();
+        // Destructors cannot report cleanup failures. Callers that need reporting use shutdown;
+        // this fallback is best effort for normal ownership teardown and unwinding.
+        let _ = self.shutdown();
     }
 }
 
@@ -697,27 +763,64 @@ fn spawn_stdout_reader(
     mut output: impl Read + Send + 'static,
     sender: SyncSender<Vec<u8>>,
     failure: Arc<Mutex<Option<String>>>,
+    shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        loop {
-            let line = match read_bounded_line(&mut output) {
-                Ok(Some(line)) => line,
-                Ok(None) => {
-                    set_reader_failure(&failure, "Codex app-server closed stdout");
+        let mut buffer = [0_u8; 8192];
+        let mut line = Vec::with_capacity(4096);
+        let mut drain_deadline = None;
+        'read: loop {
+            if shutdown.load(Ordering::SeqCst) {
+                let deadline =
+                    drain_deadline.get_or_insert_with(|| Instant::now() + READER_DRAIN_TIMEOUT);
+                if Instant::now() >= *deadline {
                     break;
+                }
+            }
+            match output.read(&mut buffer) {
+                Ok(0) => {
+                    if !shutdown.load(Ordering::SeqCst) {
+                        let message = if line.is_empty() {
+                            "Codex app-server closed stdout"
+                        } else {
+                            "Codex closed stdout mid-message"
+                        };
+                        set_reader_failure(&failure, message);
+                    }
+                    break;
+                }
+                Ok(count) => {
+                    for byte in &buffer[..count] {
+                        if *byte == b'\n' {
+                            let message = std::mem::replace(&mut line, Vec::with_capacity(4096));
+                            match sender.try_send(message) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    set_reader_failure(&failure, "Codex protocol queue overflow");
+                                    break 'read;
+                                }
+                                Err(TrySendError::Disconnected(_)) => break 'read,
+                            }
+                        } else {
+                            if line.len() == protocol::MAX_JSON_LINE_BYTES {
+                                set_reader_failure(&failure, "Codex protocol line exceeds 2 MiB");
+                                break 'read;
+                            }
+                            line.push(*byte);
+                        }
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(POLL_INTERVAL);
                 }
                 Err(error) => {
-                    set_reader_failure(&failure, &error);
+                    set_reader_failure(&failure, &format!("cannot read Codex output: {error}"));
                     break;
                 }
-            };
-            match sender.try_send(line) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    set_reader_failure(&failure, "Codex protocol queue overflow");
-                    break;
-                }
-                Err(TrySendError::Disconnected(_)) => break,
             }
         }
     })
@@ -733,16 +836,32 @@ fn set_reader_failure(failure: &Mutex<Option<String>>, message: &str) {
 fn spawn_stderr_reader(
     mut error: impl Read + Send + 'static,
     ring: Arc<Mutex<StderrRing>>,
+    shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        let mut drain_deadline = None;
         loop {
+            if shutdown.load(Ordering::SeqCst) {
+                let deadline =
+                    drain_deadline.get_or_insert_with(|| Instant::now() + READER_DRAIN_TIMEOUT);
+                if Instant::now() >= *deadline {
+                    break;
+                }
+            }
             match error.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => ring
                     .lock()
                     .expect("stderr ring lock")
                     .push(&buffer[..count]),
+                Err(read_error) if read_error.kind() == ErrorKind::Interrupted => continue,
+                Err(read_error) if read_error.kind() == ErrorKind::WouldBlock => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(POLL_INTERVAL);
+                }
                 Err(_) => break,
             }
         }
@@ -816,15 +935,59 @@ pub(crate) fn configured_executable() -> Result<PathBuf, String> {
 }
 
 fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
-    if path.components().count() > 1 {
-        return fs::canonicalize(path).map_err(|e| format!("cannot resolve Codex executable: {e}"));
+    let resolved = if path.components().count() > 1 {
+        fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve Codex executable: {error}"))?
+    } else {
+        let paths = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
+        let selected = std::env::split_paths(&paths)
+            .map(|base| base.join(path))
+            .find(|candidate| candidate.is_file())
+            .ok_or("Codex CLI not found; local solve remains available")?;
+        fs::canonicalize(selected)
+            .map_err(|error| format!("cannot resolve Codex executable: {error}"))?
+    };
+    trusted_executable_identity(&resolved)?;
+    Ok(resolved)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    owner: u32,
+    mode: u32,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("cannot inspect Codex executable: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("Codex executable must be a regular file".into());
     }
-    let paths = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
-    std::env::split_paths(&paths)
-        .map(|base| base.join(path))
-        .find(|candidate| candidate.is_file())
-        .and_then(|candidate| fs::canonicalize(candidate).ok())
-        .ok_or_else(|| "Codex CLI not found; local solve remains available".into())
+    let current_user = unsafe { libc::geteuid() };
+    if metadata.uid() != current_user && metadata.uid() != 0 {
+        return Err("Codex executable must be owned by the current user or root".into());
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err("Codex executable must not be group- or world-writable".into());
+    }
+    Ok(ExecutableIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        owner: metadata.uid(),
+        mode: metadata.mode(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
 }
 
 fn validate_version(executable: &Path, cancellation: &CancellationToken) -> Result<(), String> {
@@ -905,55 +1068,80 @@ fn bounded_version_capture(
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot query Codex version: {error}"))?;
-    let pid = child.id() as i32;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Codex version stdout unavailable")?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("Codex version stderr unavailable")?;
-    let buffers = Arc::new(Mutex::new(CaptureBuffers::default()));
-    let stdout_reader = spawn_capture_reader(stdout, Arc::clone(&buffers), true);
-    let stderr_reader = spawn_capture_reader(stderr, Arc::clone(&buffers), false);
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if cancellation.is_cancelled() {
-            terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err("Codex version probe cancelled".into());
+    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
+        (Some(stdout), Some(stderr)) => (stdout, stderr),
+        _ => {
+            let cleanup = terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
+            return Err(combine_cleanup_error(
+                "Codex version probe pipes unavailable".into(),
+                cleanup,
+            ));
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("cannot wait for Codex version: {error}"))?
-        {
-            break status;
+    };
+    if let Err(primary) = set_nonblocking(stdout.as_raw_fd(), "Codex version stdout")
+        .and_then(|()| set_nonblocking(stderr.as_raw_fd(), "Codex version stderr"))
+    {
+        drop(stdout);
+        drop(stderr);
+        let cleanup = terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
+        return Err(combine_cleanup_error(primary, cleanup));
+    }
+    let buffers = Arc::new(Mutex::new(CaptureBuffers::default()));
+    let reader_shutdown = Arc::new(AtomicBool::new(false));
+    let stdout_reader = spawn_capture_reader(
+        stdout,
+        Arc::clone(&buffers),
+        true,
+        Arc::clone(&reader_shutdown),
+    );
+    let stderr_reader = spawn_capture_reader(
+        stderr,
+        Arc::clone(&buffers),
+        false,
+        Arc::clone(&reader_shutdown),
+    );
+    let deadline = Instant::now() + timeout;
+    let outcome = loop {
+        if cancellation.is_cancelled() {
+            break Err("Codex version probe cancelled".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(error) => break Err(format!("cannot wait for Codex version: {error}")),
         }
         if Instant::now() >= deadline {
-            terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(format!(
+            break Err(format!(
                 "Codex version probe timed out after {}s",
                 timeout.as_secs_f64()
             ));
         }
         thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     };
-    if process_group_exists(pid) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
+
+    reader_shutdown.store(true, Ordering::SeqCst);
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = terminate_child_group(&mut child, SHUTDOWN_TIMEOUT) {
+        cleanup_errors.push(error);
     }
-    let _ = stdout_reader.join();
-    let _ = stderr_reader.join();
-    let mut buffers = Arc::try_unwrap(buffers)
-        .map_err(|_| "Codex version capture still shared")?
+    if stdout_reader.join().is_err() {
+        cleanup_errors.push("Codex version stdout reader panicked".into());
+    }
+    if stderr_reader.join().is_err() {
+        cleanup_errors.push("Codex version stderr reader panicked".into());
+    }
+    let buffers = Arc::try_unwrap(buffers)
+        .map_err(|_| "Codex version capture still shared".to_string())?
         .into_inner()
-        .map_err(|_| "Codex version capture lock poisoned")?;
-    let _ = std::mem::take(&mut buffers.stderr);
+        .map_err(|_| "Codex version capture lock poisoned".to_string())?;
+    if !cleanup_errors.is_empty() {
+        let cleanup = Err(cleanup_errors.join("; "));
+        return Err(match outcome {
+            Ok(_) => combine_cleanup_error("cannot clean up Codex version probe".into(), cleanup),
+            Err(primary) => combine_cleanup_error(primary, cleanup),
+        });
+    }
+    let status = outcome?;
     Ok(VersionCapture {
         status,
         stdout: buffers.stdout,
@@ -965,16 +1153,32 @@ fn spawn_capture_reader(
     mut reader: impl Read + Send + 'static,
     buffers: Arc<Mutex<CaptureBuffers>>,
     stdout: bool,
+    shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
+        let mut drain_deadline = None;
         loop {
+            if shutdown.load(Ordering::SeqCst) {
+                let deadline =
+                    drain_deadline.get_or_insert_with(|| Instant::now() + READER_DRAIN_TIMEOUT);
+                if Instant::now() >= *deadline {
+                    break;
+                }
+            }
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => buffers
                     .lock()
                     .expect("version capture lock")
                     .push(stdout, &chunk[..count]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(POLL_INTERVAL);
+                }
                 Err(_) => break,
             }
         }
@@ -992,35 +1196,156 @@ fn configure_process_group(command: &mut Command) {
     }
 }
 
-fn terminate_child_group(child: &mut Child, grace: Duration) {
-    let pid = child.id() as i32;
-    unsafe {
-        libc::kill(-pid, libc::SIGTERM);
+fn set_nonblocking(file_descriptor: i32, name: &str) -> Result<(), String> {
+    let flags = unsafe { libc::fcntl(file_descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(format!(
+            "cannot inspect {name} flags: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    let deadline = Instant::now() + grace;
-    let mut reaped = false;
+    if unsafe { libc::fcntl(file_descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(format!(
+            "cannot make {name} nonblocking: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn terminate_child_group(child: &mut Child, grace: Duration) -> Result<(), String> {
+    let pid = i32::try_from(child.id()).map_err(|_| "Codex child PID exceeds platform bound")?;
+    assert!(pid > 0);
+    let mut errors = Vec::new();
+    let mut reaped = match child.try_wait() {
+        Ok(status) => status.is_some(),
+        Err(error) => {
+            errors.push(format!("cannot poll Codex child: {error}"));
+            false
+        }
+    };
+    if let Err(error) = signal_process(-pid, libc::SIGTERM) {
+        errors.push(error);
+    }
+    if !reaped && let Err(error) = signal_process(pid, libc::SIGTERM) {
+        errors.push(error);
+    }
+
+    let term_deadline = Instant::now() + grace;
     loop {
         if !reaped {
-            reaped = child.try_wait().ok().flatten().is_some();
+            match child.try_wait() {
+                Ok(status) => reaped = status.is_some(),
+                Err(error) => {
+                    errors.push(format!("cannot poll Codex child: {error}"));
+                    break;
+                }
+            }
         }
-        if !process_group_exists(pid) || Instant::now() >= deadline {
+        if reaped && !process_group_exists(pid) {
             break;
         }
-        thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
-    }
-    if process_group_exists(pid) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
+        if Instant::now() >= term_deadline {
+            break;
         }
+        thread::sleep(POLL_INTERVAL.min(term_deadline.saturating_duration_since(Instant::now())));
+    }
+
+    if process_group_exists(pid)
+        && let Err(error) = signal_process(-pid, libc::SIGKILL)
+    {
+        errors.push(error);
+    }
+    if !reaped && let Err(error) = signal_process(pid, libc::SIGKILL) {
+        errors.push(error);
+    }
+    let hard_deadline = Instant::now() + KILL_REAP_TIMEOUT;
+    loop {
+        if !reaped {
+            match child.try_wait() {
+                Ok(status) => reaped = status.is_some(),
+                Err(error) => {
+                    errors.push(format!("cannot poll Codex child: {error}"));
+                    break;
+                }
+            }
+        }
+        if reaped && !process_group_exists(pid) {
+            break;
+        }
+        if Instant::now() >= hard_deadline {
+            break;
+        }
+        thread::sleep(POLL_INTERVAL.min(hard_deadline.saturating_duration_since(Instant::now())));
     }
     if !reaped {
-        let _ = child.wait();
+        errors.push(format!(
+            "Codex child {pid} was not reaped before the cleanup deadline"
+        ));
+    }
+    if process_group_exists(pid) {
+        errors.push(format!(
+            "Codex process group {pid} survived the cleanup deadline"
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn signal_process(target: i32, signal: i32) -> Result<(), String> {
+    let result = unsafe { libc::kill(target, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot signal Codex process target {target} with signal {signal}: {error}"
+        ))
     }
 }
 
 fn process_group_exists(pid: i32) -> bool {
     let result = unsafe { libc::kill(-pid, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn cleanup_unmanaged_child(child: &mut Child, cwd: &Path) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = terminate_child_group(child, SHUTDOWN_TIMEOUT) {
+        errors.push(error);
+    }
+    if let Err(error) = remove_temp_dir(cwd) {
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn combine_cleanup_error(primary: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => primary,
+        Err(error) => format!("{primary}; cleanup failed: {error}"),
+    }
+}
+
+fn remove_temp_dir(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot remove Codex temporary directory {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn empty_temp_dir() -> Result<PathBuf, String> {
@@ -1032,10 +1357,33 @@ fn empty_temp_dir() -> Result<PathBuf, String> {
         "interview-tutor-codex-{}-{nonce}",
         std::process::id()
     ));
-    fs::create_dir(&path).map_err(|e| format!("cannot create Codex temporary directory: {e}"))?;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+        .create(&path)
+        .map_err(|error| format!("cannot create Codex temporary directory: {error}"))?;
+    let permissions = fs::Permissions::from_mode(0o700);
+    if let Err(error) = fs::set_permissions(&path, permissions) {
+        let primary = format!("cannot secure Codex temporary directory: {error}");
+        return Err(combine_cleanup_error(primary, remove_temp_dir(&path)));
+    }
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let primary = format!("cannot verify Codex temporary directory: {error}");
+            return Err(combine_cleanup_error(primary, remove_temp_dir(&path)));
+        }
+    };
+    if !metadata.is_dir() || metadata.mode() & 0o777 != 0o700 {
+        return Err(combine_cleanup_error(
+            "Codex temporary directory is not a mode-0700 directory".into(),
+            remove_temp_dir(&path),
+        ));
+    }
     Ok(path)
 }
 
+#[cfg(test)]
 fn read_bounded_line(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
     let mut line = Vec::with_capacity(4096);
     let mut byte = [0_u8; 1];
@@ -1142,6 +1490,65 @@ mod tests {
         (environment, process)
     }
 
+    struct EscapedProcess(i32);
+
+    impl EscapedProcess {
+        fn read(path: &Path) -> Self {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                if let Ok(value) = fs::read_to_string(path) {
+                    return Self(value.parse().unwrap());
+                }
+                assert!(Instant::now() < deadline, "escaped PID was not recorded");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn pid(&self) -> i32 {
+            self.0
+        }
+
+        fn kill_and_verify(mut self) {
+            assert_eq!(unsafe { libc::kill(self.0, libc::SIGKILL) }, 0);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { libc::kill(self.0, 0) } == 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(unsafe { libc::kill(self.0, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            self.0 = 0;
+        }
+    }
+
+    impl Drop for EscapedProcess {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    struct UmaskGuard(libc::mode_t);
+
+    impl UmaskGuard {
+        fn set(mask: libc::mode_t) -> Self {
+            Self(unsafe { libc::umask(mask) })
+        }
+    }
+
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::umask(self.0);
+            }
+        }
+    }
+
     #[test]
     fn bounded_reader_rejects_oversize_and_eof() {
         assert_eq!(
@@ -1158,6 +1565,68 @@ mod tests {
         let names = allowed_environment_names();
         assert!(names.contains(&"HOME") && names.contains(&"CODEX_HOME"));
         assert!(!names.contains(&"OPENAI_API_KEY") && !names.contains(&"INTERVIEW_TUTOR_SENTINEL"));
+    }
+
+    #[test]
+    fn temp_directory_is_mode_0700_under_default_umask() {
+        let _lock = ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _umask = UmaskGuard::set(0o022);
+        let directory = empty_temp_dir().unwrap();
+        let metadata = fs::metadata(&directory).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn executable_trust_rejects_non_regular_and_writable_files() {
+        let directory = empty_temp_dir().unwrap();
+        let executable = directory.join("codex");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        for mode in [0o720, 0o702] {
+            fs::set_permissions(&executable, fs::Permissions::from_mode(mode)).unwrap();
+            let error = trusted_executable_identity(&executable).unwrap_err();
+            assert!(error.contains("group- or world-writable"), "{error}");
+        }
+        let error = trusted_executable_identity(&directory).unwrap_err();
+        assert!(error.contains("regular file"), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn executable_swap_after_version_probe_is_rejected_before_app_server_spawn() {
+        let directory = empty_temp_dir().unwrap();
+        let executable = directory.join("codex-swap");
+        let replacement = directory.join("codex-swap.replacement");
+        let launched = directory.join("app-server-launched");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  mv \"$0.replacement\" \"$0\"\n  echo 'codex-cli 0.146.0'\n  exit 0\nfi\nexit 91\n",
+        )
+        .unwrap();
+        fs::write(
+            &replacement,
+            format!(
+                "#!/bin/sh\necho launched > {}\nexit 92\n",
+                launched.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = CodexProcess::start_executable(
+            executable,
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .err()
+        .expect("executable swap must fail");
+        assert!(error.contains("changed after version probe"), "{error}");
+        assert!(!launched.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1248,6 +1717,17 @@ mod tests {
     }
 
     #[test]
+    fn escaped_version_descendant_retaining_pipes_does_not_block_reader_join() {
+        let environment = FakeEnvironment::new("escaped-version-pipes");
+        let started = Instant::now();
+        validate_version(&fake_executable(), &CancellationToken::new()).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let escaped = EscapedProcess::read(&environment.directory.join("escaped-version-pid"));
+        assert_eq!(unsafe { libc::kill(escaped.pid(), 0) }, 0);
+        escaped.kill_and_verify();
+    }
+
+    #[test]
     fn fake_app_server_handshake_effective_settings_deltas_and_unknown_notifications() {
         let (_environment, mut process) = fake_process("normal");
         assert!(process.account_ready().unwrap());
@@ -1264,6 +1744,40 @@ mod tests {
         assert!(response.contains("What invariant holds?"));
         drop(process);
         assert!(!cwd.exists());
+    }
+
+    #[test]
+    fn escaped_session_descendant_retaining_pipes_does_not_block_shutdown() {
+        let (environment, mut process) = fake_process("escaped-session-pipes");
+        process.account_ready().unwrap();
+        let cwd = process.cwd_path();
+        let escaped = EscapedProcess::read(&environment.directory.join("escaped-session-pid"));
+        assert_eq!(unsafe { libc::kill(escaped.pid(), 0) }, 0);
+        let started = Instant::now();
+        process.shutdown().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!cwd.exists());
+        assert_eq!(unsafe { libc::kill(escaped.pid(), 0) }, 0);
+        escaped.kill_and_verify();
+    }
+
+    #[test]
+    fn explicit_shutdown_reports_temp_cleanup_failure_without_leaking_fixture_artifacts() {
+        let (environment, mut process) = fake_process("normal");
+        let actual_cwd = process.cwd_path();
+        let not_a_directory = environment.directory.join("cleanup-failure-file");
+        fs::write(&not_a_directory, "fixture").unwrap();
+        process.cwd = Some(not_a_directory.clone());
+        let error = process.shutdown().unwrap_err();
+        assert!(
+            error.contains("cannot remove Codex temporary directory"),
+            "{error}"
+        );
+        assert!(not_a_directory.is_file());
+        fs::remove_file(not_a_directory).unwrap();
+        process.cwd = Some(actual_cwd.clone());
+        process.shutdown().unwrap();
+        assert!(!actual_cwd.exists());
     }
 
     #[test]
@@ -1537,7 +2051,12 @@ mod tests {
         let input = b"{}\n".repeat(PROTOCOL_QUEUE_CAPACITY + 1);
         let (sender, receiver) = mpsc::sync_channel(PROTOCOL_QUEUE_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
-        let reader = spawn_stdout_reader(std::io::Cursor::new(input), sender, Arc::clone(&failure));
+        let reader = spawn_stdout_reader(
+            std::io::Cursor::new(input),
+            sender,
+            Arc::clone(&failure),
+            Arc::new(AtomicBool::new(false)),
+        );
         reader.join().unwrap();
         assert_eq!(
             failure.lock().expect("failure lock").as_deref(),

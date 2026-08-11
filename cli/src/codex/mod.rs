@@ -197,7 +197,13 @@ impl CodexSession {
         if self.process.as_ref().is_some_and(CodexProcess::is_usable) {
             return Ok(());
         }
-        self.process.take();
+        if let Some(mut process) = self.process.take()
+            && let Err(error) = process.shutdown()
+        {
+            return Err(format!(
+                "cannot restart Codex session; cleanup failed: {error}"
+            ));
+        }
         if !self.restart_remaining {
             return Err("Codex session restart limit reached".into());
         }
@@ -219,7 +225,6 @@ impl CodexSession {
             .as_ref()
             .is_some_and(|process| !process.is_usable())
         {
-            self.process.take();
             self.interviewer_thread.clear();
             self.hinter_thread.clear();
         }
@@ -239,10 +244,30 @@ fn establish(
 ) -> Result<(CodexProcess, String, String), String> {
     let mut process =
         CodexProcess::start_executable(executable.to_path_buf(), control_pid, cancellation)?;
-    if !process.account_ready_with_cancellation(cancellation)? {
-        return Err("Codex authentication required; run `codex login`".into());
+    let account_ready = match process.account_ready_with_cancellation(cancellation) {
+        Ok(account_ready) => account_ready,
+        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+    };
+    if !account_ready {
+        return Err(shutdown_after_failure(
+            &mut process,
+            "Codex authentication required; run `codex login`".into(),
+        ));
     }
-    let interviewer_thread = process.start_thread_with_cancellation(cancellation)?;
-    let hinter_thread = process.start_thread_with_cancellation(cancellation)?;
+    let interviewer_thread = match process.start_thread_with_cancellation(cancellation) {
+        Ok(thread) => thread,
+        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+    };
+    let hinter_thread = match process.start_thread_with_cancellation(cancellation) {
+        Ok(thread) => thread,
+        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+    };
     Ok((process, interviewer_thread, hinter_thread))
+}
+
+fn shutdown_after_failure(process: &mut CodexProcess, primary: String) -> String {
+    match process.shutdown() {
+        Ok(()) => primary,
+        Err(cleanup) => format!("{primary}; cleanup failed: {cleanup}"),
+    }
 }

@@ -375,14 +375,16 @@ fn solve_interview(state: &AppState) -> Paragraph<'static> {
             lines.push(Line::from(
                 "in-memory transcript, and your question may be sent to OpenAI.",
             ));
+            lines.push(Line::from("Configured executable is"));
+            lines.push(Line::from("user-selected and trusted."));
+            lines.push(Line::from("Version checks compatibility,"));
+            lines.push(Line::from("not provenance."));
             lines.push(Line::from(
-                "Codex may also read local config, MCP, or other sandbox-readable paths.",
+                "Codex may read local config, MCP, or sandbox-readable paths.",
             ));
+            lines.push(Line::from("Dedicated profile/home is safer."));
             lines.push(Line::from(
-                "Use a dedicated Codex profile/home for stronger isolation.",
-            ));
-            lines.push(Line::from(
-                "Your Codex account controls apply. y/Enter accept · n/Esc decline",
+                "Account controls apply. y/Enter accept · n/Esc decline",
             ));
         }
         crate::app::model::CodexStatus::AuthRequired => lines.push(Line::from(
@@ -820,8 +822,11 @@ mod tests {
         state.codex.status = crate::app::model::CodexStatus::Disclosure;
         let disclosure = rendered(&state, 120, 40);
         assert!(disclosure.contains("Privacy disclosure"));
-        assert!(disclosure.contains("Codex may also read local"));
-        assert!(disclosure.contains("Use a dedicated Codex"));
+        assert!(disclosure.contains("Configured executable is"));
+        assert!(disclosure.contains("user-selected and trusted"));
+        assert!(disclosure.contains("not provenance"));
+        assert!(disclosure.contains("Codex may read local"));
+        assert!(disclosure.contains("Dedicated profile/home"));
         assert!(rendered(&state, 80, 24).contains("Privacy disclosure"));
         assert!(rendered(&state, 59, 19).contains("Terminal too small"));
         state.codex.status = crate::app::model::CodexStatus::Feedback;
