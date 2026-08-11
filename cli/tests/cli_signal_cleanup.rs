@@ -94,6 +94,7 @@ fn cli_signals_cancel_once_cleanup_group_and_use_conventional_status() {
         let elapsed = started.elapsed();
 
         assert_eq!(output.status.code(), Some(expected_status));
+        eprintln!("signal {signal} cleanup: {elapsed:?}");
         assert!(elapsed < Duration::from_secs(2), "cleanup took {elapsed:?}");
         let deadline = Instant::now() + Duration::from_millis(500);
         while Path::new(&format!("/proc/{descendant}")).exists() && Instant::now() < deadline {

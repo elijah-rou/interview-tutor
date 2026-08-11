@@ -383,6 +383,7 @@ fn escaped_session_pipe_cannot_hang_reader_join() {
     let result = execute(&fixture, "escaped-descendant");
     let elapsed = started.elapsed();
     assert_eq!(result.termination, Termination::Exited(0));
+    eprintln!("escaped-session cleanup: {elapsed:?}");
     assert!(
         elapsed < Duration::from_millis(500),
         "cleanup took {elapsed:?}"
