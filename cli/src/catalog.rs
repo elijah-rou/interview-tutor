@@ -226,12 +226,11 @@ pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
                 problem.slug
             ));
         }
-        if problem.statement_markdown.chars().count() > MAX_STATEMENT_LENGTH {
-            return Err(format!(
-                "problem statement exceeds {MAX_STATEMENT_LENGTH} characters: {}",
-                problem.slug
-            ));
-        }
+        validate_non_blank(
+            &problem.statement_markdown,
+            "problem statement",
+            MAX_STATEMENT_LENGTH,
+        )?;
         if problem.leetcode_id.is_some_and(|id| id <= 0) {
             return Err(format!("invalid LeetCode id for problem: {}", problem.slug));
         }

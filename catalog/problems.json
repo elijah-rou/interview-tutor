@@ -10,7 +10,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/3sum/",
       "neetcode_url": "https://neetcode.io/problems/three-integer-sum/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a list of integers, return every distinct three-value combination whose sum is zero. Combination and result ordering are unrestricted.\n\n## Example\n\nInput `[-1, 0, 1, 2, -1, -4]` returns the combinations `[-1, -1, 2]` and `[-1, 0, 1]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -32,7 +32,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/alien-dictionary/",
       "neetcode_url": "https://neetcode.io/problems/foreign-dictionary/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven words already sorted according to an unknown alphabet, return a character ordering consistent with that word order.\n\n## Example\n\nInput `[\"wrt\", \"wrf\", \"er\", \"ett\", \"rftt\"]` returns `\"wertf\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -54,7 +54,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/best-time-to-buy-and-sell-stock/",
       "neetcode_url": "https://neetcode.io/problems/buy-and-sell-crypto/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven prices in time order, return the greatest profit from buying once and selling once later. Return zero when no profitable pair exists.\n\n## Example\n\nInput `[7, 1, 5, 3, 6, 4]` returns `5`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -76,7 +76,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/binary-tree-level-order-traversal/",
       "neetcode_url": "https://neetcode.io/problems/level-order-traversal-of-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-tree root, return node values grouped by depth from the root, with each level ordered from left to right.\n\n## Example\n\nThe tree `[3, 9, 20, null, null, 15, 7]` returns `[[3], [9, 20], [15, 7]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -98,7 +98,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/binary-tree-maximum-path-sum/",
       "neetcode_url": "https://neetcode.io/problems/binary-tree-maximum-path-sum/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a nonempty binary tree, return the largest sum along a connected path of nodes. The path may start and end at any nodes.\n\n## Example\n\nThe tree `[-10, 9, 20, null, null, 15, 7]` returns `42`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -120,7 +120,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/climbing-stairs/",
       "neetcode_url": "https://neetcode.io/problems/climbing-stairs/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a stair count, return the number of ways to reach the top when each move climbs one or two stairs.\n\n## Example\n\nInput `5` returns `8`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -142,7 +142,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/clone-graph/",
       "neetcode_url": "https://neetcode.io/problems/clone-graph/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a node in a connected undirected graph, return a structurally equivalent deep copy. No node in the result may reuse an input node.\n\n## Example\n\nA four-node cycle with adjacency `[[2,4], [1,3], [2,4], [1,3]]` returns an independent graph with the same adjacency.",
       "test_revision": 1,
       "adapters": [
         {
@@ -164,7 +164,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/coin-change/",
       "neetcode_url": "https://neetcode.io/problems/coin-change/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven coin denominations and a target amount, return the fewest coins that total the amount, or `-1` when no combination does.\n\n## Example\n\nCoins `[1, 2, 5]` and amount `11` return `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -186,7 +186,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/combination-sum/",
       "neetcode_url": "https://neetcode.io/problems/combination-target-sum/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven candidate integers and a target, return all combinations that sum to the target. A candidate may be selected repeatedly; combination ordering is unrestricted.\n\n## Example\n\nCandidates `[2, 3, 6, 7]` and target `7` return `[2, 2, 3]` and `[7]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -208,7 +208,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/",
       "neetcode_url": "https://neetcode.io/problems/binary-tree-from-preorder-and-inorder-traversal/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven preorder and inorder value traversals of one binary tree, reconstruct and return its root.\n\n## Example\n\nPreorder `[3, 9, 20, 15, 7]` and inorder `[9, 3, 15, 20, 7]` produce tree `[3, 9, 20, null, null, 15, 7]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -230,7 +230,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/container-with-most-water/",
       "neetcode_url": "https://neetcode.io/problems/max-water-container/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven vertical-line heights in index order, return the maximum area held between two lines and the baseline.\n\n## Example\n\nInput `[1, 8, 6, 2, 5, 4, 8, 3, 7]` returns `49`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -252,7 +252,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/contains-duplicate/",
       "neetcode_url": "https://neetcode.io/problems/duplicate-integer/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a list of integers, return whether any value occurs more than once.\n\n## Example\n\nInput `[1, 2, 3, 1]` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -274,7 +274,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/counting-bits/",
       "neetcode_url": "https://neetcode.io/problems/counting-bits/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a nonnegative integer `n`, return the number of set bits for every integer from `0` through `n`.\n\n## Example\n\nInput `5` returns `[0, 1, 1, 2, 1, 2]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -296,7 +296,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/course-schedule/",
       "neetcode_url": "https://neetcode.io/problems/course-schedule/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a course count and directed prerequisite pairs `[course, prerequisite]`, return whether every course can be completed.\n\n## Example\n\nCourse count `2` with prerequisites `[[1, 0]]` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -318,7 +318,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/decode-ways/",
       "neetcode_url": "https://neetcode.io/problems/decode-ways/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string of decimal digits, return the number of ways it can be decoded using one-digit and valid two-digit letter codes.\n\n## Example\n\nInput `\"226\"` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -340,7 +340,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/design-add-and-search-words-data-structure/",
       "neetcode_url": "https://neetcode.io/problems/design-word-search-data-structure/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nImplement a word dictionary with `addWord(word)` and `search(pattern)`. In a search pattern, `.` matches any one character.\n\n## Example\n\nAfter adding `\"bad\"` and `\"dad\"`, searching `\"pad\"` returns `false` and searching `\".ad\"` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -362,7 +362,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/encode-and-decode-strings/",
       "neetcode_url": "https://neetcode.io/problems/string-encode-and-decode/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nImplement `encode(strings)` to return one string and `decode(encoded)` to recover the original string list. Only round-trip behavior is prescribed; any encoding format is valid.\n\n## Example\n\nEncoding then decoding `[\"lint\", \"code\", \"\", \"a#b\"]` returns that same list.",
       "test_revision": 1,
       "adapters": [
         {
@@ -384,7 +384,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/find-median-from-data-stream/",
       "neetcode_url": "https://neetcode.io/problems/find-median-in-a-data-stream/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nImplement a median tracker. `addNum(value)` records a number and `findMedian()` returns the median of all recorded values.\n\n## Example\n\nAfter adding `1` and `2`, the median is `1.5`; after adding `3`, it is `2.0`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -406,7 +406,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/find-minimum-in-rotated-sorted-array/",
       "neetcode_url": "https://neetcode.io/problems/find-minimum-in-rotated-sorted-array/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a rotated sorted integer list, return its minimum value.\n\n## Example\n\nInput `[3, 4, 5, 1, 2]` returns `1`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -428,7 +428,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/graph-valid-tree/",
       "neetcode_url": "https://neetcode.io/problems/valid-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a node count and undirected edges between nodes numbered from zero, return whether they form one tree.\n\n## Example\n\nNode count `5` and edges `[[0, 1], [0, 2], [0, 3], [1, 4]]` return `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -450,7 +450,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/group-anagrams/",
       "neetcode_url": "https://neetcode.io/problems/anagram-groups/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven strings, group together strings made from the same character counts. Group and member ordering are unrestricted.\n\n## Example\n\nInput `[\"eat\", \"tea\", \"tan\", \"ate\", \"nat\", \"bat\"]` groups as `[\"bat\"]`, `[\"nat\", \"tan\"]`, and `[\"ate\", \"eat\", \"tea\"]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -472,7 +472,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/house-robber/",
       "neetcode_url": "https://neetcode.io/problems/house-robber/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven values at houses in a line, return the largest sum selectable without choosing adjacent houses.\n\n## Example\n\nInput `[1, 2, 3, 1]` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -494,7 +494,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/house-robber-ii/",
       "neetcode_url": "https://neetcode.io/problems/house-robber-ii/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven values at houses arranged in a circle, return the largest sum selectable without choosing neighboring houses, including the first and last together.\n\n## Example\n\nInput `[2, 3, 2]` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -516,7 +516,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/implement-trie-prefix-tree/",
       "neetcode_url": "https://neetcode.io/problems/implement-prefix-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nImplement a trie with `insert(word)`, exact `search(word)`, and `startsWith(prefix)` operations.\n\n## Example\n\nAfter inserting `\"apple\"`, `search(\"apple\")` is `true`, `search(\"app\")` is `false`, and `startsWith(\"app\")` is `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -538,7 +538,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/insert-interval/",
       "neetcode_url": "https://neetcode.io/problems/insert-new-interval/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven nonoverlapping intervals and one new interval, insert it and return the merged interval sequence in ascending position order.\n\n## Example\n\nIntervals `[[1, 3], [6, 9]]` with new interval `[2, 5]` return `[[1, 5], [6, 9]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -560,7 +560,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/invert-binary-tree/",
       "neetcode_url": "https://neetcode.io/problems/invert-a-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-tree root, swap left and right children throughout the tree and return the resulting root.\n\n## Example\n\nTree `[4, 2, 7, 1, 3, 6, 9]` becomes `[4, 7, 2, 9, 6, 3, 1]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -582,7 +582,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/jump-game/",
       "neetcode_url": "https://neetcode.io/problems/jump-game/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven maximum jump lengths at successive positions, return whether the final position is reachable from the first.\n\n## Example\n\nInput `[2, 3, 1, 1, 4]` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -604,7 +604,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/kth-smallest-element-in-a-bst/",
       "neetcode_url": "https://neetcode.io/problems/kth-smallest-integer-in-bst/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-search-tree root and one-based rank `k`, return the value with that rank in ascending value order.\n\n## Example\n\nTree `[3, 1, 4, null, 2]` with `k = 1` returns `1`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -626,7 +626,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/linked-list-cycle/",
       "neetcode_url": "https://neetcode.io/problems/linked-list-cycle-detection/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a linked-list head, return whether repeatedly following `next` reaches a previously visited node.\n\n## Example\n\nFor `[3, 2, 0, -4]` with the tail linked back to the node holding `2`, return `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -648,7 +648,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-common-subsequence/",
       "neetcode_url": "https://neetcode.io/problems/longest-common-subsequence/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven two strings, return the length of their longest common subsequence; selected characters retain order but need not be adjacent.\n\n## Example\n\nInputs `\"abcde\"` and `\"ace\"` return `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -670,7 +670,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-consecutive-sequence/",
       "neetcode_url": "https://neetcode.io/problems/longest-consecutive-sequence/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven integers in arbitrary order, return the length of the longest run of consecutive values.\n\n## Example\n\nInput `[100, 4, 200, 1, 3, 2]` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -692,7 +692,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-increasing-subsequence/",
       "neetcode_url": "https://neetcode.io/problems/longest-increasing-subsequence/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list, return the length of its longest strictly increasing subsequence.\n\n## Example\n\nInput `[10, 9, 2, 5, 3, 7, 101, 18]` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -714,7 +714,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-palindromic-substring/",
       "neetcode_url": "https://neetcode.io/problems/longest-palindromic-substring/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string, return a longest contiguous substring that reads the same forward and backward.\n\n## Example\n\nInput `\"cbbd\"` returns `\"bb\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -736,7 +736,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-repeating-character-replacement/",
       "neetcode_url": "https://neetcode.io/problems/longest-repeating-substring-with-replacement/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string and replacement budget `k`, return the greatest substring length that can be made one repeated character using at most `k` replacements.\n\n## Example\n\nString `\"AABABBA\"` with `k = 1` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -758,7 +758,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/longest-substring-without-repeating-characters/",
       "neetcode_url": "https://neetcode.io/problems/longest-substring-without-duplicates/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string, return the length of its longest contiguous substring containing no repeated character.\n\n## Example\n\nInput `\"abcabcbb\"` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -780,7 +780,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/lowest-common-ancestor-of-a-binary-search-tree/",
       "neetcode_url": "https://neetcode.io/problems/lowest-common-ancestor-in-binary-search-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-search-tree root and two nodes in that tree, return their lowest common ancestor node.\n\n## Example\n\nIn tree `[6, 2, 8, 0, 4, 7, 9, null, null, 3, 5]`, nodes `2` and `8` return the root node `6`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -802,7 +802,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/maximum-depth-of-binary-tree/",
       "neetcode_url": "https://neetcode.io/problems/depth-of-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-tree root, return the number of nodes on the longest root-to-leaf path.\n\n## Example\n\nTree `[3, 9, 20, null, null, 15, 7]` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -824,7 +824,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/maximum-product-subarray/",
       "neetcode_url": "https://neetcode.io/problems/maximum-product-subarray/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list, return the largest product of a nonempty contiguous subarray.\n\n## Example\n\nInput `[2, 3, -2, 4]` returns `6`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -846,7 +846,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/maximum-subarray/",
       "neetcode_url": "https://neetcode.io/problems/maximum-subarray/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list, return the largest sum of a nonempty contiguous subarray.\n\n## Example\n\nInput `[-2, 1, -3, 4, -1, 2, 1, -5, 4]` returns `6`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -868,7 +868,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/meeting-rooms/",
       "neetcode_url": "https://neetcode.io/problems/meeting-schedule/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return whether one attendee can attend all meetings without overlap.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `false`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -890,7 +890,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/meeting-rooms-ii/",
       "neetcode_url": "https://neetcode.io/problems/meeting-schedule-ii/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return the minimum number of rooms needed to hold them.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -912,7 +912,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/merge-intervals/",
       "neetcode_url": "https://neetcode.io/problems/merge-intervals/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven intervals, merge overlaps and return the resulting intervals in ascending position order.\n\n## Example\n\nInput `[[1, 3], [2, 6], [8, 10], [15, 18]]` returns `[[1, 6], [8, 10], [15, 18]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -934,7 +934,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/merge-k-sorted-lists/",
       "neetcode_url": "https://neetcode.io/problems/merge-k-sorted-linked-lists/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a list of sorted linked-list heads, merge their values into one sorted linked list and return its head.\n\n## Example\n\nLists `[1, 4, 5]`, `[1, 3, 4]`, and `[2, 6]` return `[1, 1, 2, 3, 4, 4, 5, 6]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -956,7 +956,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/merge-two-sorted-lists/",
       "neetcode_url": "https://neetcode.io/problems/merge-two-sorted-linked-lists/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven two sorted linked-list heads, merge their values into one sorted linked list and return its head.\n\n## Example\n\nLists `[1, 2, 4]` and `[1, 3, 4]` return `[1, 1, 2, 3, 4, 4]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -978,7 +978,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/minimum-window-substring/",
       "neetcode_url": "https://neetcode.io/problems/minimum-window-with-characters/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven strings `source` and `target`, return the shortest source substring containing all target characters with their multiplicities, or an empty string if none exists.\n\n## Example\n\nSource `\"ADOBECODEBANC\"` and target `\"ABC\"` return `\"BANC\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1000,7 +1000,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/missing-number/",
       "neetcode_url": "https://neetcode.io/problems/missing-number/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven distinct integers drawn from `0` through the list length with one value absent, return the absent value.\n\n## Example\n\nInput `[3, 0, 1]` returns `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1022,7 +1022,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/non-overlapping-intervals/",
       "neetcode_url": "https://neetcode.io/problems/non-overlapping-intervals/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven intervals, return the minimum number that must be removed so the remainder do not overlap.\n\n## Example\n\nInput `[[1, 2], [2, 3], [3, 4], [1, 3]]` returns `1`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1044,7 +1044,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/number-of-1-bits/",
       "neetcode_url": "https://neetcode.io/problems/number-of-one-bits/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a nonnegative integer, return how many bits are set in its binary representation.\n\n## Example\n\nInput `11` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1066,7 +1066,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/number-of-connected-components-in-an-undirected-graph/",
       "neetcode_url": "https://neetcode.io/problems/count-connected-components/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a node count and undirected edges between nodes numbered from zero, return the number of connected components.\n\n## Example\n\nNode count `5` with edges `[[0, 1], [1, 2], [3, 4]]` returns `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1088,7 +1088,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/number-of-islands/",
       "neetcode_url": "https://neetcode.io/problems/count-number-of-islands/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a rectangular grid of `\"1\"` land and `\"0\"` water cells, return the number of land components connected vertically or horizontally.\n\n## Example\n\nGrid `[[\"1\",\"1\",\"0\"], [\"1\",\"0\",\"0\"], [\"0\",\"0\",\"1\"]]` returns `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1110,7 +1110,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/pacific-atlantic-water-flow/",
       "neetcode_url": "https://neetcode.io/problems/pacific-atlantic-water-flow/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a height grid, return coordinates from which water can reach both the top-or-left boundary and the bottom-or-right boundary by moving to an equal or lower neighbor. Coordinate ordering is unrestricted.\n\n## Example\n\nFor heights `[[1,2,2,3,5], [3,2,3,4,4], [2,4,5,3,1], [6,7,1,4,5], [5,1,1,2,4]]`, valid coordinates include `[0,4]`, `[2,2]`, and `[4,0]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1132,7 +1132,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/palindromic-substrings/",
       "neetcode_url": "https://neetcode.io/problems/palindromic-substrings/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string, return the number of contiguous substrings that read the same forward and backward. Count equal text at different positions separately.\n\n## Example\n\nInput `\"aaa\"` returns `6`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1154,7 +1154,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/product-of-array-except-self/",
       "neetcode_url": "https://neetcode.io/problems/products-of-array-discluding-self/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list, return a list where each position contains the product of every input value except the value at that position.\n\n## Example\n\nInput `[1, 2, 3, 4]` returns `[24, 12, 8, 6]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1176,7 +1176,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/remove-nth-node-from-end-of-list/",
       "neetcode_url": "https://neetcode.io/problems/remove-node-from-end-of-linked-list/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a linked-list head and one-based position `n` from the tail, remove that node and return the resulting head.\n\n## Example\n\nList `[1, 2, 3, 4, 5]` with `n = 2` returns `[1, 2, 3, 5]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1198,7 +1198,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/reorder-list/",
       "neetcode_url": "https://neetcode.io/problems/reorder-linked-list/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a linked-list head, mutate it in place by alternating nodes from the front and back. Return no value.\n\n## Example\n\nList `[1, 2, 3, 4]` is mutated to `[1, 4, 2, 3]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1220,7 +1220,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/reverse-bits/",
       "neetcode_url": "https://neetcode.io/problems/reverse-bits/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a 32-bit unsigned integer, return the integer represented by its bits in reverse order.\n\n## Example\n\nInput `43261596` returns `964176192`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1242,7 +1242,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/reverse-linked-list/",
       "neetcode_url": "https://neetcode.io/problems/reverse-a-linked-list/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a linked-list head, reverse its links and return the new head.\n\n## Example\n\nList `[1, 2, 3, 4, 5]` returns `[5, 4, 3, 2, 1]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1264,7 +1264,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/rotate-image/",
       "neetcode_url": "https://neetcode.io/problems/rotate-matrix/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a square matrix, rotate it 90 degrees clockwise in place and return no value.\n\n## Example\n\nMatrix `[[1,2,3], [4,5,6], [7,8,9]]` becomes `[[7,4,1], [8,5,2], [9,6,3]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1286,7 +1286,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/same-tree/",
       "neetcode_url": "https://neetcode.io/problems/same-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven two binary-tree roots, return whether both trees have the same shape and equal values at corresponding nodes.\n\n## Example\n\nTrees `[1, 2, 3]` and `[1, 2, 3]` return `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1308,7 +1308,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/search-in-rotated-sorted-array/",
       "neetcode_url": "https://neetcode.io/problems/find-target-in-rotated-sorted-array/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a rotated sorted integer list and a target, return the target index or `-1` when absent.\n\n## Example\n\nList `[4, 5, 6, 7, 0, 1, 2]` with target `0` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1330,7 +1330,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/serialize-and-deserialize-binary-tree/",
       "neetcode_url": "https://neetcode.io/problems/serialize-and-deserialize-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nImplement `serialize(root)` to return a string and `deserialize(data)` to reconstruct the tree. Only round-trip tree structure and values are prescribed; any encoding format is valid.\n\n## Example\n\nSerializing then deserializing tree `[1, 2, 3, null, null, 4, 5]` returns an equivalent tree.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1352,7 +1352,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/set-matrix-zeroes/",
       "neetcode_url": "https://neetcode.io/problems/set-zeroes-in-matrix/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a matrix, mutate it in place so every row and column containing an input zero becomes all zeroes. Return no value.\n\n## Example\n\nMatrix `[[1,1,1], [1,0,1], [1,1,1]]` becomes `[[1,0,1], [0,0,0], [1,0,1]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1374,7 +1374,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/spiral-matrix/",
       "neetcode_url": "https://neetcode.io/problems/spiral-matrix/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a matrix, return its values in clockwise spiral order starting at the top-left corner.\n\n## Example\n\nInput `[[1,2,3], [4,5,6], [7,8,9]]` returns `[1,2,3,6,9,8,7,4,5]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1396,7 +1396,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/subtree-of-another-tree/",
       "neetcode_url": "https://neetcode.io/problems/subtree-of-a-binary-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven roots of two binary trees, return whether the second tree occurs in the first with identical shape and values.\n\n## Example\n\nTree `[3, 4, 5, 1, 2]` and candidate `[4, 1, 2]` return `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1418,7 +1418,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/sum-of-two-integers/",
       "neetcode_url": "https://neetcode.io/problems/sum-of-two-integers/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven two integers, return their sum without using the language addition or subtraction operators.\n\n## Example\n\nInputs `2` and `3` return `5`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1440,7 +1440,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/top-k-frequent-elements/",
       "neetcode_url": "https://neetcode.io/problems/top-k-elements-in-list/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list and `k`, return `k` values with the greatest occurrence counts. Any valid ordering is accepted.\n\n## Example\n\nList `[1, 1, 1, 2, 2, 3]` with `k = 2` returns values `1` and `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1462,7 +1462,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/two-sum/",
       "neetcode_url": "https://neetcode.io/problems/two-integer-sum/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven an integer list and target, return two distinct valid indices whose values sum to the target. Index ordering is unrestricted.\n\n## Example\n\nList `[2, 7, 11, 15]` with target `9` returns indices `0` and `1`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1484,7 +1484,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/unique-paths/",
       "neetcode_url": "https://neetcode.io/problems/count-paths/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven grid dimensions `rows` and `columns`, return the number of paths from the top-left to bottom-right when each move goes right or down.\n\n## Example\n\nDimensions `3` by `7` return `28`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1506,7 +1506,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/valid-anagram/",
       "neetcode_url": "https://neetcode.io/problems/is-anagram/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven two strings, return whether they contain exactly the same characters with the same counts.\n\n## Example\n\nInputs `\"anagram\"` and `\"nagaram\"` return `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1528,7 +1528,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/valid-palindrome/",
       "neetcode_url": "https://neetcode.io/problems/is-palindrome/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string, ignore non-alphanumeric characters and letter case, then return whether the remaining characters form a palindrome.\n\n## Example\n\nInput `\"A man, a plan, a canal: Panama\"` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1550,7 +1550,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/valid-parentheses/",
       "neetcode_url": "https://neetcode.io/problems/validate-parentheses/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string of bracket characters, return whether every opening bracket is closed by the matching type in properly nested order.\n\n## Example\n\nInput `\"()[]{}\"` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1572,7 +1572,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/validate-binary-search-tree/",
       "neetcode_url": "https://neetcode.io/problems/valid-binary-search-tree/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a binary-tree root, return whether every node obeys strict binary-search-tree ordering throughout its subtrees.\n\n## Example\n\nTree `[2, 1, 3]` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1594,7 +1594,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/word-break/",
       "neetcode_url": "https://neetcode.io/problems/word-break/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a string and dictionary of words, return whether the string can be split into a sequence of dictionary entries.\n\n## Example\n\nString `\"leetcode\"` with dictionary `[\"leet\", \"code\"]` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1616,7 +1616,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/word-search/",
       "neetcode_url": "https://neetcode.io/problems/search-for-word/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a character grid and a word, return whether the word can be formed by vertically or horizontally adjacent cells without reusing a cell.\n\n## Example\n\nThe checked-in grid containing rows `\"ABCE\"`, `\"SFCS\"`, and `\"ADEE\"` returns `true` for `\"ABCCED\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1638,7 +1638,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/word-search-ii/",
       "neetcode_url": "https://neetcode.io/problems/search-for-word-ii/question",
-      "statement_markdown": "",
+      "statement_markdown": "## Task\n\nGiven a character grid and candidate words, return every candidate that can be formed by vertically or horizontally adjacent cells without reusing a cell. Result ordering is unrestricted.\n\n## Example\n\nFor the checked-in four-by-four grid and words `[\"oath\", \"pea\", \"eat\", \"rain\"]`, return `\"eat\"` and `\"oath\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1652,5 +1652,5 @@
       ]
     }
   ],
-  "catalog_revision": 1
+  "catalog_revision": 2
 }
