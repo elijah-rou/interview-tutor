@@ -32,7 +32,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/alien-dictionary/",
       "neetcode_url": "https://neetcode.io/problems/foreign-dictionary/question",
-      "statement_markdown": "## Task\n\nGiven words already sorted according to an unknown alphabet, return a character ordering consistent with that word order.\n\n## Example\n\nInput `[\"wrt\", \"wrf\", \"er\", \"ett\", \"rftt\"]` returns `\"wertf\"`.",
+      "statement_markdown": "## Task\n\nGiven words already sorted according to an unknown alphabet, return an ordering that contains every distinct input character exactly once and is consistent with the word order. Return an empty string if no such ordering exists; if several orderings are valid, any one is accepted.\n\n## Example\n\nInput `[\"wrt\", \"wrf\", \"er\", \"ett\", \"rftt\"]` returns `\"wertf\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -54,7 +54,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/best-time-to-buy-and-sell-stock/",
       "neetcode_url": "https://neetcode.io/problems/buy-and-sell-crypto/question",
-      "statement_markdown": "## Task\n\nGiven prices in time order, return the greatest profit from buying once and selling once later. Return zero when no profitable pair exists.\n\n## Example\n\nInput `[7, 1, 5, 3, 6, 4]` returns `5`.",
+      "statement_markdown": "## Task\n\nGiven prices in time order, return the greatest profit from at most one transaction: buy once and sell once later. Making no transaction is allowed, so return zero when every buy-before-sell pair has no positive profit.\n\n## Example\n\nInput `[7, 1, 5, 3, 6, 4]` returns `5`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -186,7 +186,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/combination-sum/",
       "neetcode_url": "https://neetcode.io/problems/combination-target-sum/question",
-      "statement_markdown": "## Task\n\nGiven candidate integers and a target, return all combinations that sum to the target. A candidate may be selected repeatedly; combination ordering is unrestricted.\n\n## Example\n\nCandidates `[2, 3, 6, 7]` and target `7` return `[2, 2, 3]` and `[7]`.",
+      "statement_markdown": "## Task\n\nGiven a finite list of positive candidate integers and a target, return all combinations that sum to the target. A candidate may be selected repeatedly; the values within each combination and the combinations in the result may appear in any valid order.\n\n## Example\n\nCandidates `[2, 3, 6, 7]` and target `7` return `[2, 2, 3]` and `[7]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -208,7 +208,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/",
       "neetcode_url": "https://neetcode.io/problems/binary-tree-from-preorder-and-inorder-traversal/question",
-      "statement_markdown": "## Task\n\nGiven preorder and inorder value traversals of one binary tree, reconstruct and return its root.\n\n## Example\n\nPreorder `[3, 9, 20, 15, 7]` and inorder `[9, 3, 15, 20, 7]` produce tree `[3, 9, 20, null, null, 15, 7]`.",
+      "statement_markdown": "## Task\n\nGiven preorder and inorder value traversals of one binary tree whose node values are distinct, reconstruct and return its root.\n\n## Example\n\nPreorder `[3, 9, 20, 15, 7]` and inorder `[9, 3, 15, 20, 7]` produce tree `[3, 9, 20, null, null, 15, 7]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -318,7 +318,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/decode-ways/",
       "neetcode_url": "https://neetcode.io/problems/decode-ways/question",
-      "statement_markdown": "## Task\n\nGiven a string of decimal digits, return the number of ways it can be decoded using one-digit and valid two-digit letter codes.\n\n## Example\n\nInput `\"226\"` returns `3`.",
+      "statement_markdown": "## Task\n\nGiven a string of decimal digits, return the number of decodings under the mapping `1` through `26` to letters. A zero cannot be decoded alone and is valid only as part of `10` or `20`.\n\n## Example\n\nInput `\"226\"` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -340,7 +340,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/design-add-and-search-words-data-structure/",
       "neetcode_url": "https://neetcode.io/problems/design-word-search-data-structure/question",
-      "statement_markdown": "## Task\n\nImplement a word dictionary with `addWord(word)` and `search(pattern)`. In a search pattern, `.` matches any one character.\n\n## Example\n\nAfter adding `\"bad\"` and `\"dad\"`, searching `\"pad\"` returns `false` and searching `\".ad\"` returns `true`.",
+      "statement_markdown": "## Task\n\nCreate or initialize a word dictionary that supports adding a word and searching for a pattern. In a search pattern, `.` matches any one character.\n\n## Example\n\nAfter adding `\"bad\"` and `\"dad\"`, searching for `\"pad\"` returns `false` and searching for `\".ad\"` returns `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -362,7 +362,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/encode-and-decode-strings/",
       "neetcode_url": "https://neetcode.io/problems/string-encode-and-decode/question",
-      "statement_markdown": "## Task\n\nImplement `encode(strings)` to return one string and `decode(encoded)` to recover the original string list. Only round-trip behavior is prescribed; any encoding format is valid.\n\n## Example\n\nEncoding then decoding `[\"lint\", \"code\", \"\", \"a#b\"]` returns that same list.",
+      "statement_markdown": "## Task\n\nCreate or initialize a codec that can encode a list of strings as one string and decode that string to recover the original list. Only round-trip behavior is prescribed; any encoding format is valid.\n\n## Example\n\nCreate a codec, encode `[\"lint\", \"code\", \"love\", \"you\"]`, then decode the encoded value; the result is the original four-string list.",
       "test_revision": 1,
       "adapters": [
         {
@@ -384,7 +384,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/find-median-from-data-stream/",
       "neetcode_url": "https://neetcode.io/problems/find-median-in-a-data-stream/question",
-      "statement_markdown": "## Task\n\nImplement a median tracker. `addNum(value)` records a number and `findMedian()` returns the median of all recorded values.\n\n## Example\n\nAfter adding `1` and `2`, the median is `1.5`; after adding `3`, it is `2.0`.",
+      "statement_markdown": "## Task\n\nCreate or initialize a median tracker that supports adding a number and finding the median of all numbers added so far.\n\n## Example\n\nCreate a tracker, add `1`, add `2`, then find the median; the result is `1.5`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -494,7 +494,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/house-robber-ii/",
       "neetcode_url": "https://neetcode.io/problems/house-robber-ii/question",
-      "statement_markdown": "## Task\n\nGiven values at houses arranged in a circle, return the largest sum selectable without choosing neighboring houses, including the first and last together.\n\n## Example\n\nInput `[2, 3, 2]` returns `3`.",
+      "statement_markdown": "## Task\n\nGiven values at houses arranged in a circle, return the largest sum selectable without choosing neighboring houses. The first and last houses are adjacent, so they cannot both be selected.\n\n## Example\n\nInput `[2, 3, 2]` returns `3`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -516,7 +516,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/implement-trie-prefix-tree/",
       "neetcode_url": "https://neetcode.io/problems/implement-prefix-tree/question",
-      "statement_markdown": "## Task\n\nImplement a trie with `insert(word)`, exact `search(word)`, and `startsWith(prefix)` operations.\n\n## Example\n\nAfter inserting `\"apple\"`, `search(\"apple\")` is `true`, `search(\"app\")` is `false`, and `startsWith(\"app\")` is `true`.",
+      "statement_markdown": "## Task\n\nCreate or initialize a trie that supports inserting a word, testing for an exact word, and testing whether any inserted word starts with a prefix.\n\n## Example\n\nAfter inserting `\"apple\"`, an exact search for `\"apple\"` is `true`, an exact search for `\"app\"` is `false`, and the prefix check for `\"app\"` is `true`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -538,7 +538,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/insert-interval/",
       "neetcode_url": "https://neetcode.io/problems/insert-new-interval/question",
-      "statement_markdown": "## Task\n\nGiven nonoverlapping intervals and one new interval, insert it and return the merged interval sequence in ascending position order.\n\n## Example\n\nIntervals `[[1, 3], [6, 9]]` with new interval `[2, 5]` return `[[1, 5], [6, 9]]`.",
+      "statement_markdown": "## Task\n\nGiven nonoverlapping intervals sorted by start endpoint and one new interval, insert it and return the merged intervals in ascending position order. Intervals include both endpoints, so intervals that share an endpoint are merged.\n\n## Example\n\nIntervals `[[1, 3], [6, 9]]` with new interval `[2, 5]` return `[[1, 5], [6, 9]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -868,7 +868,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/meeting-rooms/",
       "neetcode_url": "https://neetcode.io/problems/meeting-schedule/question",
-      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return whether one attendee can attend all meetings without overlap.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `false`.",
+      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return whether one attendee can attend all meetings without overlap. A meeting ending when another starts does not overlap it.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `false`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -890,7 +890,7 @@
       "premium": true,
       "leetcode_url": "https://leetcode.com/problems/meeting-rooms-ii/",
       "neetcode_url": "https://neetcode.io/problems/meeting-schedule-ii/question",
-      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return the minimum number of rooms needed to hold them.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `2`.",
+      "statement_markdown": "## Task\n\nGiven meeting intervals `[start, end]`, return the minimum number of rooms needed to hold them. A room may be reused when one meeting ends at the next meeting's start.\n\n## Example\n\nIntervals `[[0, 30], [5, 10], [15, 20]]` return `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -912,7 +912,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/merge-intervals/",
       "neetcode_url": "https://neetcode.io/problems/merge-intervals/question",
-      "statement_markdown": "## Task\n\nGiven intervals, merge overlaps and return the resulting intervals in ascending position order.\n\n## Example\n\nInput `[[1, 3], [2, 6], [8, 10], [15, 18]]` returns `[[1, 6], [8, 10], [15, 18]]`.",
+      "statement_markdown": "## Task\n\nGiven intervals, merge overlaps and return the resulting intervals in ascending position order. Intervals include both endpoints, so intervals that share an endpoint are merged.\n\n## Example\n\nInput `[[1, 3], [2, 6], [8, 10], [15, 18]]` returns `[[1, 6], [8, 10], [15, 18]]`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -978,7 +978,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/minimum-window-substring/",
       "neetcode_url": "https://neetcode.io/problems/minimum-window-with-characters/question",
-      "statement_markdown": "## Task\n\nGiven strings `source` and `target`, return the shortest source substring containing all target characters with their multiplicities, or an empty string if none exists.\n\n## Example\n\nSource `\"ADOBECODEBANC\"` and target `\"ABC\"` return `\"BANC\"`.",
+      "statement_markdown": "## Task\n\nGiven strings `source` and `target`, return the shortest source substring containing every target character at least as many times as it occurs in the target. Return an empty string if no such substring exists. Inputs are restricted to cases with a unique shortest valid substring.\n\n## Example\n\nSource `\"ADOBECODEBANC\"` and target `\"ABC\"` return `\"BANC\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1022,7 +1022,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/non-overlapping-intervals/",
       "neetcode_url": "https://neetcode.io/problems/non-overlapping-intervals/question",
-      "statement_markdown": "## Task\n\nGiven intervals, return the minimum number that must be removed so the remainder do not overlap.\n\n## Example\n\nInput `[[1, 2], [2, 3], [3, 4], [1, 3]]` returns `1`.",
+      "statement_markdown": "## Task\n\nGiven intervals, return the minimum number that must be removed so the remainder do not overlap. Intervals that only meet at one interval's end and another's start do not overlap.\n\n## Example\n\nInput `[[1, 2], [2, 3], [3, 4], [1, 3]]` returns `1`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1220,7 +1220,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/reverse-bits/",
       "neetcode_url": "https://neetcode.io/problems/reverse-bits/question",
-      "statement_markdown": "## Task\n\nGiven a 32-bit unsigned integer, return the integer represented by its bits in reverse order.\n\n## Example\n\nInput `43261596` returns `964176192`.",
+      "statement_markdown": "## Task\n\nInterpret the input as a 32-bit bit pattern, reverse its bit positions, and return the resulting 32-bit pattern. The Rust adapter represents both patterns as `i32`; signedness does not change the bits being reversed.\n\n## Example\n\nInput pattern `43261596` returns pattern `964176192`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1308,7 +1308,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/search-in-rotated-sorted-array/",
       "neetcode_url": "https://neetcode.io/problems/find-target-in-rotated-sorted-array/question",
-      "statement_markdown": "## Task\n\nGiven a rotated sorted integer list and a target, return the target index or `-1` when absent.\n\n## Example\n\nList `[4, 5, 6, 7, 0, 1, 2]` with target `0` returns `4`.",
+      "statement_markdown": "## Task\n\nGiven a rotated sorted integer list and a target, return the index where the target occurs. If the target is absent, return the sentinel `-1`.\n\n## Example\n\nList `[4, 5, 6, 7, 0, 1, 2]` with target `0` returns `4`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1330,7 +1330,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/serialize-and-deserialize-binary-tree/",
       "neetcode_url": "https://neetcode.io/problems/serialize-and-deserialize-binary-tree/question",
-      "statement_markdown": "## Task\n\nImplement `serialize(root)` to return a string and `deserialize(data)` to reconstruct the tree. Only round-trip tree structure and values are prescribed; any encoding format is valid.\n\n## Example\n\nSerializing then deserializing tree `[1, 2, 3, null, null, 4, 5]` returns an equivalent tree.",
+      "statement_markdown": "## Task\n\nCreate or initialize a tree codec that can serialize a tree as a string and deserialize that string to reconstruct the tree. Only round-trip tree structure and values are prescribed; any encoding format is valid.\n\n## Example\n\nCreate a codec, serialize tree `[1, 2, 3, null, null, 4, 5]`, then deserialize the encoded value; the result is an equivalent tree.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1440,7 +1440,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/top-k-frequent-elements/",
       "neetcode_url": "https://neetcode.io/problems/top-k-elements-in-list/question",
-      "statement_markdown": "## Task\n\nGiven an integer list and `k`, return `k` values with the greatest occurrence counts. Any valid ordering is accepted.\n\n## Example\n\nList `[1, 1, 1, 2, 2, 3]` with `k = 2` returns values `1` and `2`.",
+      "statement_markdown": "## Task\n\nGiven an integer list and `k`, return `k` values with the greatest occurrence counts in any order. If several values tie at the frequency boundary for the final positions, any selection among those tied values is valid.\n\n## Example\n\nList `[1, 1, 1, 2, 2, 3]` with `k = 2` returns values `1` and `2`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1616,7 +1616,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/word-search/",
       "neetcode_url": "https://neetcode.io/problems/search-for-word/question",
-      "statement_markdown": "## Task\n\nGiven a character grid and a word, return whether the word can be formed by vertically or horizontally adjacent cells without reusing a cell.\n\n## Example\n\nThe checked-in grid containing rows `\"ABCE\"`, `\"SFCS\"`, and `\"ADEE\"` returns `true` for `\"ABCCED\"`.",
+      "statement_markdown": "## Task\n\nGiven a character grid and a word, return whether the word can be formed by vertically or horizontally adjacent cells. Each grid cell may be used at most once in one word.\n\n## Example\n\nGrid `[[\"A\", \"B\", \"C\", \"E\"], [\"S\", \"F\", \"C\", \"S\"], [\"A\", \"D\", \"E\", \"E\"]]` returns `true` for `\"ABCCED\"`.",
       "test_revision": 1,
       "adapters": [
         {
@@ -1638,7 +1638,7 @@
       "premium": false,
       "leetcode_url": "https://leetcode.com/problems/word-search-ii/",
       "neetcode_url": "https://neetcode.io/problems/search-for-word-ii/question",
-      "statement_markdown": "## Task\n\nGiven a character grid and candidate words, return every candidate that can be formed by vertically or horizontally adjacent cells without reusing a cell. Result ordering is unrestricted.\n\n## Example\n\nFor the checked-in four-by-four grid and words `[\"oath\", \"pea\", \"eat\", \"rain\"]`, return `\"eat\"` and `\"oath\"`.",
+      "statement_markdown": "## Task\n\nGiven a character grid and candidate words, return every candidate that can be formed by vertically or horizontally adjacent cells without reusing a cell within one word. Result ordering is unrestricted.\n\n## Example\n\nGrid `[[\"o\", \"a\", \"a\", \"n\"], [\"e\", \"t\", \"a\", \"e\"], [\"i\", \"h\", \"k\", \"r\"], [\"i\", \"f\", \"l\", \"v\"]]` with words `[\"oath\", \"pea\", \"eat\", \"rain\"]` returns `[\"eat\", \"oath\"]` in either order.",
       "test_revision": 1,
       "adapters": [
         {
