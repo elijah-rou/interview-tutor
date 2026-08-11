@@ -19,9 +19,12 @@ case "$mode" in
     ;;
   exit-0) exit 0 ;;
   exit-2) exit 2 ;;
-  exit-130) exit 130 ;;
+  exit-130|batch-exit-130) exit 130 ;;
+  batch-later)
+    printf 'ran\n' > "$PRACTICE_LATER_ATTEMPT_FILE"
+    ;;
   sleep) sleep 30 ;;
-  descendants)
+  descendants|batch-hang)
     trap '' TERM
     (trap '' TERM; exec sleep 30) &
     descendant="$!"
