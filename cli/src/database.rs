@@ -1,4 +1,6 @@
-use crate::catalog::{ProblemSeed, ProblemSetSeed, SeedCatalog, validate_identifier};
+use crate::catalog::{
+    ProblemSeed, ProblemSetSeed, SeedCatalog, validate_http_url, validate_identifier,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -201,9 +203,9 @@ pub fn open_database(path: &Path, root: &Path) -> Result<Connection, String> {
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(sql_error)?;
-    if schema_version > SCHEMA_VERSION {
+    if !(0..=SCHEMA_VERSION).contains(&schema_version) {
         return Err(format!(
-            "unsupported database schema version: {schema_version} (maximum {SCHEMA_VERSION})"
+            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION})"
         ));
     }
     connection
@@ -240,8 +242,11 @@ fn migrate_if_needed(
     catalog: &SeedCatalog,
     schema_version: i64,
 ) -> Result<(), String> {
-    assert!(schema_version <= SCHEMA_VERSION);
-    assert!(schema_version >= 0);
+    if !(0..=SCHEMA_VERSION).contains(&schema_version) {
+        return Err(format!(
+            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION})"
+        ));
+    }
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'problems')",
@@ -282,7 +287,11 @@ fn migrate_if_needed(
     if legacy_shape {
         return migrate_v1(connection, catalog);
     }
-    assert_eq!(schema_version, 0);
+    if schema_version != 0 {
+        return Err(format!(
+            "database schema version {schema_version} does not have a supported table shape"
+        ));
+    }
     transaction(connection, || {
         connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
         connection
@@ -650,8 +659,7 @@ fn sync_problem(
                 leetcode_id = excluded.leetcode_id, premium = excluded.premium, managed = 1, \
                 archived = 0, leetcode_url = excluded.leetcode_url, \
                 neetcode_url = excluded.neetcode_url, \
-                statement_markdown = CASE WHEN problems.statement_markdown = '' \
-                    THEN excluded.statement_markdown ELSE problems.statement_markdown END, \
+                statement_markdown = excluded.statement_markdown, \
                 test_revision = excluded.test_revision, updated_at = excluded.updated_at",
             params![
                 problem.slug,
@@ -1131,10 +1139,10 @@ pub struct NewProblem<'a> {
 }
 
 fn validate_url(label: &str, url: &str) -> Result<(), String> {
-    if url.is_empty() || url.starts_with("https://") || url.starts_with("http://") {
+    if url.is_empty() {
         Ok(())
     } else {
-        Err(format!("{label} URL must use http or https"))
+        validate_http_url(label, url)
     }
 }
 

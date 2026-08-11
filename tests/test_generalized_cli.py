@@ -234,18 +234,31 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(moved.returncode, 2)
         self.assertEqual(updated.returncode, 2)
+        discovery_marker = Path(self.temporary_directory.name) / "discovery-called"
+        fixture_runner = Path(self.temporary_directory.name) / "runner"
+        fixture_runner.write_text(
+            f"#!/bin/sh\ntouch {discovery_marker}\nprintf '%s\\n' two-sum\n",
+            encoding="utf-8",
+        )
+        fixture_runner.chmod(0o755)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE languages SET runner_path = ? WHERE slug = 'python'",
+                (str(fixture_runner),),
+            )
         adapter = self.run_command(
             str(ROOT / "practice"),
             "problems",
             "adapter",
             "two-sum",
             "python",
-            "python/local_judge/registry.py",
+            "missing-solution.py",
         )
         self.assertEqual(adapter.returncode, 2)
         self.assertIn("read-only", moved.stderr)
         self.assertIn("read-only", updated.stderr)
         self.assertIn("read-only", adapter.stderr)
+        self.assertFalse(discovery_marker.exists())
         with sqlite3.connect(self.database) as connection:
             solution_path = connection.execute(
                 """

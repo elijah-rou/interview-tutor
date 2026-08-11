@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Problem-set IDs are unique across files, member slugs are unique within a set, and ordinals are contiguous in array order; runtime catalog validation enforces these cross-record constraints.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,10 +20,12 @@
     },
     "name": {
       "type": "string",
-      "minLength": 1
+      "pattern": "\\S",
+      "maxLength": 200
     },
     "description": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 2000
     },
     "members": {
       "type": "array",
@@ -39,7 +42,8 @@
             "minimum": 1
           },
           "problem_slug": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(?=.*[a-z])[a-z0-9][a-z0-9_-]{0,63}$"
           }
         }
       }
