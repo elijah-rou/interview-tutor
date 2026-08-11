@@ -1,7 +1,7 @@
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
 use database::{AttemptOutcome, Difficulty, NewProblem, Problem, ProblemUpdate, ProgressScope};
-use practice_cli::{config, database, runner};
+use practice_cli::{config, database, runner, signals};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,8 +9,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn difficulty_parser() -> impl TypedValueParser<Value = Difficulty> {
     PossibleValuesParser::new(["Easy", "Medium", "Hard"])
@@ -427,215 +425,6 @@ fn print_progress_table(group_heading: &str, rows: &[Vec<String>]) -> Result<(),
     )
 }
 
-struct ExecutionSignalHandlers {
-    registrations: Vec<signal_hook::SigId>,
-    received: Arc<AtomicUsize>,
-}
-
-impl ExecutionSignalHandlers {
-    fn register(cancellation: &runner::CancellationToken) -> Result<Self, String> {
-        let received = Arc::new(AtomicUsize::new(0));
-        let mut registrations = Vec::with_capacity(2);
-        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-            let received_for_handler = Arc::clone(&received);
-            let cancellation_flag = cancellation.signal_flag();
-            // SAFETY: the handler only performs lock-free atomic stores through owned Arcs.
-            let registration = unsafe {
-                signal_hook::low_level::register(signal, move || {
-                    received_for_handler.store(signal as usize, Ordering::Release);
-                    cancellation_flag.store(true, Ordering::Release);
-                })
-            }
-            .map_err(|error| format!("cannot register execution signal handler: {error}"));
-            match registration {
-                Ok(registration) => registrations.push(registration),
-                Err(error) => {
-                    for registration in registrations {
-                        signal_hook::low_level::unregister(registration);
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        assert_eq!(registrations.len(), 2);
-        Ok(Self {
-            registrations,
-            received,
-        })
-    }
-
-    fn exit_code(&self) -> Option<i32> {
-        match self.received.load(Ordering::Acquire) as i32 {
-            signal_hook::consts::SIGINT => Some(130),
-            signal_hook::consts::SIGTERM => Some(143),
-            0 => None,
-            signal => Some(128 + signal),
-        }
-    }
-
-    fn unregister(&mut self) -> Result<(), String> {
-        let mut failed = false;
-        for registration in self.registrations.drain(..) {
-            failed |= !signal_hook::low_level::unregister(registration);
-        }
-        if failed {
-            Err("cannot unregister an execution signal handler".to_string())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for ExecutionSignalHandlers {
-    fn drop(&mut self) {
-        for registration in self.registrations.drain(..) {
-            let _ = signal_hook::low_level::unregister(registration);
-        }
-    }
-}
-
-struct BlockedExecutionSignals {
-    prior_mask: libc::sigset_t,
-    active: bool,
-}
-
-impl BlockedExecutionSignals {
-    fn block() -> Result<Self, String> {
-        // SAFETY: all signal sets are initialized before use and pthread_sigmask only changes the
-        // calling thread's mask.
-        unsafe {
-            let mut signals = std::mem::zeroed();
-            if libc::sigemptyset(&mut signals) != 0 {
-                return Err(format!(
-                    "cannot initialize execution signal set: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            for signal in [libc::SIGINT, libc::SIGTERM] {
-                if libc::sigaddset(&mut signals, signal) != 0 {
-                    return Err(format!(
-                        "cannot add execution signal to set: {}",
-                        io::Error::last_os_error()
-                    ));
-                }
-            }
-            let mut prior_mask = std::mem::zeroed();
-            let error = libc::pthread_sigmask(libc::SIG_BLOCK, &signals, &mut prior_mask);
-            if error != 0 {
-                return Err(format!(
-                    "cannot block execution signals: {}",
-                    io::Error::from_raw_os_error(error)
-                ));
-            }
-            Ok(Self {
-                prior_mask,
-                active: true,
-            })
-        }
-    }
-
-    fn pending_exit_code(&self) -> Result<Option<i32>, String> {
-        // SAFETY: pending is initialized by sigpending before sigismember reads it.
-        unsafe {
-            let mut pending = std::mem::zeroed();
-            if libc::sigpending(&mut pending) != 0 {
-                return Err(format!(
-                    "cannot inspect pending execution signals: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            for (signal, exit_code) in [(libc::SIGINT, 130), (libc::SIGTERM, 143)] {
-                match libc::sigismember(&pending, signal) {
-                    1 => return Ok(Some(exit_code)),
-                    0 => {}
-                    _ => {
-                        return Err(format!(
-                            "cannot inspect pending execution signal: {}",
-                            io::Error::last_os_error()
-                        ));
-                    }
-                }
-            }
-            Ok(None)
-        }
-    }
-
-    fn consume_pending(&self) -> Result<(), String> {
-        // SAFETY: pending and wait_set are initialized before use. sigwait is called only for a
-        // signal proven pending and blocked in this thread.
-        unsafe {
-            let mut pending = std::mem::zeroed();
-            if libc::sigpending(&mut pending) != 0 {
-                return Err(format!(
-                    "cannot inspect pending execution signals for cleanup: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            for signal in [libc::SIGINT, libc::SIGTERM] {
-                match libc::sigismember(&pending, signal) {
-                    0 => continue,
-                    1 => {}
-                    _ => {
-                        return Err(format!(
-                            "cannot inspect pending execution signal for cleanup: {}",
-                            io::Error::last_os_error()
-                        ));
-                    }
-                }
-                let mut wait_set = std::mem::zeroed();
-                if libc::sigemptyset(&mut wait_set) != 0
-                    || libc::sigaddset(&mut wait_set, signal) != 0
-                {
-                    return Err(format!(
-                        "cannot initialize pending execution signal cleanup: {}",
-                        io::Error::last_os_error()
-                    ));
-                }
-                let mut received = 0;
-                let error = libc::sigwait(&wait_set, &mut received);
-                if error != 0 {
-                    return Err(format!(
-                        "cannot consume pending execution signal: {}",
-                        io::Error::from_raw_os_error(error)
-                    ));
-                }
-                if received != signal {
-                    return Err(format!(
-                        "consumed unexpected execution signal {received}; expected {signal}"
-                    ));
-                }
-            }
-            Ok(())
-        }
-    }
-
-    fn restore(mut self) -> Result<(), String> {
-        // SAFETY: prior_mask was initialized by the successful pthread_sigmask call in block.
-        let error = unsafe {
-            libc::pthread_sigmask(libc::SIG_SETMASK, &self.prior_mask, std::ptr::null_mut())
-        };
-        if error != 0 {
-            return Err(format!(
-                "cannot restore execution signal mask: {}",
-                io::Error::from_raw_os_error(error)
-            ));
-        }
-        self.active = false;
-        Ok(())
-    }
-}
-
-impl Drop for BlockedExecutionSignals {
-    fn drop(&mut self) {
-        if self.active {
-            // SAFETY: prior_mask was initialized by the successful pthread_sigmask call in block.
-            unsafe {
-                libc::pthread_sigmask(libc::SIG_SETMASK, &self.prior_mask, std::ptr::null_mut());
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RunOneResult {
     Completed(i32),
@@ -663,8 +452,9 @@ fn run_one(
         reference,
         set_slug,
     )?;
-    let cancellation = runner::CancellationToken::new();
-    let mut signal_handlers = ExecutionSignalHandlers::register(&cancellation)?;
+    let signal_handlers = signals::ScopedSignalHandlers::register()?;
+    let signal_state = signal_handlers.state();
+    let cancellation = runner::CancellationToken::with_signal_state(signal_state.clone());
     let execution = runner::execute(
         &plan,
         &context.database_path,
@@ -676,52 +466,33 @@ fn run_one(
     if cancellation.is_cancelled() {
         result.termination = runner::Termination::Cancelled;
     }
-    let blocked_signals = BlockedExecutionSignals::block()?;
-    let finalization: Result<RunOneResult, String> = (|| {
-        let attempt_id = runner::record_execution(&context.connection, &plan, &result)?;
-        let pending_exit_code = blocked_signals.pending_exit_code()?;
-        let signal_exit_code = signal_handlers.exit_code().or(pending_exit_code);
-        let signal_cancelled = cancellation.is_cancelled() || signal_exit_code.is_some();
-        signal_handlers.unregister()?;
-        if signal_cancelled {
-            let signal_exit_code = signal_exit_code.unwrap_or(130);
-            database::finalize_attempt_cancelled(
-                &context.connection,
-                attempt_id,
-                signal_exit_code,
-            )?;
-            result.termination = runner::Termination::Cancelled;
-        }
-        io::stderr()
-            .write_all(result.display_output.as_bytes())
-            .map_err(|error| format!("cannot write runner output: {error}"))?;
-        Ok(if signal_cancelled {
-            RunOneResult::Interrupted(signal_exit_code.unwrap_or(130))
-        } else {
-            RunOneResult::Completed(result.status_code())
-        })
-    })();
-    let consume_result = blocked_signals.consume_pending();
-    let restore_result = blocked_signals.restore();
-    let mut errors = Vec::with_capacity(3);
-    let run_result = match finalization {
-        Ok(result) => Some(result),
-        Err(error) => {
-            errors.push(error);
-            None
-        }
-    };
-    if let Err(error) = consume_result {
-        errors.push(error);
-    }
-    if let Err(error) = restore_result {
-        errors.push(error);
-    }
-    if errors.is_empty() {
-        Ok(run_result.expect("successful finalization produces a run result"))
+
+    let attempt_id = runner::record_execution(&context.connection, &plan, &result)?;
+    let blocked_signals = signals::BlockedExecutionSignals::block()?;
+    let pending_exit_code = blocked_signals.pending_exit_code()?;
+    let signal_exit_code = signal_state.exit_code().or(pending_exit_code);
+    let signal_cancelled = cancellation.is_cancelled() || signal_exit_code.is_some();
+    let run_result = if signal_cancelled {
+        let exit_code = signal_exit_code.unwrap_or(130);
+        database::finalize_attempt_cancelled(&context.connection, attempt_id, exit_code)?;
+        result.termination = runner::Termination::Cancelled;
+        RunOneResult::Interrupted(exit_code)
     } else {
-        Err(errors.join("; "))
-    }
+        RunOneResult::Completed(result.status_code())
+    };
+    // A signal observed through this check belongs to this attempt. Once this cutoff completes,
+    // later signals belong to the restored caller disposition and cannot rewrite a published run.
+    let handler_restore = signal_handlers.restore();
+    let consume_result = blocked_signals.consume_pending();
+    let mask_restore = blocked_signals.restore();
+    handler_restore?;
+    consume_result?;
+    mask_restore?;
+
+    io::stderr()
+        .write_all(result.display_output.as_bytes())
+        .map_err(|error| format!("cannot write runner output: {error}"))?;
+    Ok(run_result)
 }
 
 fn command_run(context: &Context, args: &RunArgs) -> Result<i32, String> {

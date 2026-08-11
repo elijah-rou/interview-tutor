@@ -14,7 +14,7 @@ import tempfile
 import time
 from typing import Callable
 
-from pty_harness import PtySession, kill_fixture_process, run_checked
+from pty_harness import CleanupRegistry, PtySession, hard_deadline, run_checked
 import tui_runtime_cleanup
 
 ENTER = b"\r"
@@ -49,17 +49,22 @@ class MatrixFixture:
         self.runner.write_text(self._runner_source(), encoding="utf-8")
         self.runner.chmod(0o700)
         self.template_database = temporary / "template.db"
+        self.cleanup = CleanupRegistry()
+        self.case_sessions: list[PtySession] = []
         self.base_environment = os.environ.copy()
+        self.base_environment.pop("OPENAI_API_KEY", None)
         self.base_environment["PRACTICE_ROOT"] = str(self.root)
         self.base_environment["TERM"] = "xterm-256color"
-        self.fake_codex = repository_root / "cli" / "tests" / "fixtures" / "fake_codex_app_server.py"
+        self.fake_codex = (
+            repository_root / "cli" / "tests" / "fixtures" / "fake_codex_app_server.py"
+        )
         self._prepare_database()
         self.database_index = 0
         self.codex_index = 0
 
     @staticmethod
     def _runner_source() -> str:
-        return r'''#!/usr/bin/env python3
+        return r"""#!/usr/bin/env python3
 import os
 from pathlib import Path
 import signal
@@ -76,12 +81,22 @@ if mode == "normal":
     for index in range(60):
         print(f"output-line-{index:02d}")
     print("PASS")
+elif mode == "fail":
+    print("ordinary-failure")
+    raise SystemExit(7)
 elif mode == "timeout":
     time.sleep(30)
 elif mode == "cancel":
     if pid_file:
         Path(pid_file).write_text(str(os.getpid()), encoding="utf-8")
     time.sleep(30)
+elif mode == "record-lock":
+    if pid_file:
+        Path(pid_file).write_text(str(os.getpid()), encoding="utf-8")
+    marker = os.environ.get("PRACTICE_RECORD_READY_FILE")
+    if marker:
+        Path(marker).write_text("runner-finished\n", encoding="utf-8")
+    print("record-lock-runner-finished")
 elif mode == "flood":
     sys.stdout.buffer.write(b"safe-start\n")
     sys.stdout.buffer.write(b"\033]0;hostile-title\007")
@@ -105,18 +120,26 @@ elif mode in {"group-descendant", "escaped-descendant"}:
 else:
     print(f"unknown runner mode: {mode}", file=sys.stderr)
     raise SystemExit(2)
-'''
+"""
 
     def _practice(self, arguments: list[str]) -> None:
         run_checked(
-            [str(self.practice_binary), "--db", str(self.template_database), *arguments],
+            [
+                str(self.practice_binary),
+                "--db",
+                str(self.template_database),
+                *arguments,
+            ],
             self.base_environment,
         )
 
     def _prepare_database(self) -> None:
         statement = "\n".join(
             ["## Matrix statement", ""]
-            + [f"detail-line-{index:02d} bounded scrolling content" for index in range(55)]
+            + [
+                f"detail-line-{index:02d} bounded scrolling content"
+                for index in range(55)
+            ]
             + ["DETAIL-END-SENTINEL"]
         )
         self._practice(
@@ -137,9 +160,7 @@ else:
         self._practice(
             ["problems", "adapter", "smoke-problem", "python", "python/smoke.py"]
         )
-        self._practice(
-            ["sets", "create", "a00-matrix", "--name", "A00 Matrix Set"]
-        )
+        self._practice(["sets", "create", "a00-matrix", "--name", "A00 Matrix Set"])
         self._practice(["sets", "add", "a00-matrix", "smoke-problem"])
 
         with sqlite3.connect(self.template_database) as connection:
@@ -177,7 +198,10 @@ else:
     def database(self, label: str) -> Path:
         self.database_index += 1
         path = self.temporary / f"{self.database_index:02d}-{label}.db"
-        with sqlite3.connect(self.template_database) as source, sqlite3.connect(path) as target:
+        with (
+            sqlite3.connect(self.template_database) as source,
+            sqlite3.connect(path) as target,
+        ):
             source.backup(target)
         return path
 
@@ -186,6 +210,7 @@ else:
         path = self.temporary / f"codex-{self.codex_index:02d}-{mode}"
         path.mkdir(mode=0o700)
         (path / "fake-mode").write_text(mode, encoding="utf-8")
+        self.cleanup.register_codex_home(path)
         return path
 
     def environment(
@@ -199,10 +224,13 @@ else:
         environment = self.base_environment.copy()
         home = self.codex_home(codex_mode)
         environment["CODEX_HOME"] = str(home)
-        environment["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(executable or self.fake_codex)
+        environment["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(
+            executable or self.fake_codex
+        )
         if timeout_ms is not None:
             environment["INTERVIEW_TUTOR_TEST_RUN_TIMEOUT_MS"] = str(timeout_ms)
         if pid_file is not None:
+            self.cleanup.register_pid_file(pid_file)
             environment["PRACTICE_FIXTURE_PID_FILE"] = str(pid_file)
         if no_codex:
             environment.pop("INTERVIEW_TUTOR_CODEX_EXECUTABLE", None)
@@ -224,7 +252,19 @@ else:
         command += ["--language", "python"]
         if no_codex:
             command.append("--no-codex")
-        return PtySession(command, environment, columns, rows, case_timeout)
+        session = PtySession(command, environment, columns, rows, case_timeout)
+        self.case_sessions.append(session)
+        return session
+
+    def finalize_case(self) -> None:
+        invalid_requests = [
+            session.screen.invalid_cursor_request
+            for session in self.case_sessions
+            if session.screen.invalid_cursor_request is not None
+        ]
+        self.case_sessions.clear()
+        self.cleanup.finalize_case()
+        assert not invalid_requests, f"invalid cursor requests: {invalid_requests!r}"
 
     def set_runner(self, mode: str) -> None:
         self.runner_mode.write_text(mode, encoding="utf-8")
@@ -253,7 +293,19 @@ def capture_messages(home: Path) -> list[dict]:
 
 
 def captured_turns(home: Path) -> list[dict]:
-    return [message for message in capture_messages(home) if message.get("method") == "turn/start"]
+    return [
+        message
+        for message in capture_messages(home)
+        if message.get("method") == "turn/start"
+    ]
+
+
+def captured_completions(home: Path) -> list[dict]:
+    return [
+        record
+        for record in capture_records(home)
+        if record.get("kind") == "turn-completed"
+    ]
 
 
 def wait_turns(session: PtySession, home: Path, count: int) -> None:
@@ -261,6 +313,28 @@ def wait_turns(session: PtySession, home: Path, count: int) -> None:
         f"{count} captured Codex turns",
         lambda: len(captured_turns(home)) >= count,
     )
+
+
+def wait_turn_completion(session: PtySession, home: Path, turn: int) -> None:
+    session.wait_predicate(
+        f"unique Codex completion marker for turn {turn}",
+        lambda: any(
+            record.get("turn") == turn for record in captured_completions(home)
+        ),
+    )
+    session.wait_screen(f"[turn-{turn}]")
+
+
+def captured_turn_sequence(home: Path) -> list[tuple[str, str]]:
+    sequence = []
+    for turn in captured_turns(home):
+        text = turn["params"]["input"][0]["text"]
+        payload = json.loads(text.split("INPUT_JSON:", 1)[1])
+        if "Review the explicitly recorded local submission" in text:
+            sequence.append(("submission-review", payload["userQuestion"]))
+            continue
+        sequence.append(("interviewer", payload["userQuestion"]))
+    return sequence
 
 
 def query_attempts(database: Path) -> list[tuple[str, int | None]]:
@@ -431,7 +505,9 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
         session.send(b"\t")
         quit_from_editor(session)
     assert_codex_cleanup(relaunch_home)
-    return "attempts=1(pass) turns=5 hint_levels=1,2,3 relaunch_transcript=0 statuses=0,0"
+    return (
+        "attempts=1(pass) turns=5 hint_levels=1,2,3 relaunch_transcript=0 statuses=0,0"
+    )
 
 
 def compact_case(fixture: MatrixFixture) -> str:
@@ -455,8 +531,6 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.send(ENTER)
         session.wait_screen("Solve panes")
         session.wait_screen("Codex: offline · memory only")
-        assert 0 <= session.screen.x < 80
-        assert 0 <= session.screen.y < 24
 
         session.send(b"\t")
         session.wait_screen("Problem / Examples [active]")
@@ -474,8 +548,7 @@ def compact_case(fixture: MatrixFixture) -> str:
                 session.send(b"i")
             question = f"compact-question-{index}-" + "wrapped-content-" * 3
             session.send(question.encode("utf-8") + ENTER)
-            wait_turns(session, home, index + 1)
-            session.wait_screen("Interviewer:")
+            wait_turn_completion(session, home, index + 1)
         session.send(b"k" * 40)
         session.wait_screen("compact-question-0-")
         session.send(b"j" * 40)
@@ -499,8 +572,21 @@ def compact_case(fixture: MatrixFixture) -> str:
             "one compact submit attempt",
             lambda: query_attempts(database) == [("pass", 0)],
         )
+        session.send(b"\t")
+        session.wait_screen("Interview [active]")
+        wait_turn_completion(session, home, 7)
+        session.wait_screen("Submission review:")
+        expected_sequence = [
+            (
+                "interviewer",
+                f"compact-question-{index}-" + "wrapped-content-" * 3,
+            )
+            for index in range(6)
+        ] + [("submission-review", "")]
+        assert captured_turn_sequence(home) == expected_sequence
+        assert len(captured_turns(home)) == 7
         session.wait_screen("Submit recorded")
-        session.send(b"\t\t")
+        session.send(b"\t")
         session.wait_screen("Editor [active]")
         quit_from_editor(session)
     assert_codex_cleanup(home)
@@ -546,6 +632,9 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
     try:
         with fixture.launch(database, environment, no_codex=True) as session:
             open_solve(session)
+            if mode == "flood":
+                session.watch_raw(b"\x1b]0;hostile-title\x07")
+                session.watch_raw(b"hostile-title")
             session.send(F9)
             if mode == "cancel":
                 session.wait_predicate("runner pid fixture", pid_file.exists)
@@ -558,6 +647,7 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
             session.send(b"\t\t")
             session.wait_screen("Output / Test [active]")
             expected = {
+                "fail": ("Exited(7)", ("fail", 7)),
                 "timeout": ("TimedOut", ("error", None)),
                 "cancel": ("Cancelled", ("cancelled", 130)),
                 "flood": ("output truncated", ("pass", 0)),
@@ -570,7 +660,13 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
                 session.send(b"j" * 20)
                 session.wait_screen("flood-0005")
                 assert "hostile-title" not in session.screen.text()
+                assert not session.raw_sequence_seen(b"\x1b]0;hostile-title\x07")
+                assert not session.raw_sequence_seen(b"hostile-title")
+                assert all(
+                    "hostile-title" not in event for event in session.screen.osc_events
+                )
                 assert len(session.output) <= 4 * 1024 * 1024
+                assert len(session.screen.osc_events) <= 128
             if mode in {"group-descendant", "escaped-descendant"}:
                 session.wait_predicate("descendant pid fixture", pid_file.exists)
                 escaped_pid = int(pid_file.read_text(encoding="utf-8"))
@@ -586,12 +682,68 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
         if mode == "escaped-descendant":
             assert Path(f"/proc/{escaped_pid}").exists()
     finally:
-        if mode == "escaped-descendant" and escaped_pid > 0:
-            kill_fixture_process(escaped_pid)
+        # Matrix.run owns the outer cleanup registry finalizer so PID files are reread even if an
+        # assertion above aborts before escaped_pid is assigned.
+        pass
     assert not (home / "fake-version-probe").exists()
     outcome = query_attempts(database)[0]
     boundary = " explicit-escaped-pid-cleanup" if mode == "escaped-descendant" else ""
     return f"attempt={outcome[0]} exit={outcome[1]} responsive=yes{boundary}"
+
+
+def run_signal_during_record_lock_case(
+    fixture: MatrixFixture,
+    signal_number: int,
+    iteration: int,
+) -> str:
+    assert signal_number in {signal.SIGINT, signal.SIGTERM}
+    expected_status = 130 if signal_number == signal.SIGINT else 143
+    fixture.set_runner("record-lock")
+    label = f"signal-lock-{signal_number}-{iteration}"
+    database = fixture.database(label)
+    pid_file = fixture.temporary / f"{label}.pid"
+    ready_file = fixture.temporary / f"{label}.ready"
+    disposition_file = fixture.temporary / f"{label}.dispositions"
+    environment, _home = fixture.environment(no_codex=True, pid_file=pid_file)
+    environment["PRACTICE_RECORD_READY_FILE"] = str(ready_file)
+    environment["INTERVIEW_TUTOR_TEST_SIGNAL_DISPOSITION_FILE"] = str(disposition_file)
+
+    lock = sqlite3.connect(database, timeout=1.0, isolation_level=None)
+    try:
+        with fixture.launch(database, environment, no_codex=True) as session:
+            open_solve(session)
+            lock.execute("BEGIN IMMEDIATE")
+            try:
+                session.send(F9)
+                session.wait_predicate(
+                    "record-lock runner completion", ready_file.exists
+                )
+                session.wait_predicate(
+                    "record-lock runner exit",
+                    lambda: (
+                        pid_file.exists()
+                        and not Path(
+                            f"/proc/{int(pid_file.read_text(encoding='utf-8'))}"
+                        ).exists()
+                    ),
+                )
+                time.sleep(0.05)
+                os.kill(session.process.pid, signal_number)
+                time.sleep(0.05)
+            finally:
+                lock.execute("COMMIT")
+            session.wait_exit(expected_status)
+    finally:
+        lock.close()
+
+    assert query_attempts(database) == [("cancelled", expected_status)]
+    assert disposition_file.read_text(encoding="utf-8") == (
+        "dispositions=restored mask=restored\n"
+    )
+    return (
+        f"signal={signal.Signals(signal_number).name} attempt=cancelled "
+        f"exit={expected_status} dispositions=restored mask=restored iteration={iteration}"
+    )
 
 
 def codex_local_recovery(session: PtySession, database: Path) -> None:
@@ -624,8 +776,10 @@ def run_codex_case(fixture: MatrixFixture, mode: str) -> str:
             elif mode == "queue-flood":
                 session.wait_predicate(
                     "queue flood failure",
-                    lambda: "Codex: disconnected" in session.screen.text()
-                    or "Codex: protocol error" in session.screen.text(),
+                    lambda: (
+                        "Codex: disconnected" in session.screen.text()
+                        or "Codex: protocol error" in session.screen.text()
+                    ),
                 )
                 codex_local_recovery(session, database)
                 turns = len(captured_turns(home))
@@ -653,8 +807,11 @@ def run_codex_case(fixture: MatrixFixture, mode: str) -> str:
                     session.wait_screen("Interviewer:")
                     session.wait_predicate(
                         "single Codex reconnect",
-                        lambda: (home / "fake-start-count").exists()
-                        and (home / "fake-start-count").read_text(encoding="utf-8") == "2",
+                        lambda: (
+                            (home / "fake-start-count").exists()
+                            and (home / "fake-start-count").read_text(encoding="utf-8")
+                            == "2"
+                        ),
                     )
                 elif mode == "stderr-flood":
                     session.wait_screen("Interviewer:")
@@ -670,8 +827,16 @@ def run_codex_case(fixture: MatrixFixture, mode: str) -> str:
                 codex_local_recovery(session, database)
     assert_codex_cleanup(home)
     probe_path = home / "fake-version-probe"
-    probes = probe_path.read_text(encoding="utf-8").count("version") if probe_path.exists() else 0
-    reconnects = int((home / "fake-start-count").read_text(encoding="utf-8")) if (home / "fake-start-count").exists() else 0
+    probes = (
+        probe_path.read_text(encoding="utf-8").count("version")
+        if probe_path.exists()
+        else 0
+    )
+    reconnects = (
+        int((home / "fake-start-count").read_text(encoding="utf-8"))
+        if (home / "fake-start-count").exists()
+        else 0
+    )
     return f"turns={turns} version_probes={probes} starts={reconnects} local_test=pass attempts=0 status=0"
 
 
@@ -750,13 +915,18 @@ def config_case(fixture: MatrixFixture) -> str:
 
 
 class Matrix:
-    def __init__(self) -> None:
+    def __init__(self, cleanup: Callable[[], None]) -> None:
         self.started = time.monotonic()
+        self.cleanup = cleanup
         self.results: list[tuple[str, float, str]] = []
 
     def run(self, name: str, operation: Callable[[], str]) -> None:
         started = time.monotonic()
-        evidence = operation()
+        try:
+            with hard_deadline(20.0, f"PTY case {name}"):
+                evidence = operation()
+        finally:
+            self.cleanup()
         elapsed = time.monotonic() - started
         assert elapsed <= 20.0, f"case {name} exceeded 20s: {elapsed:.3f}s"
         self.results.append((name, elapsed, evidence))
@@ -778,6 +948,7 @@ def full_matrix(fixture: MatrixFixture, matrix: Matrix) -> None:
     matrix.run("resize-preservation", lambda: resize_case(fixture))
 
     for mode in [
+        "fail",
         "timeout",
         "cancel",
         "flood",
@@ -785,6 +956,17 @@ def full_matrix(fixture: MatrixFixture, matrix: Matrix) -> None:
         "escaped-descendant",
     ]:
         matrix.run(f"runner-{mode}", lambda mode=mode: run_runner_case(fixture, mode))
+
+    for iteration in range(1, 3):
+        for signal_number in [signal.SIGINT, signal.SIGTERM]:
+            matrix.run(
+                f"signal-record-lock-{signal.Signals(signal_number).name.lower()}-{iteration}",
+                lambda signal_number=signal_number, iteration=iteration: (
+                    run_signal_during_record_lock_case(
+                        fixture, signal_number, iteration
+                    )
+                ),
+            )
 
     for mode in [
         "auth-required",
@@ -846,17 +1028,21 @@ def main() -> int:
     interview_binary, practice_binary, repository_root = map(
         lambda value: Path(value).resolve(), arguments
     )
-    matrix = Matrix()
-    with tempfile.TemporaryDirectory(prefix="interview-pty-matrix-") as directory:
-        fixture = MatrixFixture(
-            Path(directory), interview_binary, practice_binary, repository_root
-        )
-        if race:
-            race_matrix(fixture, matrix)
-            matrix.finish(maximum=90.0)
-        else:
-            full_matrix(fixture, matrix)
-            matrix.finish(maximum=90.0)
+    with hard_deadline(90.0, "complete PTY matrix"):
+        with tempfile.TemporaryDirectory(prefix="interview-pty-matrix-") as directory:
+            fixture = MatrixFixture(
+                Path(directory), interview_binary, practice_binary, repository_root
+            )
+            matrix = Matrix(fixture.finalize_case)
+            try:
+                if race:
+                    race_matrix(fixture, matrix)
+                    matrix.finish(maximum=90.0)
+                else:
+                    full_matrix(fixture, matrix)
+                    matrix.finish(maximum=90.0)
+            finally:
+                fixture.cleanup.close()
     return 0
 
 

@@ -1,6 +1,7 @@
 use crate::app::model::{SolvePane, SolveSession};
 use crate::app::{AppState, Effect, Event, LoadScope, Repository, reduce};
 use crate::runner::{self, CancellationToken, ExecutionLimits};
+use crate::signals::{ScopedSignalHandlers, SignalState};
 use crate::source;
 use crate::tui::{input, render};
 use crossterm::cursor::{Hide, Show};
@@ -17,70 +18,6 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-
-struct RuntimeSignalHandlers {
-    registrations: Vec<signal_hook::SigId>,
-    received: Arc<std::sync::atomic::AtomicI32>,
-}
-
-impl RuntimeSignalHandlers {
-    fn register() -> Result<Self, String> {
-        let received = Arc::new(std::sync::atomic::AtomicI32::new(0));
-        let mut registrations = Vec::with_capacity(2);
-        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-            let handler_received = Arc::clone(&received);
-            // SAFETY: the handler performs only a lock-free atomic compare-exchange through an owned Arc.
-            let registration = unsafe {
-                signal_hook::low_level::register(signal, move || {
-                    let _ = handler_received.compare_exchange(
-                        0,
-                        signal,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Acquire,
-                    );
-                })
-            }
-            .map_err(|error| format!("cannot register terminal signal handler: {error}"));
-            match registration {
-                Ok(registration) => registrations.push(registration),
-                Err(error) => {
-                    for registration in registrations {
-                        signal_hook::low_level::unregister(registration);
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        assert_eq!(registrations.len(), 2);
-        Ok(Self {
-            registrations,
-            received,
-        })
-    }
-
-    fn received(&self) -> Option<i32> {
-        match self.received.load(std::sync::atomic::Ordering::Acquire) {
-            0 => None,
-            signal => Some(signal),
-        }
-    }
-
-    fn exit_code(&self) -> Option<u8> {
-        self.received().map(|signal| match signal {
-            signal_hook::consts::SIGINT => 130,
-            signal_hook::consts::SIGTERM => 143,
-            _ => unreachable!("only SIGINT and SIGTERM are registered"),
-        })
-    }
-}
-
-impl Drop for RuntimeSignalHandlers {
-    fn drop(&mut self) {
-        for registration in self.registrations.drain(..) {
-            let _ = signal_hook::low_level::unregister(registration);
-        }
-    }
-}
 
 struct TerminalGuard;
 impl TerminalGuard {
@@ -134,6 +71,15 @@ struct RunCancellation {
 }
 
 impl RunCancellation {
+    fn with_signal_state(signal_state: Option<SignalState>) -> Self {
+        let token =
+            signal_state.map_or_else(CancellationToken::new, CancellationToken::with_signal_state);
+        Self {
+            token,
+            state: Arc::new(std::sync::Mutex::new(RunCancellationState::default())),
+        }
+    }
+
     fn cancel(&self, exit_code: i32) {
         assert!(matches!(exit_code, 130 | 143));
         let mut state = self.state.lock().expect("run cancellation lock");
@@ -146,6 +92,12 @@ impl RunCancellation {
 
     fn finish(&self) -> Option<i32> {
         let mut state = self.state.lock().expect("run cancellation lock");
+        if state.completed {
+            return state.exit_code;
+        }
+        if let Some(exit_code) = self.token.signal_exit_code() {
+            state.exit_code.get_or_insert(exit_code);
+        }
         state.completed = true;
         state.exit_code
     }
@@ -798,6 +750,7 @@ struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
     join: Option<JoinHandle<()>>,
+    signal_state: Option<SignalState>,
     active: Option<(
         crate::app::model::OperationId,
         u64,
@@ -806,7 +759,7 @@ struct RunnerWorker {
     )>,
 }
 impl RunnerWorker {
-    fn start(root: PathBuf, database_path: PathBuf) -> Self {
+    fn start(root: PathBuf, database_path: PathBuf, signal_state: SignalState) -> Self {
         let save_root = root.clone();
         let execute_database = database_path.clone();
         let execution_limits = runtime_execution_limits();
@@ -814,32 +767,44 @@ impl RunnerWorker {
         let finalize_root = record_root.clone();
         let record_database = database_path;
         let finalize_database = record_database.clone();
-        Self::start_with_services(RunnerServices {
-            save: Arc::new(move |_, solution_path, source| {
-                source::atomic_save(&save_root, solution_path, source)
-            }),
-            execute: Arc::new(move |plan, cancellation| {
-                runner::execute(
-                    plan,
-                    &execute_database,
-                    &execution_limits,
-                    cancellation,
-                    None,
-                )
-            }),
-            record: Arc::new(move |plan, result| {
-                let connection = crate::database::open_database(&record_database, &record_root)?;
-                runner::record_execution(&connection, plan, result)
-            }),
-            finalize_cancelled: Arc::new(move |attempt_id, exit_code| {
-                let connection =
-                    crate::database::open_database(&finalize_database, &finalize_root)?;
-                crate::database::finalize_attempt_cancelled(&connection, attempt_id, exit_code)
-            }),
-        })
+        Self::start_with_services_and_signal(
+            RunnerServices {
+                save: Arc::new(move |_, solution_path, source| {
+                    source::atomic_save(&save_root, solution_path, source)
+                }),
+                execute: Arc::new(move |plan, cancellation| {
+                    runner::execute(
+                        plan,
+                        &execute_database,
+                        &execution_limits,
+                        cancellation,
+                        None,
+                    )
+                }),
+                record: Arc::new(move |plan, result| {
+                    let connection =
+                        crate::database::open_database(&record_database, &record_root)?;
+                    runner::record_execution(&connection, plan, result)
+                }),
+                finalize_cancelled: Arc::new(move |attempt_id, exit_code| {
+                    let connection =
+                        crate::database::open_database(&finalize_database, &finalize_root)?;
+                    crate::database::finalize_attempt_cancelled(&connection, attempt_id, exit_code)
+                }),
+            },
+            Some(signal_state),
+        )
     }
 
+    #[cfg(test)]
     fn start_with_services(services: RunnerServices) -> Self {
+        Self::start_with_services_and_signal(services, None)
+    }
+
+    fn start_with_services_and_signal(
+        services: RunnerServices,
+        signal_state: Option<SignalState>,
+    ) -> Self {
         let (sender, commands) = mpsc::sync_channel(2);
         let (event_sender, events) = mpsc::sync_channel(64);
         let join = thread::spawn(move || {
@@ -876,6 +841,10 @@ impl RunnerWorker {
                                             if intent == crate::app::RunIntent::Submit {
                                                 let attempt_id = (services.record)(&plan, &result)?;
                                                 assert!(attempt_id > 0);
+                                                // This immediate post-record signal observation is
+                                                // the completion cutoff. Signals seen here rewrite
+                                                // this exact attempt before any completion event is
+                                                // published; later signals apply to runtime teardown.
                                                 if let Some(exit_code) = cancellation.finish() {
                                                     (services.finalize_cancelled)(
                                                         attempt_id, exit_code,
@@ -912,6 +881,7 @@ impl RunnerWorker {
             sender,
             events,
             join: Some(join),
+            signal_state,
             active: None,
         }
     }
@@ -924,7 +894,7 @@ impl RunnerWorker {
         source: String,
         write_source: bool,
     ) -> Result<(), String> {
-        let cancellation = RunCancellation::default();
+        let cancellation = RunCancellation::with_signal_state(self.signal_state.clone());
         self.sender
             .send(WorkerCommand::Run {
                 operation,
@@ -1007,9 +977,14 @@ struct RuntimeWorkers {
 }
 
 impl RuntimeWorkers {
-    fn start(root: PathBuf, database_path: PathBuf, codex_enabled: bool) -> Self {
+    fn start(
+        root: PathBuf,
+        database_path: PathBuf,
+        codex_enabled: bool,
+        signal_state: SignalState,
+    ) -> Self {
         let mut workers = Self {
-            runner: Some(RunnerWorker::start(root, database_path)),
+            runner: Some(RunnerWorker::start(root, database_path, signal_state)),
             codex: None,
         };
         workers.codex = Some(if codex_enabled {
@@ -1198,8 +1173,14 @@ pub fn run(
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("interview requires an interactive terminal".into());
     }
-    let signal_handlers = RuntimeSignalHandlers::register()?;
-    let mut workers = RuntimeWorkers::start(root.clone(), database_path, state.codex.enabled);
+    let signal_handlers = ScopedSignalHandlers::register()?;
+    let signal_state = signal_handlers.state();
+    let mut workers = RuntimeWorkers::start(
+        root.clone(),
+        database_path,
+        state.codex.enabled,
+        signal_state.clone(),
+    );
     let initial = requested_set.map_or(Event::Command(crate::app::Action::Reload), Event::OpenSet);
     let effects = reduce(&mut state, initial);
     let (runner_worker, codex_worker) = workers.parts();
@@ -1229,7 +1210,7 @@ pub fn run(
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
         while !state.quit {
-            if let Some(signal) = signal_handlers.received() {
+            if let Some(signal) = signal_state.received() {
                 let (runner_worker, codex_worker) = workers.parts();
                 runner_worker.interrupt_active(128 + signal);
                 codex_worker.reset();
@@ -1310,8 +1291,11 @@ pub fn run(
         Ok(())
     }));
     workers.shutdown();
-    let exit_code = signal_handlers.exit_code().unwrap_or(0);
-    drop(signal_handlers);
+    let exit_code = signal_state
+        .exit_code()
+        .map(|code| u8::try_from(code).expect("signal exit codes fit u8"))
+        .unwrap_or(0);
+    signal_handlers.restore()?;
     match result {
         Ok(Ok(())) => Ok(exit_code),
         Ok(Err(error)) => Err(error),

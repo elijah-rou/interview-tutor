@@ -11,7 +11,7 @@ import tempfile
 import termios
 import time
 
-from pty_harness import PtySession
+from pty_harness import PtySession, hard_deadline
 
 ENTER_SCREEN = b"\x1b[?1049h"
 LEAVE_SCREEN = b"\x1b[?1049l"
@@ -31,6 +31,7 @@ def run_case(
     codex_home.mkdir(mode=0o700)
     (codex_home / "fake-mode").write_text("normal", encoding="utf-8")
     environment = os.environ.copy()
+    environment.pop("OPENAI_API_KEY", None)
     environment["PRACTICE_ROOT"] = str(repository_root)
     environment["CODEX_HOME"] = str(codex_home)
     environment["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(
@@ -40,6 +41,11 @@ def run_case(
         environment["INTERVIEW_TUTOR_TEST_ERROR_AFTER_ENTER"] = "1"
     if action == "panic":
         environment["INTERVIEW_TUTOR_TEST_PANIC_AFTER_ENTER"] = "1"
+    disposition_file = temporary / f"{name}-signal-dispositions"
+    if action == "quit":
+        environment["INTERVIEW_TUTOR_TEST_SIGNAL_DISPOSITION_FILE"] = str(
+            disposition_file
+        )
 
     command = [
         str(interview_binary),
@@ -77,10 +83,16 @@ def run_case(
         assert termios.tcgetattr(session.slave) == terminal_before, name
         assert not (codex_home / "fake-version-probe").exists(), name
         assert not (codex_home / "fake-capture.jsonl").exists(), name
+        if action == "quit":
+            assert disposition_file.read_text(encoding="utf-8") == (
+                "dispositions=restored mask=restored\n"
+            )
         return elapsed
 
 
-def run_all(interview_binary: Path, repository_root: Path) -> list[tuple[str, float, int]]:
+def run_all(
+    interview_binary: Path, repository_root: Path
+) -> list[tuple[str, float, int]]:
     if sys.platform != "linux":
         raise AssertionError("the Linux PTY cleanup gate must not silently skip")
     evidence = []
@@ -94,14 +106,15 @@ def run_all(interview_binary: Path, repository_root: Path) -> list[tuple[str, fl
             ("sigterm", "sigterm", 143),
         ]:
             started = time.monotonic()
-            elapsed = run_case(
-                name,
-                interview_binary,
-                repository_root,
-                temporary,
-                action,
-                expected_status,
-            )
+            with hard_deadline(CASE_TIMEOUT_SECONDS, f"runtime cleanup {name}"):
+                elapsed = run_case(
+                    name,
+                    interview_binary,
+                    repository_root,
+                    temporary,
+                    action,
+                    expected_status,
+                )
             assert time.monotonic() - started <= CASE_TIMEOUT_SECONDS
             evidence.append((name, elapsed, expected_status))
     return evidence
