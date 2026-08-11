@@ -230,9 +230,15 @@ pub struct SetMember {
 }
 
 #[derive(Clone, Debug)]
+pub struct ProblemMembership {
+    pub ordinal: PositiveOrdinal,
+    pub section: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ResolvedProblem {
     pub problem: Problem,
-    pub membership: Option<SetMember>,
+    pub membership: Option<ProblemMembership>,
 }
 
 #[derive(Clone, Debug)]
@@ -254,7 +260,6 @@ pub struct EnabledLanguage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProblemImplementation {
     pub language: EnabledLanguage,
-    pub runner_path: String,
     pub solution_path: String,
 }
 
@@ -977,9 +982,8 @@ fn problem_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Problem> {
 }
 
 fn set_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SetMember> {
-    let problem = problem_from_row(row)?;
     Ok(SetMember {
-        problem: problem.clone(),
+        problem: problem_from_row(row)?,
         ordinal: row.get(13)?,
         section: row.get(14)?,
     })
@@ -1106,8 +1110,11 @@ pub fn resolve_problem(
         .map_err(sql_error)?
     {
         return Ok(ResolvedProblem {
-            problem: member.problem.clone(),
-            membership: Some(member),
+            problem: member.problem,
+            membership: Some(ProblemMembership {
+                ordinal: member.ordinal,
+                section: member.section,
+            }),
         });
     }
     if is_ascii_decimal(reference) {
@@ -1154,14 +1161,12 @@ pub fn get_implementation(
                AND i.enabled = 1 AND l.enabled = 1",
             params![problem_id, language_id],
             |row| {
-                let runner_path: String = row.get(2)?;
                 Ok(ProblemImplementation {
                     language: EnabledLanguage {
                         slug: row.get(0)?,
                         display_name: row.get(1)?,
-                        runner_path: runner_path.clone(),
+                        runner_path: row.get(2)?,
                     },
-                    runner_path,
                     solution_path: row.get(3)?,
                 })
             },
@@ -1287,14 +1292,12 @@ pub fn list_enabled_implementations(
         .map_err(sql_error)?;
     statement
         .query_map(params![problem_id], |row| {
-            let runner_path: String = row.get(2)?;
             Ok(ProblemImplementation {
                 language: EnabledLanguage {
                     slug: row.get(0)?,
                     display_name: row.get(1)?,
-                    runner_path: runner_path.clone(),
+                    runner_path: row.get(2)?,
                 },
-                runner_path,
                 solution_path: row.get(3)?,
             })
         })
@@ -1312,28 +1315,67 @@ pub fn list_global_problems(
     } else {
         "WHERE p.archived = 0"
     };
-    let sql = format!(
+    let problem_sql = format!(
         "SELECT {PROBLEM_COLUMNS} FROM problems AS p \
          {archived_clause} ORDER BY p.slug"
     );
     let problems = {
-        let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+        let mut statement = connection.prepare(&problem_sql).map_err(sql_error)?;
         statement
             .query_map([], problem_from_row)
             .map_err(sql_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sql_error)?
     };
-    problems
+
+    let implementation_sql = format!(
+        "SELECT p.id, l.slug, l.display_name, l.runner_path, i.solution_path \
+         FROM problems AS p \
+         JOIN problem_implementations AS i ON i.problem_id = p.id \
+         JOIN languages AS l ON l.id = i.language_id \
+         {archived_clause} \
+         AND i.enabled = 1 AND l.enabled = 1 \
+         ORDER BY p.id, l.slug"
+    );
+    let mut implementations_by_problem: HashMap<i64, Vec<ProblemImplementation>> = HashMap::new();
+    {
+        let mut statement = connection.prepare(&implementation_sql).map_err(sql_error)?;
+        let implementations = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    ProblemImplementation {
+                        language: EnabledLanguage {
+                            slug: row.get(1)?,
+                            display_name: row.get(2)?,
+                            runner_path: row.get(3)?,
+                        },
+                        solution_path: row.get(4)?,
+                    },
+                ))
+            })
+            .map_err(sql_error)?;
+        for implementation in implementations {
+            let (problem_id, implementation) = implementation.map_err(sql_error)?;
+            implementations_by_problem
+                .entry(problem_id)
+                .or_default()
+                .push(implementation);
+        }
+    }
+
+    Ok(problems
         .into_iter()
         .map(|problem| {
-            let implementations = list_enabled_implementations(connection, problem.id)?;
-            Ok(ProblemListRow {
+            let implementations = implementations_by_problem
+                .remove(&problem.id)
+                .unwrap_or_default();
+            ProblemListRow {
                 problem,
                 implementations,
-            })
+            }
         })
-        .collect()
+        .collect())
 }
 
 pub fn list_active_global_problems(connection: &Connection) -> Result<Vec<Problem>, String> {
@@ -1359,61 +1401,88 @@ pub fn progress_summary(
     {
         return Err(format!("unknown or disabled language: {language_slug}"));
     }
-    let problems = match scope {
-        ProgressScope::Global => list_active_global_problems(connection)?,
-        ProgressScope::ProblemSet(set_slug) => list_set_members(connection, set_slug)?
-            .into_iter()
-            .map(|member| member.problem)
-            .collect(),
+
+    let (sql, set_id) = match scope {
+        ProgressScope::Global => (
+            "SELECT p.id, p.difficulty, p.topic, \
+                EXISTS(SELECT 1 FROM attempts AS a \
+                       JOIN languages AS l ON l.id = a.language_id \
+                       WHERE a.problem_id = p.id AND a.result = 'pass' \
+                         AND a.test_revision = p.test_revision \
+                         AND (?1 IS NULL OR l.slug = ?1)) \
+             FROM problems AS p WHERE p.archived = 0 AND ?2 IS NULL ORDER BY p.slug",
+            None,
+        ),
+        ProgressScope::ProblemSet(set_slug) => (
+            "SELECT p.id, p.difficulty, p.topic, \
+                EXISTS(SELECT 1 FROM attempts AS a \
+                       JOIN languages AS l ON l.id = a.language_id \
+                       WHERE a.problem_id = p.id AND a.result = 'pass' \
+                         AND a.test_revision = p.test_revision \
+                         AND (?1 IS NULL OR l.slug = ?1)) \
+             FROM problem_set_members AS m \
+             JOIN problems AS p ON p.id = m.problem_id \
+             WHERE m.problem_set_id = ?2 ORDER BY m.ordinal",
+            Some(get_problem_set(connection, set_slug)?.id),
+        ),
     };
-    let completed_ids = completed_problem_ids(connection, language_slug)?;
-    let completed = problems
-        .iter()
-        .filter(|problem| completed_ids.contains(&problem.id))
-        .count();
 
-    let mut by_difficulty = Vec::new();
-    for difficulty in [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard] {
-        let scoped = problems
-            .iter()
-            .filter(|problem| problem.difficulty == difficulty)
-            .collect::<Vec<_>>();
-        if !scoped.is_empty() {
-            by_difficulty.push(DifficultyProgress {
-                difficulty,
-                completed: scoped
-                    .iter()
-                    .filter(|problem| completed_ids.contains(&problem.id))
-                    .count(),
-                total: scoped.len(),
-            });
+    let mut statement = connection.prepare(sql).map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![language_slug, set_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Difficulty>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })
+        .map_err(sql_error)?;
+    let mut total = 0_usize;
+    let mut completed = 0_usize;
+    let mut difficulties: BTreeMap<Difficulty, (usize, usize)> = BTreeMap::new();
+    let mut topics: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut topic_order = Vec::new();
+    for row in rows {
+        let (_problem_id, difficulty, topic, is_completed) = row.map_err(sql_error)?;
+        let completed_increment = usize::from(is_completed);
+        total += 1;
+        completed += completed_increment;
+        let difficulty_progress = difficulties.entry(difficulty).or_default();
+        difficulty_progress.0 += completed_increment;
+        difficulty_progress.1 += 1;
+        if !topics.contains_key(&topic) {
+            topic_order.push(topic.clone());
         }
-    }
-
-    let mut by_topic: Vec<TopicProgress> = Vec::new();
-    for problem in &problems {
-        if let Some(group) = by_topic
-            .iter_mut()
-            .find(|group| group.topic == problem.topic)
-        {
-            group.total += 1;
-            if completed_ids.contains(&problem.id) {
-                group.completed += 1;
-            }
-        } else {
-            by_topic.push(TopicProgress {
-                topic: problem.topic.clone(),
-                completed: usize::from(completed_ids.contains(&problem.id)),
-                total: 1,
-            });
-        }
+        let topic_progress = topics.entry(topic).or_default();
+        topic_progress.0 += completed_increment;
+        topic_progress.1 += 1;
     }
 
     Ok(ProgressSummary {
         completed,
-        total: problems.len(),
-        by_difficulty,
-        by_topic,
+        total,
+        by_difficulty: difficulties
+            .into_iter()
+            .map(|(difficulty, (completed, total))| DifficultyProgress {
+                difficulty,
+                completed,
+                total,
+            })
+            .collect(),
+        by_topic: topic_order
+            .into_iter()
+            .map(|topic| {
+                let (completed, total) = topics
+                    .remove(&topic)
+                    .expect("topic order and aggregate map stay synchronized");
+                TopicProgress {
+                    topic,
+                    completed,
+                    total,
+                }
+            })
+            .collect(),
     })
 }
 

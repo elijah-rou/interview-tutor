@@ -151,45 +151,160 @@ fn language_and_implementation_queries_return_structured_metadata() {
         .problem;
     let implementations = database::list_enabled_implementations(&connection, problem.id).unwrap();
     assert_eq!(implementations[0].language.slug, "python");
-    assert_eq!(implementations[0].runner_path, "python/run");
+    assert_eq!(implementations[0].language.runner_path, "python/run");
     assert_eq!(implementations[0].solution_path, "python/shipped.py");
+
+    let global = database::list_global_problems(&connection, false).unwrap();
+    assert_eq!(global.len(), 1);
+    assert_eq!(global[0].problem.slug, "shipped");
+    assert_eq!(global[0].implementations, implementations);
 }
 
 #[test]
-fn progress_summary_uses_current_revisions_for_global_and_set_scopes() {
+fn resolved_problem_keeps_membership_metadata_separate_from_problem() {
+    let fixture = Fixture::new();
+    let connection = fixture.connection();
+    connection
+        .execute("UPDATE problem_set_members SET section = 'Core'", [])
+        .unwrap();
+
+    let resolved = database::resolve_problem(&connection, "shipped", Some("shipped-set")).unwrap();
+    assert_eq!(resolved.problem.slug, "shipped");
+    let membership = resolved.membership.unwrap();
+    assert_eq!(membership.ordinal.get(), 1);
+    assert_eq!(membership.section.as_deref(), Some("Core"));
+}
+
+#[test]
+fn progress_summary_honors_scope_language_revision_and_outcome() {
     let fixture = Fixture::new();
     let connection = fixture.connection();
     add_custom_problem(&connection, &fixture.root);
+    database::create_problem(
+        &connection,
+        &NewProblem {
+            slug: "second",
+            title: "Second",
+            difficulty: Difficulty::Medium,
+            topic: "Arrays",
+            statement_markdown: "",
+            leetcode_id: None,
+            leetcode_url: "",
+            neetcode_url: "",
+            premium: false,
+        },
+    )
+    .unwrap();
+    database::create_problem_set(&connection, "alternate", "Alternate", "").unwrap();
     database::create_problem_set(&connection, "empty", "Empty", "").unwrap();
+    connection
+        .execute(
+            "INSERT INTO problem_set_members(problem_set_id, problem_id, ordinal) \
+             SELECT ps.id, p.id, 2 FROM problem_sets AS ps, problems AS p \
+             WHERE ps.slug = 'shipped-set' AND p.slug = 'second'",
+            [],
+        )
+        .unwrap();
+    database::add_set_member(&connection, "alternate", "shipped", None, None).unwrap();
 
+    connection
+        .execute(
+            "INSERT INTO attempts(problem_id, language_id, result, test_revision, duration_ms, run_at) \
+             SELECT p.id, l.id, 'pass', 1, 1, '2025-01-01T00:00:00Z' \
+             FROM problems AS p, languages AS l \
+             WHERE p.slug = 'shipped' AND l.slug = 'python'",
+            [],
+        )
+        .unwrap();
     database::record_attempt(
         &connection,
         "shipped",
         "python",
+        AttemptOutcome::Fail,
+        1,
+        Some(1),
+        Some("shipped-set"),
+    )
+    .unwrap();
+    database::record_attempt(
+        &connection,
+        "shipped",
+        "rust",
         AttemptOutcome::Pass,
         1,
         Some(0),
-        None,
+        Some("alternate"),
     )
     .unwrap();
-    connection
-        .execute(
-            "UPDATE problems SET test_revision = 3 WHERE slug = 'shipped'",
-            [],
+    for problem in ["second", "custom"] {
+        database::record_attempt(
+            &connection,
+            problem,
+            "python",
+            AttemptOutcome::Pass,
+            1,
+            Some(0),
+            None,
         )
         .unwrap();
+    }
+
+    let set_any =
+        database::progress_summary(&connection, ProgressScope::ProblemSet("shipped-set"), None)
+            .unwrap();
+    assert_eq!((set_any.completed, set_any.total), (2, 2));
+    assert_eq!(
+        set_any.by_difficulty,
+        vec![
+            database::DifficultyProgress {
+                difficulty: Difficulty::Easy,
+                completed: 1,
+                total: 1,
+            },
+            database::DifficultyProgress {
+                difficulty: Difficulty::Medium,
+                completed: 1,
+                total: 1,
+            },
+        ]
+    );
+    assert_eq!(
+        set_any.by_topic,
+        vec![database::TopicProgress {
+            topic: "Arrays".to_string(),
+            completed: 2,
+            total: 2,
+        }]
+    );
+
+    let set_python = database::progress_summary(
+        &connection,
+        ProgressScope::ProblemSet("shipped-set"),
+        Some("python"),
+    )
+    .unwrap();
+    assert_eq!((set_python.completed, set_python.total), (1, 2));
+    assert_eq!(set_python.by_difficulty[0].completed, 0);
+    assert_eq!(set_python.by_difficulty[1].completed, 1);
+    assert_eq!(set_python.by_topic[0].completed, 1);
 
     let global =
         database::progress_summary(&connection, ProgressScope::Global, Some("python")).unwrap();
-    assert_eq!((global.completed, global.total), (0, 2));
-    assert_eq!(global.by_difficulty.len(), 2);
-    assert_eq!(global.by_difficulty[0].difficulty, Difficulty::Easy);
+    assert_eq!((global.completed, global.total), (2, 3));
     assert_eq!(
-        (
-            global.by_difficulty[0].completed,
-            global.by_difficulty[0].total
-        ),
-        (0, 1)
+        global.by_topic,
+        vec![
+            database::TopicProgress {
+                topic: "Graphs".to_string(),
+                completed: 1,
+                total: 1,
+            },
+            database::TopicProgress {
+                topic: "Arrays".to_string(),
+                completed: 1,
+                total: 2,
+            },
+        ]
     );
 
     let empty = database::progress_summary(
@@ -200,6 +315,7 @@ fn progress_summary_uses_current_revisions_for_global_and_set_scopes() {
     .unwrap();
     assert_eq!((empty.completed, empty.total), (0, 0));
     assert!(empty.by_difficulty.is_empty());
+    assert!(empty.by_topic.is_empty());
 }
 
 #[test]
