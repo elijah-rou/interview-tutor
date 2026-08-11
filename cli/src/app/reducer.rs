@@ -71,6 +71,8 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     let Some(solve) = state.solve.as_mut() else {
         return Vec::new();
     };
+    state.error = None;
+    solve.editor.error = None;
     match action {
         Action::SaveTest | Action::Submit => {
             let intent = if action == Action::Submit {
