@@ -285,13 +285,19 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             }]
         }
         Action::Cancel => {
-            let codex_active = state.codex.active.is_some() || state.codex.connecting.is_some();
+            let codex_operation = state
+                .codex
+                .active
+                .map(|(operation, _, _)| operation)
+                .or(state.codex.connecting);
             let runner_active = solve.running.map(|(operation, _, _)| operation);
-            if codex_active && (solve.pane == SolvePane::Interview || runner_active.is_none()) {
+            if let Some(operation) = codex_operation
+                && (solve.pane == SolvePane::Interview || runner_active.is_none())
+            {
                 state.codex.status = CodexStatus::Disconnected;
                 state.codex.connecting = None;
                 state.codex.active = None;
-                vec![Effect::CancelCodex]
+                vec![Effect::CancelCodex { operation }]
             } else if let Some(operation) = runner_active {
                 state.status = "Cancelling…".into();
                 vec![Effect::CancelRun { operation }]
@@ -435,8 +441,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 && (!solve.editor.dirty()
                     || solve.discard_confirmation == Some(DiscardAction::Quit)) =>
         {
+            state.codex.clear_session();
             state.quit = true;
-            Vec::new()
+            vec![Effect::ResetCodex]
         }
         _ => Vec::new(),
     }
@@ -494,7 +501,12 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             Event::CodexFinished(operation, revision, mode, result) => {
                 if state.codex.active != Some((operation, revision, mode)) {
-                    return Vec::new();
+                    return vec![Effect::FinalizeCodexTurn {
+                        operation,
+                        revision,
+                        mode,
+                        accepted: false,
+                    }];
                 }
                 state.codex.active = None;
                 let message = match result {
@@ -502,7 +514,12 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Err(error) => {
                         state.codex.status = CodexStatus::ProtocolError;
                         state.error = Some(error);
-                        return Vec::new();
+                        return vec![Effect::FinalizeCodexTurn {
+                            operation,
+                            revision,
+                            mode,
+                            accepted: false,
+                        }];
                     }
                 };
                 let current_revision = state.solve.as_ref().expect("solve exists").editor.revision;
@@ -538,6 +555,14 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     mode,
                     accepted: true,
                 }];
+            }
+            Event::CodexDisconnected(error) => {
+                state.codex.connecting = None;
+                state.codex.active = None;
+                state.codex.composer_focused = false;
+                state.codex.status = CodexStatus::Disconnected;
+                state.error = Some(error);
+                return Vec::new();
             }
             Event::RunFinished(operation, revision, intent, saved_source, result) => {
                 let Some(solve) = state.solve.as_mut() else {
@@ -669,7 +694,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     }
     if state.show_help {
         match event {
-            Event::Command(Action::Quit) => state.quit = true,
+            Event::Command(Action::Quit) => {
+                state.codex.clear_session();
+                state.quit = true;
+                return vec![Effect::ResetCodex];
+            }
             Event::Command(Action::Back | Action::Help) => state.show_help = false,
             _ => {}
         }
@@ -768,7 +797,22 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             Screen::Solve => unreachable!("solve events handled above"),
         },
-        Event::CodexConnected(_, _) | Event::CodexFinished(_, _, _, _) => {}
+        Event::CodexFinished(operation, revision, mode, _) => {
+            return vec![Effect::FinalizeCodexTurn {
+                operation,
+                revision,
+                mode,
+                accepted: false,
+            }];
+        }
+        Event::CodexDisconnected(error) => {
+            state.codex.connecting = None;
+            state.codex.active = None;
+            state.codex.composer_focused = false;
+            state.codex.status = CodexStatus::Disconnected;
+            state.error = Some(error);
+        }
+        Event::CodexConnected(_, _) => {}
         Event::OpenSet(slug) => {
             state.selected_set_id = Some(slug);
             state.selected_problem_id = None;
@@ -812,7 +856,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             return load_effect(state);
         }
         Event::Command(Action::Help) => state.show_help = true,
-        Event::Command(Action::Quit) => state.quit = true,
+        Event::Command(Action::Quit) => {
+            state.codex.clear_session();
+            state.quit = true;
+            return vec![Effect::ResetCodex];
+        }
         Event::Command(
             Action::SaveTest
             | Action::Submit
@@ -1328,8 +1376,13 @@ mod tests {
             state.solve.as_ref().unwrap().discard_confirmation,
             Some(DiscardAction::Quit)
         );
-        reduce(&mut state, Event::Command(Action::Quit));
+        state
+            .codex
+            .push_message("Interviewer".into(), "private".into());
+        let quit = reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
+        assert!(state.codex.messages.is_empty());
+        assert!(matches!(quit.as_slice(), [Effect::ResetCodex]));
     }
 
     #[test]
@@ -1470,7 +1523,7 @@ mod tests {
         else {
             panic!("expected interview turn")
         };
-        reduce(
+        let stale = reduce(
             &mut state,
             Event::CodexFinished(
                 OperationId(operation.0 + 1),
@@ -1479,6 +1532,13 @@ mod tests {
                 Ok("stale".into()),
             ),
         );
+        assert!(matches!(
+            stale.as_slice(),
+            [Effect::FinalizeCodexTurn {
+                accepted: false,
+                ..
+            }]
+        ));
         assert_eq!(state.codex.messages.len(), 1);
         assert!(
             !state
@@ -1487,7 +1547,7 @@ mod tests {
                 .iter()
                 .any(|(_, message)| message == "stale")
         );
-        reduce(
+        let failure = reduce(
             &mut state,
             Event::CodexFinished(
                 operation,
@@ -1496,6 +1556,13 @@ mod tests {
                 Err("protocol failed".into()),
             ),
         );
+        assert!(matches!(
+            failure.as_slice(),
+            [Effect::FinalizeCodexTurn {
+                accepted: false,
+                ..
+            }]
+        ));
         assert_eq!(state.codex.status, CodexStatus::ProtocolError);
         assert!(state.solve.is_some());
         state
@@ -1535,7 +1602,7 @@ mod tests {
             panic!("expected interview turn")
         };
 
-        reduce(
+        let wrong_mode = reduce(
             &mut state,
             Event::CodexFinished(
                 operation,
@@ -1544,6 +1611,13 @@ mod tests {
                 Ok("wrong mode".into()),
             ),
         );
+        assert!(matches!(
+            wrong_mode.as_slice(),
+            [Effect::FinalizeCodexTurn {
+                accepted: false,
+                ..
+            }]
+        ));
         assert!(state.codex.active.is_some());
         assert!(
             !state
@@ -1715,14 +1789,14 @@ mod tests {
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
-            [Effect::CancelCodex]
+            [Effect::CancelCodex { operation }] if *operation == OperationId(99)
         ));
         state.codex.active = Some((OperationId(100), 0, CodexMode::Interviewer));
         state.solve.as_mut().unwrap().running = None;
         state.solve.as_mut().unwrap().pane = SolvePane::Problem;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
-            [Effect::CancelCodex]
+            [Effect::CancelCodex { operation }] if *operation == OperationId(100)
         ));
     }
 

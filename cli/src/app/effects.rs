@@ -58,7 +58,9 @@ pub enum Effect {
         mode: crate::codex::prompt::Mode,
         accepted: bool,
     },
-    CancelCodex,
+    CancelCodex {
+        operation: OperationId,
+    },
     ResetCodex,
     LeaveSolve,
 }
@@ -128,4 +130,5 @@ pub enum Event {
         crate::codex::prompt::Mode,
         Result<String, String>,
     ),
+    CodexDisconnected(String),
 }
