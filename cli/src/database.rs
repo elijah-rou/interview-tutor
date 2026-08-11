@@ -1494,7 +1494,7 @@ pub fn record_attempt(
     duration_ms: i64,
     exit_code: Option<i32>,
     set_slug: Option<&str>,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     if duration_ms < 0 {
         return Err("duration must not be negative".to_string());
     }
@@ -1533,7 +1533,35 @@ pub fn record_attempt(
             ],
         )
         .map_err(sql_error)?;
-    Ok(())
+    let attempt_id = connection.last_insert_rowid();
+    assert!(attempt_id > 0);
+    Ok(attempt_id)
+}
+
+pub fn finalize_attempt_cancelled(
+    connection: &Connection,
+    attempt_id: i64,
+    signal_exit_code: i32,
+) -> Result<(), String> {
+    if attempt_id <= 0 {
+        return Err("attempt id must be positive".to_string());
+    }
+    if !matches!(signal_exit_code, 130 | 143) {
+        return Err("cancelled signal exit code must be 130 or 143".to_string());
+    }
+    let transaction = connection.unchecked_transaction().map_err(sql_error)?;
+    let updated = transaction
+        .execute(
+            "UPDATE attempts SET result = ?, exit_code = ? WHERE id = ?",
+            params![AttemptOutcome::Cancelled, signal_exit_code, attempt_id],
+        )
+        .map_err(sql_error)?;
+    if updated != 1 {
+        return Err(format!(
+            "attempt finalization updated {updated} rows; expected 1"
+        ));
+    }
+    transaction.commit().map_err(sql_error)
 }
 
 pub struct NewProblem<'a> {

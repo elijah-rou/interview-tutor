@@ -482,6 +482,50 @@ impl Drop for ExecutionSignalHandlers {
     }
 }
 
+struct BlockedExecutionSignals;
+
+impl BlockedExecutionSignals {
+    fn block() -> Result<Self, String> {
+        // SAFETY: sigset initialization and thread-local mask changes use valid pointers.
+        unsafe {
+            let mut signals = std::mem::zeroed();
+            if libc::sigemptyset(&mut signals) != 0
+                || libc::sigaddset(&mut signals, libc::SIGINT) != 0
+                || libc::sigaddset(&mut signals, libc::SIGTERM) != 0
+                || libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut()) != 0
+            {
+                return Err(format!(
+                    "cannot block execution signals: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            Ok(Self)
+        }
+    }
+
+    fn pending_exit_code(&self) -> Result<Option<i32>, String> {
+        // SAFETY: pending is initialized before sigpending/sigismember read it.
+        unsafe {
+            let mut pending = std::mem::zeroed();
+            if libc::sigpending(&mut pending) != 0 {
+                return Err(format!(
+                    "cannot inspect pending execution signals: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            if libc::sigismember(&pending, libc::SIGINT) == 1 {
+                return Ok(Some(130));
+            }
+            if libc::sigismember(&pending, libc::SIGTERM) == 1 {
+                return Ok(Some(143));
+            }
+            assert_eq!(libc::sigismember(&pending, libc::SIGINT), 0);
+            assert_eq!(libc::sigismember(&pending, libc::SIGTERM), 0);
+            Ok(None)
+        }
+    }
+}
+
 fn run_one(
     context: &Context,
     language: &str,
@@ -508,13 +552,17 @@ fn run_one(
     if cancellation.is_cancelled() {
         result.termination = runner::Termination::Cancelled;
     }
-    runner::record_execution(&context.connection, &plan, &result)?;
-    let signal_exit_code = if result.termination == runner::Termination::Cancelled {
-        signal_handlers.exit_code()
-    } else {
-        None
-    };
+    let blocked_signals = BlockedExecutionSignals::block()?;
+    let attempt_id = runner::record_execution(&context.connection, &plan, &result)?;
+    let pending_exit_code = blocked_signals.pending_exit_code()?;
+    let signal_exit_code = signal_handlers.exit_code().or(pending_exit_code);
+    let signal_cancelled = cancellation.is_cancelled() || signal_exit_code.is_some();
     drop(signal_handlers);
+    if signal_cancelled {
+        let signal_exit_code = signal_exit_code.unwrap_or(130);
+        database::finalize_attempt_cancelled(&context.connection, attempt_id, signal_exit_code)?;
+        result.termination = runner::Termination::Cancelled;
+    }
     io::stderr()
         .write_all(result.display_output.as_bytes())
         .map_err(|error| format!("cannot write runner output: {error}"))?;

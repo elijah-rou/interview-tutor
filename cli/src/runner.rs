@@ -128,6 +128,9 @@ pub struct ExecutionResult {
     pub omitted_bytes: usize,
     pub dropped_events: usize,
     pub duration_ms: i64,
+    discovery_stdout: Option<String>,
+    discovery_stderr: Option<String>,
+    discovery_stdout_truncated: bool,
 }
 
 impl ExecutionResult {
@@ -223,11 +226,18 @@ enum ReaderMessage {
 
 struct OutputRetention {
     limit: usize,
-    total_bytes: usize,
-    initial: Vec<RawEvent>,
+    raw_bytes: usize,
+    sanitized_bytes: usize,
+    initial: Vec<SanitizedEvent>,
     initial_bytes: usize,
-    tail: VecDeque<RawEvent>,
+    tail: VecDeque<SanitizedEvent>,
     tail_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SanitizedEvent {
+    stream: Stream,
+    text: String,
 }
 
 impl OutputRetention {
@@ -235,7 +245,8 @@ impl OutputRetention {
         assert!(limit >= MIN_DISPLAY_OUTPUT_BYTES);
         Self {
             limit,
-            total_bytes: 0,
+            raw_bytes: 0,
+            sanitized_bytes: 0,
             initial: Vec::new(),
             initial_bytes: 0,
             tail: VecDeque::new(),
@@ -243,69 +254,63 @@ impl OutputRetention {
         }
     }
 
-    fn push(&mut self, stream: Stream, bytes: &[u8]) {
-        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+    fn push_raw(&mut self, count: usize) {
+        self.raw_bytes = self.raw_bytes.saturating_add(count);
+    }
+
+    fn push_sanitized(&mut self, stream: Stream, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.sanitized_bytes = self.sanitized_bytes.saturating_add(text.len());
         if self.initial_bytes < self.limit {
-            let retained = bytes.len().min(self.limit - self.initial_bytes);
-            push_event(&mut self.initial, stream, &bytes[..retained]);
-            self.initial_bytes += retained;
+            let end = floor_char_boundary(text, (self.limit - self.initial_bytes).min(text.len()));
+            push_sanitized_event(&mut self.initial, stream, &text[..end]);
+            self.initial_bytes += end;
         }
+
         let tail_limit = self.limit / 2;
-        if let Some(last) = self.tail.back_mut().filter(|last| last.stream == stream) {
-            last.bytes.extend_from_slice(bytes);
-        } else {
-            self.tail.push_back(RawEvent {
-                stream,
-                bytes: bytes.to_vec(),
-            });
-        }
-        self.tail_bytes += bytes.len();
+        push_sanitized_event_deque(&mut self.tail, stream, text);
+        self.tail_bytes += text.len();
         while self.tail_bytes > tail_limit {
             let excess = self.tail_bytes - tail_limit;
             let front = self
                 .tail
                 .front_mut()
                 .expect("tail byte count implies a chunk");
-            if excess < front.bytes.len() {
-                front.bytes.drain(..excess);
-                self.tail_bytes -= excess;
+            if excess < front.text.len() {
+                let removed = ceil_char_boundary(&front.text, excess);
+                front.text.drain(..removed);
+                self.tail_bytes -= removed;
                 break;
             }
             let removed = self.tail.pop_front().expect("tail contains front chunk");
-            self.tail_bytes -= removed.bytes.len();
+            self.tail_bytes -= removed.text.len();
         }
         assert!(self.initial_bytes <= self.limit);
         assert!(self.tail_bytes <= tail_limit);
     }
 
-    fn finish(self, tagged: bool) -> (String, usize) {
+    fn finish(self, tagged: bool) -> (String, usize, bool) {
         let all = render_events(&self.initial, tagged);
-        if self.total_bytes == self.initial_bytes && all.len() <= self.limit {
-            return (all, 0);
+        let omitted_bytes = self.raw_bytes.saturating_sub(self.limit);
+        let truncated = omitted_bytes != 0
+            || self.sanitized_bytes > self.initial_bytes
+            || all.len() > self.limit;
+        if !truncated {
+            return (all, 0, false);
         }
 
-        let tail_source: Vec<RawEvent> = if self.total_bytes == self.initial_bytes {
-            self.initial.clone()
-        } else {
-            self.tail.into_iter().collect()
-        };
+        let tail: Vec<SanitizedEvent> = self.tail.into_iter().collect();
+        let available = self.initial_bytes.min(self.limit);
         let mut low = 0_usize;
-        let mut high = self.total_bytes.min(self.limit);
-        let mut best = (
-            render_truncated(&self.initial, &tail_source, 0, self.total_bytes, tagged),
-            0,
-        );
+        let mut high = available;
+        let mut best = render_truncated(&self.initial, &tail, 0, omitted_bytes, tagged);
         while low <= high {
             let budget = low + (high - low) / 2;
-            let rendered = render_truncated(
-                &self.initial,
-                &tail_source,
-                budget,
-                self.total_bytes,
-                tagged,
-            );
+            let rendered = render_truncated(&self.initial, &tail, budget, omitted_bytes, tagged);
             if rendered.len() <= self.limit {
-                best = (rendered, budget);
+                best = rendered;
                 low = budget.saturating_add(1);
             } else if budget == 0 {
                 break;
@@ -313,73 +318,95 @@ impl OutputRetention {
                 high = budget - 1;
             }
         }
-        assert!(best.0.len() <= self.limit);
-        (best.0, self.total_bytes - best.1)
+        assert!(best.len() <= self.limit);
+        (best, omitted_bytes, true)
     }
 }
 
-fn push_event(events: &mut Vec<RawEvent>, stream: Stream, bytes: &[u8]) {
-    if bytes.is_empty() {
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn push_sanitized_event(events: &mut Vec<SanitizedEvent>, stream: Stream, text: &str) {
+    if text.is_empty() {
         return;
     }
     if let Some(last) = events.last_mut().filter(|last| last.stream == stream) {
-        last.bytes.extend_from_slice(bytes);
+        last.text.push_str(text);
     } else {
-        events.push(RawEvent {
+        events.push(SanitizedEvent {
             stream,
-            bytes: bytes.to_vec(),
+            text: text.to_string(),
         });
     }
 }
 
-fn take_prefix(events: &[RawEvent], count: usize) -> Vec<RawEvent> {
+fn push_sanitized_event_deque(events: &mut VecDeque<SanitizedEvent>, stream: Stream, text: &str) {
+    if let Some(last) = events.back_mut().filter(|last| last.stream == stream) {
+        last.text.push_str(text);
+    } else {
+        events.push_back(SanitizedEvent {
+            stream,
+            text: text.to_string(),
+        });
+    }
+}
+
+fn take_prefix(events: &[SanitizedEvent], count: usize) -> Vec<SanitizedEvent> {
     let mut result = Vec::new();
     let mut remaining = count;
     for event in events {
-        let taken = event.bytes.len().min(remaining);
-        push_event(&mut result, event.stream, &event.bytes[..taken]);
-        remaining -= taken;
+        let taken = floor_char_boundary(&event.text, event.text.len().min(remaining));
+        push_sanitized_event(&mut result, event.stream, &event.text[..taken]);
+        remaining = remaining.saturating_sub(taken);
         if remaining == 0 {
             break;
         }
     }
-    assert_eq!(remaining, 0);
     result
 }
 
-fn take_tail(events: &[RawEvent], count: usize) -> Vec<RawEvent> {
+fn take_tail(events: &[SanitizedEvent], count: usize) -> Vec<SanitizedEvent> {
     let mut reversed = Vec::new();
     let mut remaining = count;
     for event in events.iter().rev() {
-        let taken = event.bytes.len().min(remaining);
-        reversed.push(RawEvent {
+        let start = ceil_char_boundary(&event.text, event.text.len().saturating_sub(remaining));
+        reversed.push(SanitizedEvent {
             stream: event.stream,
-            bytes: event.bytes[event.bytes.len() - taken..].to_vec(),
+            text: event.text[start..].to_string(),
         });
-        remaining -= taken;
+        remaining = remaining.saturating_sub(event.text.len() - start);
         if remaining == 0 {
             break;
         }
     }
-    assert_eq!(remaining, 0);
     reversed.reverse();
     reversed
 }
 
 fn render_truncated(
-    prefix_source: &[RawEvent],
-    tail_source: &[RawEvent],
+    prefix_source: &[SanitizedEvent],
+    tail_source: &[SanitizedEvent],
     budget: usize,
-    total_bytes: usize,
+    omitted_bytes: usize,
     tagged: bool,
 ) -> String {
-    let prefix_bytes = budget.div_ceil(2);
-    let tail_bytes = budget / 2;
-    let prefix = take_prefix(prefix_source, prefix_bytes);
-    let tail = take_tail(tail_source, tail_bytes);
-    let omitted = total_bytes - budget;
+    let prefix = take_prefix(prefix_source, budget.div_ceil(2));
+    let tail = take_tail(tail_source, budget / 2);
     format!(
-        "{}\n[... {omitted} bytes omitted ...]\n{}",
+        "{}\n[... {omitted_bytes} bytes omitted ...]\n{}",
         render_events(&prefix, tagged),
         render_events(&tail, tagged)
     )
@@ -410,34 +437,16 @@ fn sanitize_chunk(parser: &mut Parser, output: &mut SanitizedText, bytes: &[u8])
     std::mem::take(&mut output.text)
 }
 
-fn sanitize_events(events: &[RawEvent]) -> Vec<(Stream, String)> {
-    let mut stdout_parser = Parser::new();
-    let mut stderr_parser = Parser::new();
-    let mut stdout = SanitizedText::default();
-    let mut stderr = SanitizedText::default();
-    let mut rendered = Vec::new();
-    for event in events {
-        let output = match event.stream {
-            Stream::Stdout => sanitize_chunk(&mut stdout_parser, &mut stdout, &event.bytes),
-            Stream::Stderr => sanitize_chunk(&mut stderr_parser, &mut stderr, &event.bytes),
-        };
-        if !output.is_empty() {
-            rendered.push((event.stream, output));
-        }
-    }
-    rendered
-}
-
-fn render_events(events: &[RawEvent], tagged: bool) -> String {
+fn render_events(events: &[SanitizedEvent], tagged: bool) -> String {
     let mut result = String::new();
-    for (stream, text) in sanitize_events(events) {
+    for event in events {
         if tagged {
-            result.push_str(match stream {
+            result.push_str(match event.stream {
                 Stream::Stdout => "[stdout] ",
                 Stream::Stderr => "[stderr] ",
             });
         }
-        result.push_str(&text);
+        result.push_str(&event.text);
     }
     result
 }
@@ -613,6 +622,8 @@ fn deliver_event(
 fn retain_and_deliver(
     event: RawEvent,
     retention: &mut OutputRetention,
+    discovery_stdout: &mut Option<OutputRetention>,
+    discovery_stderr: &mut Option<OutputRetention>,
     stdout_parser: &mut Parser,
     stderr_parser: &mut Parser,
     stdout: &mut SanitizedText,
@@ -620,12 +631,23 @@ fn retain_and_deliver(
     event_sender: Option<&SyncSender<ExecutionEvent>>,
     dropped_events: &mut usize,
 ) {
-    retention.push(event.stream, &event.bytes);
+    retention.push_raw(event.bytes.len());
+    let stream_retention = match event.stream {
+        Stream::Stdout => discovery_stdout,
+        Stream::Stderr => discovery_stderr,
+    };
+    if let Some(stream_retention) = stream_retention {
+        stream_retention.push_raw(event.bytes.len());
+    }
     let (parser, output) = match event.stream {
         Stream::Stdout => (stdout_parser, stdout),
         Stream::Stderr => (stderr_parser, stderr),
     };
     let text = sanitize_chunk(parser, output, &event.bytes);
+    retention.push_sanitized(event.stream, &text);
+    if let Some(stream_retention) = stream_retention {
+        stream_retention.push_sanitized(event.stream, &text);
+    }
     if !text.is_empty() {
         deliver_event(event_sender, event.stream, text, dropped_events);
     }
@@ -637,6 +659,7 @@ struct CommandSpec<'a> {
     current_dir: &'a Path,
     database_path: Option<&'a Path>,
     tagged_output: bool,
+    capture_discovery_streams: bool,
 }
 
 fn execute_command(
@@ -729,6 +752,12 @@ fn execute_command(
     drop(sender);
 
     let mut retention = OutputRetention::new(limits.display_output_bytes);
+    let mut discovery_stdout = spec
+        .capture_discovery_streams
+        .then(|| OutputRetention::new(limits.display_output_bytes));
+    let mut discovery_stderr = spec
+        .capture_discovery_streams
+        .then(|| OutputRetention::new(limits.display_output_bytes));
     let mut event_stdout_parser = Parser::new();
     let mut event_stderr_parser = Parser::new();
     let mut event_stdout = SanitizedText::default();
@@ -764,12 +793,12 @@ fn execute_command(
                     priority_termination(cancellation, started, limits.wall_timeout)
                 {
                     requested_termination = Some(termination);
-                    retention.push(event.stream, &event.bytes);
-                    break;
                 }
                 retain_and_deliver(
                     event,
                     &mut retention,
+                    &mut discovery_stdout,
+                    &mut discovery_stderr,
                     &mut event_stdout_parser,
                     &mut event_stderr_parser,
                     &mut event_stdout,
@@ -777,6 +806,9 @@ fn execute_command(
                     event_sender,
                     &mut dropped_events,
                 );
+                if requested_termination.is_some() {
+                    break;
+                }
             }
             Ok(ReaderMessage::Finished(stream, result)) => {
                 finished_readers += 1;
@@ -829,6 +861,8 @@ fn execute_command(
             Ok(ReaderMessage::Output(event)) => retain_and_deliver(
                 event,
                 &mut retention,
+                &mut discovery_stdout,
+                &mut discovery_stderr,
                 &mut event_stdout_parser,
                 &mut event_stderr_parser,
                 &mut event_stdout,
@@ -853,6 +887,8 @@ fn execute_command(
             ReaderMessage::Output(event) => retain_and_deliver(
                 event,
                 &mut retention,
+                &mut discovery_stdout,
+                &mut discovery_stderr,
                 &mut event_stdout_parser,
                 &mut event_stderr_parser,
                 &mut event_stdout,
@@ -894,7 +930,13 @@ fn execute_command(
         })?)?
     };
     let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let (display_output, omitted_bytes) = retention.finish(spec.tagged_output);
+    let (display_output, omitted_bytes, _display_truncated) = retention.finish(spec.tagged_output);
+    let (discovery_stdout, discovery_stdout_truncated) = discovery_stdout
+        .map(|retention| retention.finish(false))
+        .map_or((None, false), |(output, _, truncated)| {
+            (Some(output), truncated)
+        });
+    let discovery_stderr = discovery_stderr.map(|retention| retention.finish(false).0);
     assert!(display_output.len() <= limits.display_output_bytes);
     if cancellation.is_cancelled() {
         termination = Termination::Cancelled;
@@ -905,6 +947,9 @@ fn execute_command(
         omitted_bytes,
         dropped_events,
         duration_ms,
+        discovery_stdout,
+        discovery_stderr,
+        discovery_stdout_truncated,
     })
 }
 
@@ -932,6 +977,7 @@ pub fn execute(
             current_dir: parent,
             database_path: Some(database_path),
             tagged_output: true,
+            capture_discovery_streams: false,
         },
         limits,
         cancellation,
@@ -954,25 +1000,34 @@ pub fn discover_adapters(
             current_dir: parent,
             database_path: None,
             tagged_output: false,
+            capture_discovery_streams: true,
         },
         limits,
         cancellation,
         None,
     )?;
+    let stdout = result
+        .discovery_stdout
+        .as_deref()
+        .expect("discovery execution captures stdout");
+    let stderr = result
+        .discovery_stderr
+        .as_deref()
+        .expect("discovery execution captures stderr");
     if result.termination != Termination::Exited(0) {
         return Err(format!(
-            "language runner discovery failed: {:?}",
-            result.termination
+            "language runner discovery failed: {:?}: {}",
+            result.termination,
+            stderr.trim()
         ));
     }
-    if result.omitted_bytes != 0 {
+    if result.discovery_stdout_truncated {
         return Err(format!(
             "language runner discovery exceeded {} output bytes",
             limits.display_output_bytes
         ));
     }
-    Ok(result
-        .display_output
+    Ok(stdout
         .lines()
         .map(str::trim)
         .filter(|slug| !slug.is_empty())
@@ -984,7 +1039,7 @@ pub fn record_execution(
     connection: &Connection,
     plan: &ExecutionPlan,
     result: &ExecutionResult,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     database::record_attempt(
         connection,
         &plan.problem_slug,
