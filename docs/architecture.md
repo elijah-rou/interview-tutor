@@ -7,7 +7,7 @@ The checked-in distribution has two independent layers:
 1. `catalog/problems.json` defines global problems and installed language adapter source paths.
 2. `problem_sets/*.json` defines ordered references to global problem slugs.
 
-A catalog revision seeds or upgrades the local database once. The database is the runtime authority for user-created problems and sets; opening the CLI does not continuously overwrite local CRUD. Shipped problems and sets are marked managed and read-only through local CRUD, preventing a later catalog revision from silently replacing user edits. Custom resources are fully editable.
+A catalog revision seeds or upgrades the local database once. Each upgrade reconciles the exact managed catalog and retires managed resources that were omitted, without changing custom resources or attempt history. The database is the runtime authority for user-created problems and sets; opening the CLI does not continuously overwrite local CRUD. Shipped problems and sets are marked managed and read-only through local CRUD. Custom resources are fully editable.
 
 ## Runtime schema
 
@@ -26,7 +26,7 @@ Completion is derived from a passing attempt whose revision matches the global p
 
 `practice_cli::database::resolve_problem` resolves either a global slug or an exact set slug/index. `practice_cli::runner::plan_execution` produces the runner and solution paths. `execute_plan` invokes the set-agnostic language protocol, and `record_execution` writes one central attempt. Language-local wrappers suppress their compatibility recorder during central execution.
 
-This plan/result boundary is the integration point for the future TUI. A Rust TUI can reuse the CLI crate modules to load statement Markdown and solution paths from the database, edit the selected source, stream the language subprocess in a bounded output pane, and submit without parsing human CLI tables.
+This plan/result boundary is the integration point for the future TUI. A Rust TUI can reuse the CLI crate modules to load statement Markdown and registered paths without parsing human CLI tables. The current executor inherits child output and has no timeout or cancellation API. Bounded output streaming belongs to the later runner layer.
 
 ## Extension path
 
