@@ -6,6 +6,6 @@ Custom problems are normally added through `practice problems add`. The database
 
 ## Statement content and provenance
 
-Shipped statement briefs are independently written from checked-in titles, topics, Python and Rust interfaces, data structures, and public executable cases. They do not reproduce third-party problem prose. The executable adapter cases remain authoritative when a brief is intentionally narrow or a detail is not specified.
+Shipped statement briefs are independently written from checked-in titles, topics, Python and Rust interfaces, data structures, and public executable cases. They do not reproduce third-party problem prose. The local briefs together with the language signatures define the intended user contract. Checked-in executable cases are representative rather than exhaustive, and they are authoritative if a case conflicts with a brief.
 
 External URLs are references for users who want additional context. They are not sources for local statement text and are not required to use the catalog offline.
