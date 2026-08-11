@@ -58,8 +58,10 @@ fn restore_selection(state: &mut AppState) {
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     if state.show_help {
-        if matches!(event, Event::Command(Action::Back | Action::Help)) {
-            state.show_help = false;
+        match event {
+            Event::Command(Action::Quit) => state.quit = true,
+            Event::Command(Action::Back | Action::Help) => state.show_help = false,
+            _ => {}
         }
         return Vec::new();
     }
@@ -307,15 +309,23 @@ mod tests {
     }
 
     #[test]
-    fn help_is_modal() {
+    fn help_blocks_navigation_and_back_only_dismisses_help() {
         let mut state = state();
         reduce(&mut state, Event::Command(Action::Help));
         reduce(&mut state, Event::Command(Action::Down));
-        reduce(&mut state, Event::Command(Action::Quit));
-        assert_eq!(state.set_index, 0);
-        assert!(!state.quit);
         reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(state.set_index, 0);
+        assert_eq!(state.screen, Screen::SetMenu);
         assert!(!state.show_help);
+        assert!(!state.quit);
+    }
+
+    #[test]
+    fn quit_always_exits_when_help_is_open() {
+        let mut state = state();
+        reduce(&mut state, Event::Command(Action::Help));
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(state.quit);
     }
 
     #[test]
