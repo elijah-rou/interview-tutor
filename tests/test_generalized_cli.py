@@ -34,6 +34,18 @@ EXPECTED_INTERVIEW_SETS = {
         "kth-largest-element-in-a-stream",
         "coin-change",
     ],
+    "depot": [
+        "lru-cache",
+        "course-schedule",
+        "meeting-rooms-ii",
+        "merge-intervals",
+        "time-based-key-value-store",
+        "top-k-frequent-elements",
+        "number-of-islands",
+        "sliding-window-maximum",
+        "kth-largest-element-in-a-stream",
+        "coin-change",
+    ],
 }
 
 
@@ -132,8 +144,8 @@ class GeneralizedCliTests(unittest.TestCase):
         discovered = self.run_command(str(ROOT / "practice"), "sets", "list")
         self.assertEqual(discovered.returncode, 0, discovered.stderr)
         rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
-        self.assertEqual([row[0] for row in rows], ["anti-metal", "blind75", "convex"])
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "10"])
+        self.assertEqual([row[0] for row in rows], ["anti-metal", "blind75", "convex", "depot"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "10"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -197,6 +209,7 @@ class GeneralizedCliTests(unittest.TestCase):
         for slug in (
             "kth-largest-element-in-a-stream",
             "lru-cache",
+            "sliding-window-maximum",
             "time-based-key-value-store",
         ):
             with self.subTest(slug=slug):
@@ -488,7 +501,7 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(
             global_stats.stdout.splitlines()[0],
-            "All Problems progress (python): 1/78 (1.3%)",
+            "All Problems progress (python): 1/79 (1.3%)",
         )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:

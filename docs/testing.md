@@ -23,7 +23,7 @@ Runs, in order:
 6. the Rust adapter registry test
 7. root Python administrative/catalog/CLI unit tests
 
-The language starter implementations are intentionally incomplete, so running every Python or Rust problem case is expected to fail. That is not a repository gate. The relevant distribution invariant is the registry/catalog gate: all 78 global problems must have coherent Python and Rust adapters, slugs, metadata, and dispatch, while the Blind 75, Convex, and anti-metal seeds retain their independent ordered membership.
+The language starter implementations are intentionally incomplete, so running every Python or Rust problem case is expected to fail. That is not a repository gate. The relevant distribution invariant is the registry/catalog gate: all 79 global problems must have coherent Python and Rust adapters, slugs, metadata, and dispatch, while the Blind 75, Convex, anti-metal, and Depot seeds retain their independent ordered membership.
 
 ### `make test-harness`
 

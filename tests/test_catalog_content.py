@@ -43,6 +43,21 @@ EXPECTED_INTERVIEW_SETS = {
             "coin-change",
         ],
     },
+    "depot": {
+        "name": "Depot",
+        "members": [
+            "lru-cache",
+            "course-schedule",
+            "meeting-rooms-ii",
+            "merge-intervals",
+            "time-based-key-value-store",
+            "top-k-frequent-elements",
+            "number-of-islands",
+            "sliding-window-maximum",
+            "kth-largest-element-in-a-stream",
+            "coin-change",
+        ],
+    },
 }
 
 EXPECTED_NEW_PROBLEMS = {
@@ -63,6 +78,12 @@ EXPECTED_NEW_PROBLEMS = {
         "difficulty": "Medium",
         "leetcode_id": 981,
         "leetcode_url": "https://leetcode.com/problems/time-based-key-value-store/",
+    },
+    "sliding-window-maximum": {
+        "title": "Sliding Window Maximum",
+        "difficulty": "Hard",
+        "leetcode_id": 239,
+        "leetcode_url": "https://leetcode.com/problems/sliding-window-maximum/",
     },
 }
 
@@ -88,9 +109,9 @@ class CatalogContentTests(unittest.TestCase):
         self.assertEqual(len(set(statements)), len(statements))
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
-    def test_catalog_has_78_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 3)
-        self.assertEqual(len(self.problems), 78)
+    def test_catalog_has_79_problems_and_expected_new_canonical_metadata(self) -> None:
+        self.assertEqual(self.catalog["catalog_revision"], 4)
+        self.assertEqual(len(self.problems), 79)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
             with self.subTest(slug=slug):
@@ -102,8 +123,8 @@ class CatalogContentTests(unittest.TestCase):
                 self.assertFalse(problem["premium"])
                 self.assertEqual(problem["test_revision"], 1)
 
-    def test_all_three_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
-        self.assertEqual(set(self.problem_sets), {"anti-metal", "blind75", "convex"})
+    def test_all_four_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
+        self.assertEqual(set(self.problem_sets), {"anti-metal", "blind75", "convex", "depot"})
 
         blind75_members = self.problem_sets["blind75"]["members"]
         blind75_slugs = [member["problem_slug"] for member in blind75_members]

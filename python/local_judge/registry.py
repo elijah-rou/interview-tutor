@@ -233,6 +233,12 @@ PROBLEMS = (
         None,
     ),
     Problem("set-matrix-zeroes", "problems/medium/set_matrix_zeroes.py", "Solution", "setZeroes"),
+    Problem(
+        "sliding-window-maximum",
+        "problems/hard/sliding_window_maximum.py",
+        "Solution",
+        "maxSlidingWindow",
+    ),
     Problem("spiral-matrix", "problems/medium/spiral_matrix.py", "Solution", "spiralOrder"),
     Problem(
         "subtree-of-another-tree",

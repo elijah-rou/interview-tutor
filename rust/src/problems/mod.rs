@@ -63,6 +63,7 @@ pub mod same_tree;
 pub mod search_in_rotated_sorted_array;
 pub mod serialize_and_deserialize_binary_tree;
 pub mod set_matrix_zeroes;
+pub mod sliding_window_maximum;
 pub mod spiral_matrix;
 pub mod subtree_of_another_tree;
 pub mod sum_of_two_integers;
@@ -246,6 +247,7 @@ pub const PROBLEMS: &[Problem] = &[
         serialize_and_deserialize_binary_tree::run_case,
     ),
     Problem::new("set-matrix-zeroes", set_matrix_zeroes::run_case),
+    Problem::new("sliding-window-maximum", sliding_window_maximum::run_case),
     Problem::new("spiral-matrix", spiral_matrix::run_case),
     Problem::new("subtree-of-another-tree", subtree_of_another_tree::run_case),
     Problem::new("sum-of-two-integers", sum_of_two_integers::run_case),

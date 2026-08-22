@@ -1410,6 +1410,28 @@
       ]
     },
     {
+      "slug": "sliding-window-maximum",
+      "title": "Sliding Window Maximum",
+      "difficulty": "Hard",
+      "topic": "Sliding Window",
+      "leetcode_id": 239,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/sliding-window-maximum/",
+      "neetcode_url": "https://neetcode.io/problems/sliding-window-maximum/question",
+      "statement_markdown": "## Task\n\nGiven an integer list and a positive window size `k`, return the maximum value in each contiguous window as the window moves from left to right.\n\n## Example\n\nInput `[1, 3, -1, -3, 5, 3, 6, 7]` with `k = 3` returns `[3, 3, 5, 5, 6, 7]`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/sliding_window_maximum.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/sliding_window_maximum.rs"
+        }
+      ]
+    },
+    {
       "slug": "spiral-matrix",
       "title": "Spiral Matrix",
       "difficulty": "Medium",
@@ -1718,5 +1740,5 @@
       ]
     }
   ],
-  "catalog_revision": 3
+  "catalog_revision": 4
 }
