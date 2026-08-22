@@ -9,6 +9,33 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+EXPECTED_INTERVIEW_SETS = {
+    "convex": [
+        "longest-substring-without-repeating-characters",
+        "merge-intervals",
+        "top-k-frequent-elements",
+        "time-based-key-value-store",
+        "lru-cache",
+        "course-schedule",
+        "number-of-islands",
+        "binary-tree-level-order-traversal",
+        "kth-largest-element-in-a-stream",
+        "coin-change",
+    ],
+    "anti-metal": [
+        "time-based-key-value-store",
+        "lru-cache",
+        "course-schedule",
+        "merge-intervals",
+        "top-k-frequent-elements",
+        "longest-substring-without-repeating-characters",
+        "number-of-islands",
+        "binary-tree-level-order-traversal",
+        "kth-largest-element-in-a-stream",
+        "coin-change",
+    ],
+}
+
 
 class GeneralizedCliTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -94,16 +121,92 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertEqual(attempts, 0)
 
     def test_set_index_and_slug_resolve_to_the_same_global_problem(self) -> None:
-        by_index = self.run_command(
-            str(ROOT / "practice"), "--set", "blind75", "show", "16"
-        )
-        by_slug = self.run_command(
-            str(ROOT / "practice"), "--set", "blind75", "show", "two-sum"
-        )
+        by_index = self.run_command(str(ROOT / "practice"), "--set", "blind75", "show", "16")
+        by_slug = self.run_command(str(ROOT / "practice"), "--set", "blind75", "show", "two-sum")
         self.assertEqual(by_index.returncode, 0, by_index.stderr)
         self.assertEqual(by_slug.returncode, 0, by_slug.stderr)
         self.assertIn("Two Sum", by_index.stdout)
         self.assertEqual(by_index.stdout, by_slug.stdout)
+
+    def test_clean_database_discovers_and_resolves_new_shipped_sets(self) -> None:
+        discovered = self.run_command(str(ROOT / "practice"), "sets", "list")
+        self.assertEqual(discovered.returncode, 0, discovered.stderr)
+        rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
+        self.assertEqual([row[0] for row in rows], ["anti-metal", "blind75", "convex"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "10"])
+
+        for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
+            with self.subTest(set_id=set_id):
+                shown_set = self.run_command(str(ROOT / "practice"), "sets", "show", set_id)
+                self.assertEqual(shown_set.returncode, 0, shown_set.stderr)
+                self.assertIn(f"ID: {set_id}", shown_set.stdout.splitlines())
+                shown_set_slugs = [
+                    line.split()[-1]
+                    for line in shown_set.stdout.splitlines()
+                    if line.split() and line.split()[0].isdigit()
+                ]
+                self.assertEqual(shown_set_slugs, expected_slugs)
+
+                listed = self.run_command(str(ROOT / "practice"), "--set", set_id, "list")
+                self.assertEqual(listed.returncode, 0, listed.stderr)
+                listed_slugs = [line.split()[-1] for line in listed.stdout.splitlines()[2:]]
+                self.assertEqual(listed_slugs, expected_slugs)
+                for index, slug in enumerate(expected_slugs, start=1):
+                    by_index = self.run_command(
+                        str(ROOT / "practice"),
+                        "--set",
+                        set_id,
+                        "show",
+                        str(index),
+                    )
+                    by_slug = self.run_command(
+                        str(ROOT / "practice"), "--set", set_id, "show", slug
+                    )
+                    self.assertEqual(by_index.returncode, 0, by_index.stderr)
+                    self.assertEqual(by_slug.returncode, 0, by_slug.stderr)
+                    self.assertIn(f"Slug: {slug}", by_index.stdout.splitlines())
+                    self.assertIn(
+                        f"Problem set: {set_id} #{index}",
+                        by_index.stdout.splitlines(),
+                    )
+                    self.assertEqual(by_index.stdout, by_slug.stdout)
+
+        attempted = self.run_command(str(ROOT / "run"), "python", "convex", "4")
+        self.assertEqual(attempted.returncode, 1, attempted.stderr)
+        self.assertIn(
+            "FAIL time-based-key-value-store: starter is not implemented",
+            attempted.stderr,
+        )
+        with sqlite3.connect(self.database) as connection:
+            recorded_attempt = connection.execute(
+                """
+                SELECT p.slug, ps.slug, a.result, a.exit_code
+                FROM attempts AS a
+                JOIN problems AS p ON p.id = a.problem_id
+                LEFT JOIN problem_sets AS ps ON ps.id = a.invoked_set_id
+                ORDER BY a.id DESC LIMIT 1
+                """
+            ).fetchone()
+        self.assertEqual(
+            recorded_attempt,
+            ("time-based-key-value-store", "convex", "fail", 1),
+        )
+
+    def test_new_python_starters_have_explicit_unimplemented_diagnostics(self) -> None:
+        self.environment["PRACTICE_NO_RECORD"] = "1"
+        for slug in (
+            "kth-largest-element-in-a-stream",
+            "lru-cache",
+            "time-based-key-value-store",
+        ):
+            with self.subTest(slug=slug):
+                result = self.run_command(str(ROOT / "python" / "run"), "--problem", slug)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(
+                    result.stderr.strip(),
+                    f"FAIL {slug}: starter is not implemented",
+                )
+                self.assertEqual(result.stdout, "")
 
     def test_custom_problem_and_set_metadata_support_update_and_safe_delete(
         self,
@@ -139,9 +242,7 @@ class GeneralizedCliTests(unittest.TestCase):
         shown = self.run_command(str(ROOT / "practice"), "problems", "show", "scratch")
         self.assertIn("Scratch Updated", shown.stdout)
         self.assertIn("A local statement.", shown.stdout)
-        deleted = self.run_command(
-            str(ROOT / "practice"), "problems", "delete", "scratch", "--yes"
-        )
+        deleted = self.run_command(str(ROOT / "practice"), "problems", "delete", "scratch", "--yes")
         self.assertEqual(deleted.returncode, 0, deleted.stderr)
 
         self.assertEqual(
@@ -170,13 +271,9 @@ class GeneralizedCliTests(unittest.TestCase):
             ).returncode,
             0,
         )
-        attempted = self.run_command(
-            str(ROOT / "run"), "python", "scratch-set", "two-sum"
-        )
+        attempted = self.run_command(str(ROOT / "run"), "python", "scratch-set", "two-sum")
         self.assertEqual(attempted.returncode, 1)
-        removed = self.run_command(
-            str(ROOT / "practice"), "sets", "delete", "scratch-set", "--yes"
-        )
+        removed = self.run_command(str(ROOT / "practice"), "sets", "delete", "scratch-set", "--yes")
         self.assertEqual(removed.returncode, 0, removed.stderr)
         with sqlite3.connect(self.database) as connection:
             preserved_attempt = connection.execute(
@@ -278,7 +375,7 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertEqual(created.returncode, 0, created.stderr)
         stats = self.run_command(str(ROOT / "practice"), "--set", "empty", "stats")
         self.assertEqual(stats.returncode, 0, stats.stderr)
-        self.assertIn("0/0 (0.0%)", stats.stdout)
+        self.assertEqual(stats.stdout.splitlines()[0], "Empty progress (any language): 0/0 (0.0%)")
 
     def test_set_membership_insert_move_and_remove_keep_contiguous_order(self) -> None:
         self.assertEqual(
@@ -378,9 +475,21 @@ class GeneralizedCliTests(unittest.TestCase):
         global_stats = self.run_command(
             str(ROOT / "practice"), "stats", "--global", "--language", "python"
         )
-        self.assertIn("1/75", blind_stats.stdout)
-        self.assertIn("1/1", favorite_stats.stdout)
-        self.assertIn("1/75", global_stats.stdout)
+        self.assertEqual(blind_stats.returncode, 0, blind_stats.stderr)
+        self.assertEqual(favorite_stats.returncode, 0, favorite_stats.stderr)
+        self.assertEqual(global_stats.returncode, 0, global_stats.stderr)
+        self.assertEqual(
+            blind_stats.stdout.splitlines()[0],
+            "Blind 75 progress (python): 1/75 (1.3%)",
+        )
+        self.assertEqual(
+            favorite_stats.stdout.splitlines()[0],
+            "Favorites progress (python): 1/1 (100.0%)",
+        )
+        self.assertEqual(
+            global_stats.stdout.splitlines()[0],
+            "All Problems progress (python): 1/78 (1.3%)",
+        )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:
         result = self.run_command(str(ROOT / "run"), "rust", "two-sum")
@@ -435,9 +544,7 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAIL two-sum", result.stderr)
         with sqlite3.connect(self.database) as connection:
-            attempt_count = connection.execute(
-                "SELECT COUNT(*) FROM attempts"
-            ).fetchone()[0]
+            attempt_count = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
         self.assertEqual(attempt_count, 1)
 
     def test_cli_is_a_self_hosted_rust_executable(self) -> None:
@@ -460,9 +567,7 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("FAIL two-sum", result.stderr)
         with sqlite3.connect(self.database) as connection:
-            invoked_set = connection.execute(
-                "SELECT invoked_set_id FROM attempts"
-            ).fetchone()[0]
+            invoked_set = connection.execute("SELECT invoked_set_id FROM attempts").fetchone()[0]
         self.assertIsNone(invoked_set)
 
     def test_problem_without_language_adapter_fails_before_dispatch(self) -> None:

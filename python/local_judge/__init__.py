@@ -1,1 +1,1 @@
-"""Dependency-free Blind 75 practice framework."""
+"""Dependency-free, set-agnostic local problem execution framework."""

@@ -26,6 +26,7 @@ pub mod implement_trie_prefix_tree;
 pub mod insert_interval;
 pub mod invert_binary_tree;
 pub mod jump_game;
+pub mod kth_largest_element_in_a_stream;
 pub mod kth_smallest_element_in_a_bst;
 pub mod linked_list_cycle;
 pub mod longest_common_subsequence;
@@ -35,6 +36,7 @@ pub mod longest_palindromic_substring;
 pub mod longest_repeating_character_replacement;
 pub mod longest_substring_without_repeating_characters;
 pub mod lowest_common_ancestor_of_a_binary_search_tree;
+pub mod lru_cache;
 pub mod maximum_depth_of_binary_tree;
 pub mod maximum_product_subarray;
 pub mod maximum_subarray;
@@ -65,6 +67,7 @@ pub mod spiral_matrix;
 pub mod subtree_of_another_tree;
 pub mod sum_of_two_integers;
 pub mod three_sum;
+pub mod time_based_key_value_store;
 pub mod top_k_frequent_elements;
 pub mod two_sum;
 pub mod unique_paths;
@@ -150,6 +153,10 @@ pub const PROBLEMS: &[Problem] = &[
     Problem::new("invert-binary-tree", invert_binary_tree::run_case),
     Problem::new("jump-game", jump_game::run_case),
     Problem::new(
+        "kth-largest-element-in-a-stream",
+        kth_largest_element_in_a_stream::run_case,
+    ),
+    Problem::new(
         "kth-smallest-element-in-a-bst",
         kth_smallest_element_in_a_bst::run_case,
     ),
@@ -182,6 +189,7 @@ pub const PROBLEMS: &[Problem] = &[
         "lowest-common-ancestor-of-a-binary-search-tree",
         lowest_common_ancestor_of_a_binary_search_tree::run_case,
     ),
+    Problem::new("lru-cache", lru_cache::run_case),
     Problem::new(
         "maximum-depth-of-binary-tree",
         maximum_depth_of_binary_tree::run_case,
@@ -241,6 +249,10 @@ pub const PROBLEMS: &[Problem] = &[
     Problem::new("spiral-matrix", spiral_matrix::run_case),
     Problem::new("subtree-of-another-tree", subtree_of_another_tree::run_case),
     Problem::new("sum-of-two-integers", sum_of_two_integers::run_case),
+    Problem::new(
+        "time-based-key-value-store",
+        time_based_key_value_store::run_case,
+    ),
     Problem::new("top-k-frequent-elements", top_k_frequent_elements::run_case),
     Problem::new("two-sum", two_sum::run_case),
     Problem::new("unique-paths", unique_paths::run_case),

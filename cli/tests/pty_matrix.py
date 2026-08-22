@@ -186,6 +186,10 @@ else:
             ).fetchall()
             assert len(problems) == 40
             self.problem_titles = [title for _, title in problems]
+            self.matrix_set_39_steps = connection.execute(
+                "SELECT COUNT(*) FROM problem_sets WHERE slug < 'matrix-set-39'"
+            ).fetchone()[0]
+            assert self.matrix_set_39_steps > 0
             for ordinal, (problem_id, _) in enumerate(problems, start=2):
                 connection.execute(
                     "INSERT INTO problem_set_members(problem_set_id, problem_id, ordinal, section) "
@@ -398,9 +402,9 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
     environment, home = fixture.environment()
     with fixture.launch(database, environment, problem_set=False) as session:
         session.wait_screen("A00 Matrix Se")
-        session.send(b"j" * 40)
+        session.send(b"j" * fixture.matrix_set_39_steps)
         session.wait_screen("Matrix Set 39")
-        session.send(b"k" * 40)
+        session.send(b"k" * fixture.matrix_set_39_steps)
         session.wait_screen("A00 Matrix Se")
         session.send(ENTER)
         session.wait_screen("Smoke Problem")

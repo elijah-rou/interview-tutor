@@ -86,6 +86,12 @@ PROBLEMS = (
     Problem("invert-binary-tree", "problems/easy/invert_binary_tree.py", "Solution", "invertTree"),
     Problem("jump-game", "problems/medium/jump_game.py", "Solution", "canJump"),
     Problem(
+        "kth-largest-element-in-a-stream",
+        "problems/easy/kth_largest_element_in_a_stream.py",
+        "KthLargest",
+        None,
+    ),
+    Problem(
         "kth-smallest-element-in-a-bst",
         "problems/medium/kth_smallest_element_in_a_bst.py",
         "Solution",
@@ -134,6 +140,7 @@ PROBLEMS = (
         "Solution",
         "lowestCommonAncestor",
     ),
+    Problem("lru-cache", "problems/medium/lru_cache.py", "LRUCache", None),
     Problem(
         "maximum-depth-of-binary-tree",
         "problems/easy/binary_tree_maximum_depth.py",
@@ -234,6 +241,12 @@ PROBLEMS = (
         "isSubtree",
     ),
     Problem("sum-of-two-integers", "problems/medium/sum_of_two_integers.py", "Solution", "getSum"),
+    Problem(
+        "time-based-key-value-store",
+        "problems/medium/time_based_key_value_store.py",
+        "TimeMap",
+        None,
+    ),
     Problem(
         "top-k-frequent-elements",
         "problems/medium/top_k_frequent_elements.py",

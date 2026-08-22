@@ -95,9 +95,7 @@ class ProjectCliTests(unittest.TestCase):
         (root / "problem_sets").mkdir(parents=True, exist_ok=True)
         (root / "python").mkdir(parents=True, exist_ok=True)
         (root / "rust").mkdir(parents=True, exist_ok=True)
-        (root / "catalog" / "problems.json").write_text(
-            json.dumps(catalog), encoding="utf-8"
-        )
+        (root / "catalog" / "problems.json").write_text(json.dumps(catalog), encoding="utf-8")
         for old_set in (root / "problem_sets").glob("*.json"):
             old_set.unlink()
         for set_id, problem_set in problem_sets.items():
@@ -165,9 +163,7 @@ class ProjectCliTests(unittest.TestCase):
                     )
                     self.assertEqual(initialized.returncode, 0, initialized.stderr)
                     with sqlite3.connect(database) as connection:
-                        connection.execute(
-                            f"PRAGMA user_version = {unsupported_version}"
-                        )
+                        connection.execute(f"PRAGMA user_version = {unsupported_version}")
                         connection.execute(
                             "INSERT INTO metadata(key, value) "
                             "VALUES ('version_marker', 'untouched')"
@@ -181,9 +177,7 @@ class ProjectCliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("unsupported database schema version", result.stderr)
                     with sqlite3.connect(database) as connection:
-                        version = connection.execute("PRAGMA user_version").fetchone()[
-                            0
-                        ]
+                        version = connection.execute("PRAGMA user_version").fetchone()[0]
                         marker = connection.execute(
                             "SELECT value FROM metadata WHERE key = 'version_marker'"
                         ).fetchone()
@@ -275,9 +269,7 @@ class ProjectCliTests(unittest.TestCase):
                     catalog = self.fixture_catalog()
                     catalog["problems"][0]["neetcode_url"] = invalid_value  # type: ignore[index]
                     self.write_fixture_root(root, catalog, self.fixture_sets())
-                    invalid_complete_url = self.run_fixture_command(
-                        root, database, "sets", "list"
-                    )
+                    invalid_complete_url = self.run_fixture_command(root, database, "sets", "list")
                     self.assertEqual(invalid_complete_url.returncode, 2)
                     self.assertIn("invalid NeetCode URL", invalid_complete_url.stderr)
                     self.assertFalse(database.exists())
@@ -289,6 +281,82 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(duplicate_id.returncode, 2)
             self.assertIn("duplicate LeetCode id", duplicate_id.stderr)
             self.assertFalse(database.exists())
+
+    def test_v2_revision_adds_shipped_resources_without_replacing_custom_data(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            initial_catalog = self.fixture_catalog()
+            initial_catalog["problems"] = [initial_catalog["problems"][0]]  # type: ignore[index]
+            initial_sets = {
+                "managed-set": {
+                    "schema_version": 2,
+                    "id": "managed-set",
+                    "name": "Managed Set",
+                    "description": "",
+                    "members": [{"ordinal": 1, "problem_slug": "managed-one"}],
+                }
+            }
+            self.write_fixture_root(root, initial_catalog, initial_sets)
+            initialized = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+            for arguments in (
+                (
+                    "problems",
+                    "add",
+                    "custom-problem",
+                    "--title",
+                    "Custom Problem",
+                    "--difficulty",
+                    "Easy",
+                    "--topic",
+                    "Custom",
+                ),
+                ("sets", "create", "custom-set", "--name", "Custom Set"),
+                ("sets", "add", "custom-set", "custom-problem"),
+            ):
+                result = self.run_fixture_command(root, database, *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            self.write_fixture_root(
+                root,
+                self.fixture_catalog(revision=2),
+                self.fixture_sets(),
+            )
+            upgraded = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+
+            with sqlite3.connect(database) as connection:
+                custom_data = connection.execute(
+                    """
+                    SELECT p.managed, ps.managed
+                    FROM problem_set_members AS m
+                    JOIN problem_sets AS ps ON ps.id = m.problem_set_id
+                    JOIN problems AS p ON p.id = m.problem_id
+                    WHERE ps.slug = 'custom-set' AND p.slug = 'custom-problem'
+                    """
+                ).fetchone()
+                inserted_data = connection.execute(
+                    """
+                    SELECT p.managed, i.solution_path, i.enabled, ps.managed, m.ordinal
+                    FROM problem_set_members AS m
+                    JOIN problem_sets AS ps ON ps.id = m.problem_set_id
+                    JOIN problems AS p ON p.id = m.problem_id
+                    JOIN problem_implementations AS i ON i.problem_id = p.id
+                    JOIN languages AS l ON l.id = i.language_id
+                    WHERE ps.slug = 'managed-retired-set'
+                      AND p.slug = 'managed-retired' AND l.slug = 'python'
+                    """
+                ).fetchone()
+                revision = connection.execute(
+                    "SELECT value FROM metadata WHERE key = 'catalog_revision'"
+                ).fetchone()
+            self.assertEqual(custom_data, (0, 0))
+            self.assertEqual(inserted_data, (1, "python/managed_retired.py", 1, 1, 1))
+            self.assertEqual(revision, ("2",))
 
     def test_catalog_revision_reconciles_only_managed_resources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -450,7 +518,7 @@ class ProjectCliTests(unittest.TestCase):
     def test_language_registries_cover_the_seeded_global_catalog(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
         expected = {problem["slug"] for problem in catalog["problems"]}
-        self.assertEqual(len(expected), 75)
+        self.assertEqual(len(expected), 78)
 
         python_result = self.run_command(str(ROOT / "python" / "run"), "--list")
         self.assertEqual(python_result.returncode, 0, python_result.stderr)
@@ -469,7 +537,8 @@ class ProjectCliTests(unittest.TestCase):
         member_slugs = [member["problem_slug"] for member in problem_set["members"]]
         self.assertEqual(len(member_slugs), 75)
         self.assertEqual(len(set(member_slugs)), 75)
-        self.assertEqual(set(member_slugs), global_slugs)
+        self.assertLessEqual(set(member_slugs), global_slugs)
+        self.assertEqual(len(global_slugs), 78)
         self.assertEqual(
             [member["ordinal"] for member in problem_set["members"]], list(range(1, 76))
         )
@@ -544,7 +613,10 @@ class ProjectCliTests(unittest.TestCase):
                 str(ROOT / "practice"), "stats", "--language", "python", env=environment
             )
             self.assertEqual(stats.returncode, 0, stats.stderr)
-            self.assertIn("1/75", stats.stdout)
+            self.assertEqual(
+                stats.stdout.splitlines()[0],
+                "Blind 75 progress (python): 1/75 (1.3%)",
+            )
             global_stats = self.run_command(
                 str(ROOT / "practice"),
                 "stats",
@@ -560,14 +632,17 @@ class ProjectCliTests(unittest.TestCase):
                 "--all",
                 env=environment,
             )
-            self.assertIn("1/75", global_stats.stdout)
+            self.assertEqual(global_stats.returncode, 0, global_stats.stderr)
+            self.assertEqual(archived.returncode, 0, archived.stderr)
+            self.assertEqual(
+                global_stats.stdout.splitlines()[0],
+                "All Problems progress (python): 1/78 (1.3%)",
+            )
             self.assertIn("combination-sum-iv", archived.stdout)
             self.assertIn("archived", archived.stdout)
             with sqlite3.connect(database) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                attempt_count = connection.execute(
-                    "SELECT COUNT(*) FROM attempts"
-                ).fetchone()[0]
+                attempt_count = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
                 stale = connection.execute(
                     "SELECT id, leetcode_id FROM problems WHERE slug = 'combination-sum-iv'"
                 ).fetchone()
@@ -581,7 +656,7 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(attempt_count, 3)
             self.assertIsNotNone(stale)
             self.assertEqual(stale[1], 377)
-            self.assertEqual(active_members, 75)
+            self.assertEqual(active_members, 95)
             self.assertEqual(go_language, (0,))
 
     def test_v1_migration_rejects_conflicting_global_problem_metadata_atomically(
@@ -629,9 +704,7 @@ class ProjectCliTests(unittest.TestCase):
                 )
             environment = os.environ.copy()
             environment["PRACTICE_DB_PATH"] = str(database)
-            result = self.run_command(
-                str(ROOT / "practice"), "sets", "list", env=environment
-            )
+            result = self.run_command(str(ROOT / "practice"), "sets", "list", env=environment)
             self.assertEqual(result.returncode, 2)
             self.assertIn("metadata conflicts", result.stderr)
             with sqlite3.connect(database) as connection:
@@ -641,9 +714,7 @@ class ProjectCliTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )
                 }
-                problem_count = connection.execute(
-                    "SELECT COUNT(*) FROM problems"
-                ).fetchone()[0]
+                problem_count = connection.execute("SELECT COUNT(*) FROM problems").fetchone()[0]
             self.assertIn("attempts", tables)
             self.assertNotIn("legacy_attempts", tables)
             self.assertEqual(problem_count, 2)
@@ -667,19 +738,13 @@ class ProjectCliTests(unittest.TestCase):
             self.assertIn("LeetCode ids conflict", external_id_result.stderr)
 
             with sqlite3.connect(database) as connection:
-                connection.execute(
-                    "DELETE FROM problems WHERE slug IN ('alpha', 'beta')"
-                )
-                connection.execute(
-                    "UPDATE problems SET external_id = 1 WHERE slug = 'shared'"
-                )
+                connection.execute("DELETE FROM problems WHERE slug IN ('alpha', 'beta')")
+                connection.execute("UPDATE problems SET external_id = 1 WHERE slug = 'shared'")
             catalog_conflict = self.run_command(
                 str(ROOT / "practice"), "sets", "list", env=environment
             )
             self.assertEqual(catalog_conflict.returncode, 2)
-            self.assertIn(
-                "shipped catalog LeetCode id conflicts", catalog_conflict.stderr
-            )
+            self.assertIn("shipped catalog LeetCode id conflicts", catalog_conflict.stderr)
             with sqlite3.connect(database) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 tables = {
@@ -710,7 +775,10 @@ class ProjectCliTests(unittest.TestCase):
                 str(ROOT / "practice"), "stats", "--language", "python", env=environment
             )
             self.assertEqual(stats.returncode, 0, stats.stderr)
-            self.assertIn("1/75", stats.stdout)
+            self.assertEqual(
+                stats.stdout.splitlines()[0],
+                "Blind 75 progress (python): 1/75 (1.3%)",
+            )
             self.assertIn("Arrays & Hashing", stats.stdout)
 
 

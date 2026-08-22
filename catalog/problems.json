@@ -596,6 +596,28 @@
       ]
     },
     {
+      "slug": "kth-largest-element-in-a-stream",
+      "title": "Kth Largest Element in a Stream",
+      "difficulty": "Easy",
+      "topic": "Heap / Priority Queue",
+      "leetcode_id": 703,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/kth-largest-element-in-a-stream/",
+      "neetcode_url": "https://neetcode.io/problems/kth-largest-integer-in-a-stream/question",
+      "statement_markdown": "## Task\n\nDesign a stream tracker initialized with an integer `k` and an initial list of values. Each `add(value)` call records the value and returns the kth largest value among everything observed so far; duplicate values occupy separate ranks.\n\n## Example\n\nStarting with `k = 3` and values `[4, 5, 8, 2]`, successive additions `3, 5, 10, 9, 4` return `4, 5, 5, 8, 8`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/easy/kth_largest_element_in_a_stream.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/kth_largest_element_in_a_stream.rs"
+        }
+      ]
+    },
+    {
       "slug": "kth-smallest-element-in-a-bst",
       "title": "Kth Smallest Element in a BST",
       "difficulty": "Medium",
@@ -790,6 +812,28 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/lowest_common_ancestor_of_a_binary_search_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "lru-cache",
+      "title": "LRU Cache",
+      "difficulty": "Medium",
+      "topic": "Linked List",
+      "leetcode_id": 146,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/lru-cache/",
+      "neetcode_url": "https://neetcode.io/problems/lru-cache/question",
+      "statement_markdown": "## Task\n\nDesign a fixed-capacity cache with `get(key)` and `put(key, value)` operations. Both operations mark an existing key as recently used. Inserting a new key into a full cache evicts the least recently used key, and `get` returns `-1` for a missing key.\n\n## Example\n\nWith capacity `2`, operations `put(1, 1)`, `put(2, 2)`, `get(1)`, `put(3, 3)`, and `get(2)` return `1` from the first read and `-1` from the second because key `2` was evicted.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/lru_cache.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/lru_cache.rs"
         }
       ]
     },
@@ -1432,6 +1476,28 @@
       ]
     },
     {
+      "slug": "time-based-key-value-store",
+      "title": "Time Based Key-Value Store",
+      "difficulty": "Medium",
+      "topic": "Binary Search",
+      "leetcode_id": 981,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/time-based-key-value-store/",
+      "neetcode_url": "https://neetcode.io/problems/time-based-key-value-store/question",
+      "statement_markdown": "## Task\n\nDesign a string key-value store whose `set(key, value, timestamp)` calls arrive with strictly increasing timestamps for each key. `get(key, timestamp)` returns the value recorded at the greatest timestamp not exceeding the requested time, or an empty string when no such value exists.\n\n## Example\n\nAfter `set(\"foo\", \"bar\", 1)`, reads of `\"foo\"` at times `1` and `3` both return `\"bar\"`. After `set(\"foo\", \"bar2\", 4)`, a read at time `5` returns `\"bar2\"`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/time_based_key_value_store.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/time_based_key_value_store.rs"
+        }
+      ]
+    },
+    {
       "slug": "top-k-frequent-elements",
       "title": "Top K Frequent Elements",
       "difficulty": "Medium",
@@ -1652,5 +1718,5 @@
       ]
     }
   ],
-  "catalog_revision": 2
+  "catalog_revision": 3
 }

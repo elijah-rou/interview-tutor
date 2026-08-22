@@ -584,8 +584,7 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
                     .any(|slug| slug != shipped_problem.slug.as_str())
             }) {
                 return Err(format!(
-                    "shipped catalog LeetCode id conflicts with v1 problem: {}",
-                    leetcode_id
+                    "shipped catalog LeetCode id conflicts with v1 problem: {leetcode_id}"
                 ));
             }
         }

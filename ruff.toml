@@ -1,0 +1,16 @@
+target-version = "py311"
+line-length = 100
+preview = false
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+"python/problems/**/*.py" = ["F821"] # Judge-supplied ListNode, TreeNode, and Node.
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false

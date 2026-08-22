@@ -197,6 +197,15 @@ def test_invert_binary_tree(module: ModuleType) -> None:
     )
 
 
+def test_kth_largest_stream(module: ModuleType) -> None:
+    kth_largest = module.KthLargest(3, [4, 5, 8, 2])
+    assert_equal(kth_largest.add(3), 4)
+    assert_equal(kth_largest.add(5), 5)
+    assert_equal(kth_largest.add(10), 5)
+    assert_equal(kth_largest.add(9), 8)
+    assert_equal(kth_largest.add(4), 8)
+
+
 def test_kth_smallest(module: ModuleType) -> None:
     assert_equal(call_solution(module, "kthSmallest", tree([3, 1, 4, None, 2]), 1), 1)
 
@@ -216,6 +225,19 @@ def test_lca(module: ModuleType) -> None:
     assert root is not None and root.left is not None and root.right is not None
     result = call_solution(module, "lowestCommonAncestor", root, root.left, root.right)
     assert result is root
+
+
+def test_lru_cache(module: ModuleType) -> None:
+    cache = module.LRUCache(2)
+    cache.put(1, 1)
+    cache.put(2, 2)
+    assert_equal(cache.get(1), 1)
+    cache.put(3, 3)
+    assert_equal(cache.get(2), -1)
+    cache.put(4, 4)
+    assert_equal(cache.get(1), -1)
+    assert_equal(cache.get(3), 3)
+    assert_equal(cache.get(4), 4)
 
 
 def test_merge_k_lists(module: ModuleType) -> None:
@@ -292,6 +314,16 @@ def test_subtree(module: ModuleType) -> None:
     assert_equal(call_solution(module, "isSubtree", tree([3, 4, 5, 1, 2]), tree([4, 1, 2])), True)
 
 
+def test_time_map(module: ModuleType) -> None:
+    time_map = module.TimeMap()
+    time_map.set("foo", "bar", 1)
+    assert_equal(time_map.get("foo", 1), "bar")
+    assert_equal(time_map.get("foo", 3), "bar")
+    time_map.set("foo", "bar2", 4)
+    assert_equal(time_map.get("foo", 4), "bar2")
+    assert_equal(time_map.get("foo", 5), "bar2")
+
+
 def test_top_k(module: ModuleType) -> None:
     assert_equal(sorted(call_solution(module, "topKFrequent", [1, 1, 1, 2, 2, 3], 2)), [1, 2])
 
@@ -330,9 +362,11 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "group-anagrams": test_group_anagrams,
     "implement-trie-prefix-tree": test_trie,
     "invert-binary-tree": test_invert_binary_tree,
+    "kth-largest-element-in-a-stream": test_kth_largest_stream,
     "kth-smallest-element-in-a-bst": test_kth_smallest,
     "linked-list-cycle": test_linked_list_cycle,
     "lowest-common-ancestor-of-a-binary-search-tree": test_lca,
+    "lru-cache": test_lru_cache,
     "merge-k-sorted-lists": test_merge_k_lists,
     "merge-two-sorted-lists": test_merge_two_lists,
     "pacific-atlantic-water-flow": test_pacific_atlantic,
@@ -344,6 +378,7 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "serialize-and-deserialize-binary-tree": test_serialize_tree,
     "set-matrix-zeroes": test_set_matrix_zeroes,
     "subtree-of-another-tree": test_subtree,
+    "time-based-key-value-store": test_time_map,
     "top-k-frequent-elements": test_top_k,
     "validate-binary-search-tree": test_validate_bst,
     "word-search-ii": test_word_search_ii,

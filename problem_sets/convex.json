@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "id": "convex",
+  "name": "Convex",
+  "description": "A focused ten-problem interview preparation set for Convex.",
+  "members": [
+    {
+      "ordinal": 1,
+      "problem_slug": "longest-substring-without-repeating-characters"
+    },
+    {
+      "ordinal": 2,
+      "problem_slug": "merge-intervals"
+    },
+    {
+      "ordinal": 3,
+      "problem_slug": "top-k-frequent-elements"
+    },
+    {
+      "ordinal": 4,
+      "problem_slug": "time-based-key-value-store"
+    },
+    {
+      "ordinal": 5,
+      "problem_slug": "lru-cache"
+    },
+    {
+      "ordinal": 6,
+      "problem_slug": "course-schedule"
+    },
+    {
+      "ordinal": 7,
+      "problem_slug": "number-of-islands"
+    },
+    {
+      "ordinal": 8,
+      "problem_slug": "binary-tree-level-order-traversal"
+    },
+    {
+      "ordinal": 9,
+      "problem_slug": "kth-largest-element-in-a-stream"
+    },
+    {
+      "ordinal": 10,
+      "problem_slug": "coin-change"
+    }
+  ]
+}

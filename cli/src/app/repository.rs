@@ -229,9 +229,11 @@ mod tests {
         let connection = database::open_database(&path, &root).unwrap();
         database::create_problem_set(&connection, "empty", "Empty", "No members").unwrap();
         let sets = database::list_problem_sets(&connection).unwrap();
-        assert_eq!(sets.len(), 2);
-        assert_eq!(sets[0].0.slug, "blind75");
-        assert_eq!(sets[1].0.slug, "empty");
+        assert!(sets.len() >= 2);
+        assert!(sets.windows(2).all(|rows| rows[0].0.slug < rows[1].0.slug));
+        let empty = sets.iter().find(|(set, _)| set.slug == "empty").unwrap();
+        assert!(!empty.0.managed);
+        assert_eq!(empty.1, 0);
         let set_slug = sets
             .iter()
             .find(|(_, count)| *count >= 3)
