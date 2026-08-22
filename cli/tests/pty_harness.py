@@ -28,6 +28,12 @@ FAILURE_TAIL_CHARS = 4000
 POLL_SECONDS = 0.025
 
 
+def claim_controlling_terminal() -> None:
+    """Make stdin's PTY the child session's controlling terminal."""
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 class HarnessTimeout(TimeoutError):
     pass
 
@@ -355,7 +361,7 @@ class PtySession:
                 stderr=slave,
                 env=environment,
                 close_fds=True,
-                process_group=0,
+                preexec_fn=claim_controlling_terminal,
             )
         except BaseException:
             os.close(self.master)

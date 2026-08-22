@@ -92,6 +92,24 @@ def injected_failure_registry_self_test(temporary: Path) -> None:
     assert not artifact.exists(), "registry fixture path leaked"
 
 
+def controlling_terminal_self_test() -> None:
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import os; "
+            "tty = os.open('/dev/tty', os.O_RDWR); "
+            "size = os.get_terminal_size(tty); "
+            "foreground = os.tcgetpgrp(tty) == os.getpgrp() == os.tcgetpgrp(0); "
+            "print(f'{size.columns}x{size.lines} foreground={foreground}', "
+            "flush=True)"
+        ),
+    ]
+    with PtySession(command, os.environ.copy(), 73, 19) as session:
+        session.wait_history(b"73x19 foreground=True")
+        session.wait_exit(0)
+
+
 def cursor_request_self_test() -> None:
     cases = [
         (b"\x1b[4A", (2, 2), None, CursorRequest("4", "A", 2, -2, 5, 5), (2, 0)),
@@ -160,11 +178,12 @@ def main() -> int:
         temporary = Path(directory)
         deadline_cleanup_self_test(temporary)
         injected_failure_registry_self_test(temporary)
+        controlling_terminal_self_test()
         cursor_request_self_test()
         make_fail_fast_self_test(repository_root, temporary)
     print(
         "PTY_HARNESS_SELF_TEST_PASS timeout_cleanup=1 injected_failure_cleanup=1 "
-        "cursor_sequences=10 make_fail_fast_iterations=2/5"
+        "controlling_terminal=73x19 cursor_sequences=10 make_fail_fast_iterations=2/5"
     )
     return 0
 

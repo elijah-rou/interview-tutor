@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import sqlite3
 import struct
 import subprocess
@@ -15,6 +16,8 @@ import tempfile
 import termios
 import time
 
+from pty_harness import MAX_CAPTURE_BYTES, Screen, claim_controlling_terminal
+
 
 def run_checked(command: list[str], env: dict[str, str]) -> None:
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
@@ -22,55 +25,82 @@ def run_checked(command: list[str], env: dict[str, str]) -> None:
         raise AssertionError(f"command failed: {command!r}\nstdout={result.stdout}\nstderr={result.stderr}")
 
 
-def wait_for(master: int, process: subprocess.Popen[bytes], output: bytearray, needle: bytes, deadline: float) -> None:
-    while needle not in output:
+def drain_terminal(master: int, output: bytearray, screen: Screen) -> None:
+    readable, _, _ = select.select([master], [], [], 0.05)
+    if not readable:
+        return
+    try:
+        chunk = os.read(master, 65536)
+    except OSError:
+        return
+    output.extend(chunk)
+    if len(output) > MAX_CAPTURE_BYTES:
+        del output[: len(output) - MAX_CAPTURE_BYTES]
+    screen.feed(chunk)
+
+
+def wait_for(
+    master: int,
+    process: subprocess.Popen[bytes],
+    output: bytearray,
+    screen: Screen,
+    marker: str,
+    deadline: float,
+) -> None:
+    while marker not in screen.text():
         if time.monotonic() >= deadline:
-            raise AssertionError(f"timed out waiting for {needle!r}; tail={bytes(output[-3000:])!r}")
-        readable, _, _ = select.select([master], [], [], 0.05)
-        if readable:
-            try:
-                output.extend(os.read(master, 65536))
-            except OSError:
-                pass
+            raise AssertionError(
+                f"timed out waiting for rendered {marker!r}; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
+        drain_terminal(master, output, screen)
         if process.poll() is not None:
-            raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
+            raise AssertionError(
+                f"TUI exited early with {process.returncode}; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
 
 
-def wait_for_after(master: int, process: subprocess.Popen[bytes], output: bytearray, start: int, needle: bytes, deadline: float) -> None:
-    while needle not in output[start:]:
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"timed out waiting for new {needle!r}; tail={bytes(output[-3000:])!r}")
-        readable, _, _ = select.select([master], [], [], 0.05)
-        if readable:
-            try:
-                output.extend(os.read(master, 65536))
-            except OSError:
-                pass
-        if process.poll() is not None:
-            raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
-
-
-def launch(interview_binary: Path, database: Path, env: dict[str, str]) -> tuple[int, subprocess.Popen[bytes], bytearray]:
+def launch(
+    interview_binary: Path,
+    database: Path,
+    env: dict[str, str],
+) -> tuple[int, subprocess.Popen[bytes], bytearray, Screen]:
     master, slave = os.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     process = subprocess.Popen(
-        [str(interview_binary), "--db", str(database), "--set", "smoke-set", "--language", "python"],
+        [
+            str(interview_binary),
+            "--db",
+            str(database),
+            "--set",
+            "smoke-set",
+            "--language",
+            "python",
+        ],
         stdin=slave,
         stdout=slave,
         stderr=slave,
         env=env,
         close_fds=True,
+        preexec_fn=claim_controlling_terminal,
     )
     os.close(slave)
-    return master, process, bytearray()
+    return master, process, bytearray(), Screen(120, 40)
 
 
-def open_solve(master: int, process: subprocess.Popen[bytes], output: bytearray, deadline: float) -> None:
-    wait_for(master, process, output, b"Smoke Problem", deadline)
+def open_solve(
+    master: int,
+    process: subprocess.Popen[bytes],
+    output: bytearray,
+    screen: Screen,
+    deadline: float,
+) -> None:
+    wait_for(master, process, output, screen, "Smoke Problem", deadline)
     os.write(master, b"\r")
-    wait_for(master, process, output, b"Edit and run", deadline)
+    wait_for(master, process, output, screen, "Edit and run", deadline)
     os.write(master, b"\r")
-    wait_for(master, process, output, b"Editor", deadline)
+    wait_for(master, process, output, screen, "Editor", deadline)
 
 
 def captured_turns(capture: Path) -> list[dict]:
@@ -80,35 +110,53 @@ def captured_turns(capture: Path) -> list[dict]:
     return [record["json"] for record in records if record.get("json", {}).get("method") == "turn/start"]
 
 
-def wait_for_turn_count(master: int, process: subprocess.Popen[bytes], output: bytearray, capture: Path, count: int, deadline: float) -> None:
+def wait_for_turn_count(
+    master: int,
+    process: subprocess.Popen[bytes],
+    output: bytearray,
+    screen: Screen,
+    capture: Path,
+    count: int,
+    deadline: float,
+) -> None:
     while len(captured_turns(capture)) < count:
         if time.monotonic() >= deadline:
-            raise AssertionError(f"timed out waiting for {count} fake turns; tail={bytes(output[-3000:])!r}")
-        readable, _, _ = select.select([master], [], [], 0.05)
-        if readable:
-            try:
-                output.extend(os.read(master, 65536))
-            except OSError:
-                pass
+            raise AssertionError(
+                f"timed out waiting for {count} fake turns; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
+        drain_terminal(master, output, screen)
         if process.poll() is not None:
-            raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
+            raise AssertionError(
+                f"TUI exited early with {process.returncode}; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
 
 
-def wait_for_attempt_count(master: int, process: subprocess.Popen[bytes], output: bytearray, database: Path, count: int, deadline: float) -> None:
+def wait_for_attempt_count(
+    master: int,
+    process: subprocess.Popen[bytes],
+    output: bytearray,
+    screen: Screen,
+    database: Path,
+    count: int,
+    deadline: float,
+) -> None:
     attempts = 0
     while attempts < count:
         if time.monotonic() >= deadline:
-            raise AssertionError(f"timed out waiting for {count} attempts; tail={bytes(output[-3000:])!r}")
+            raise AssertionError(
+                f"timed out waiting for {count} attempts; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
         with sqlite3.connect(database) as connection:
             attempts = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
-        readable, _, _ = select.select([master], [], [], 0.05)
-        if readable:
-            try:
-                output.extend(os.read(master, 65536))
-            except OSError:
-                pass
+        drain_terminal(master, output, screen)
         if process.poll() is not None:
-            raise AssertionError(f"TUI exited early with {process.returncode}; tail={bytes(output[-3000:])!r}")
+            raise AssertionError(
+                f"TUI exited early with {process.returncode}; "
+                f"screen={screen.text()[-3000:]!r}; raw_tail={bytes(output[-3000:])!r}"
+            )
     assert attempts == count, attempts
 
 
@@ -119,7 +167,10 @@ def turn_payload(turn: dict) -> dict:
 
 def stop_process(master: int, process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.wait(timeout=2)
     os.close(master)
 
@@ -160,22 +211,21 @@ def main() -> int:
         run_checked(base + ["sets", "create", "smoke-set", "--name", "Smoke Set"], env)
         run_checked(base + ["sets", "add", "smoke-set", "smoke-problem"], env)
 
-        master, process, output = launch(interview_binary, database, env)
+        master, process, output, screen = launch(interview_binary, database, env)
         try:
-            open_solve(master, process, output, deadline)
+            open_solve(master, process, output, screen, deadline)
             assert captured_turns(capture) == []
             os.write(master, b"\t\t\t")
             time.sleep(0.1)
             os.write(master, b"i")
-            wait_for(master, process, output, b"Privacy disclosure", deadline)
+            wait_for(master, process, output, screen, "Privacy disclosure", deadline)
             assert captured_turns(capture) == []
-            mark = len(output)
             os.write(master, b"y")
-            wait_for_after(master, process, output, mark, b"ready \xc2\xb7 memory", deadline)
+            wait_for(master, process, output, screen, "ready · memory", deadline)
             assert captured_turns(capture) == []
 
             os.write(master, b"Why this invariant?\r")
-            wait_for_turn_count(master, process, output, capture, 1, deadline)
+            wait_for_turn_count(master, process, output, screen, capture, 1, deadline)
             held = codex_home / "fake-held-turn"
             while not held.exists():
                 if time.monotonic() >= deadline:
@@ -183,24 +233,33 @@ def main() -> int:
                 time.sleep(0.01)
 
             os.write(master, b"\x1b[20~")
-            wait_for_attempt_count(master, process, output, database, 1, deadline)
+            wait_for_attempt_count(
+                master, process, output, screen, database, 1, deadline
+            )
             assert len(captured_turns(capture)) == 1
-            edit_mark = len(output)
             os.write(master, b"\tiX\x1b")
-            wait_for_after(master, process, output, edit_mark, b"Xprint", deadline)
+            wait_for(master, process, output, screen, "Xprint", deadline)
             assert solution.read_text() == recorded_source
             (codex_home / "fake-release-turn").write_text("release")
 
-            wait_for_turn_count(master, process, output, capture, 2, deadline)
-            wait_for(master, process, output, b"RECORDED_SUBMISSION_REVIEW", deadline)
+            wait_for_turn_count(master, process, output, screen, capture, 2, deadline)
             wait_for(
                 master,
                 process,
                 output,
-                b"Submission review \xc2\xb7 recorded",
+                screen,
+                "RECORDED_SUBMISSION_REVIEW",
                 deadline,
             )
-            wait_for(master, process, output, b"revision 0:", deadline)
+            wait_for(
+                master,
+                process,
+                output,
+                screen,
+                "Submission review · recorded",
+                deadline,
+            )
+            wait_for(master, process, output, screen, "revision 0:", deadline)
             with sqlite3.connect(database) as connection:
                 attempts = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
             assert attempts == 1, attempts
@@ -216,9 +275,8 @@ def main() -> int:
             assert payloads[1]["userQuestion"] == ""
             assert turns[0]["params"]["threadId"] == turns[1]["params"]["threadId"]
 
-            mark = len(output)
             os.write(master, b"\t\t\t r")
-            wait_for_after(master, process, output, mark, b"offline \xc2\xb7 memory", deadline)
+            wait_for(master, process, output, screen, "offline · memory", deadline)
             os.write(master, b"\t q q")
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
             assert process.returncode == 0, process.returncode
@@ -232,17 +290,18 @@ def main() -> int:
         for transcript_text in [b"Why this invariant?", b"What invariant holds?", b"Level 1 invariant", b"Submission reviewed", b"RECORDED_SUBMISSION_REVIEW"]:
             assert transcript_text not in persisted
 
-        master, process, output = launch(interview_binary, database, env)
+        master, process, output, screen = launch(interview_binary, database, env)
         try:
-            open_solve(master, process, output, deadline)
+            open_solve(master, process, output, screen, deadline)
             os.write(master, b"\t\t\t")
-            time.sleep(0.1)
-            assert b"What invariant holds?" not in output
-            assert b"Level 1 invariant" not in output
-            assert b"Submission reviewed" not in output
-            assert b"RECORDED_SUBMISSION_REVIEW" not in output
+            wait_for(master, process, output, screen, "Interview [active]", deadline)
+            rendered = screen.text()
+            assert "What invariant holds?" not in rendered
+            assert "Level 1 invariant" not in rendered
+            assert "Submission reviewed" not in rendered
+            assert "RECORDED_SUBMISSION_REVIEW" not in rendered
             os.write(master, b"i")
-            wait_for(master, process, output, b"Privacy disclosure", deadline)
+            wait_for(master, process, output, screen, "Privacy disclosure", deadline)
             assert len(captured_turns(capture)) == 2
             os.write(master, b"n\t q")
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
