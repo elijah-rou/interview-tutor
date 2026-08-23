@@ -1466,6 +1466,84 @@ fn resolve_tutor_action(
     (document, app_action)
 }
 
+enum OrderedNeovimPollEvent {
+    Worker(crate::neovim::WorkerEvent),
+    Tutor {
+        generation: crate::neovim::SessionGeneration,
+        documents: Vec<crate::neovim::DocumentUpdate>,
+        action: crate::app::Action,
+    },
+}
+
+fn push_ordered_tutor_action(
+    ordered: &mut Vec<OrderedNeovimPollEvent>,
+    update: crate::neovim::ActionUpdate,
+    mut following_documents: Vec<crate::neovim::DocumentUpdate>,
+) {
+    let generation = update.generation;
+    let action_document = update.document.clone();
+    let mut coalesced_document = following_documents.pop();
+    let has_following_document = coalesced_document.is_some();
+    let (resolved_document, action) = resolve_tutor_action(update, &mut coalesced_document);
+    assert!(
+        coalesced_document.is_none() || !has_following_document,
+        "TutorBack must consume its following Neovim document"
+    );
+
+    let mut documents = Vec::with_capacity(following_documents.len() + 2);
+    if has_following_document {
+        documents.push(action_document);
+        documents.append(&mut following_documents);
+    }
+    documents.push(resolved_document);
+    ordered.push(OrderedNeovimPollEvent::Tutor {
+        generation,
+        documents,
+        action,
+    });
+}
+
+fn order_neovim_poll_events(
+    events: Vec<crate::neovim::WorkerEvent>,
+) -> Vec<OrderedNeovimPollEvent> {
+    let mut ordered = Vec::with_capacity(events.len());
+    let mut pending_back: Option<(
+        crate::neovim::ActionUpdate,
+        Vec<crate::neovim::DocumentUpdate>,
+    )> = None;
+
+    for event in events {
+        if !matches!(event, crate::neovim::WorkerEvent::Document(_))
+            && let Some((update, documents)) = pending_back.take()
+        {
+            push_ordered_tutor_action(&mut ordered, update, documents);
+        }
+        match event {
+            crate::neovim::WorkerEvent::Source(crate::neovim::SourceEvent::Action(update))
+                if update.action == crate::neovim::TutorAction::Back =>
+            {
+                assert!(pending_back.is_none(), "pending TutorBack must be flushed");
+                pending_back = Some((update, Vec::new()));
+            }
+            crate::neovim::WorkerEvent::Source(crate::neovim::SourceEvent::Action(update)) => {
+                push_ordered_tutor_action(&mut ordered, update, Vec::new());
+            }
+            crate::neovim::WorkerEvent::Document(document) if pending_back.is_some() => {
+                pending_back
+                    .as_mut()
+                    .expect("pending TutorBack exists")
+                    .1
+                    .push(document);
+            }
+            event => ordered.push(OrderedNeovimPollEvent::Worker(event)),
+        }
+    }
+    if let Some((update, documents)) = pending_back {
+        push_ordered_tutor_action(&mut ordered, update, documents);
+    }
+    ordered
+}
+
 fn accepts_neovim_generation(
     state: &AppState,
     generation: crate::neovim::SessionGeneration,
@@ -1644,113 +1722,116 @@ pub fn run(
                 );
                 needs_draw = true;
             }
-            let mut coalesced_document = None;
-            for worker_event in neovim_poll.events {
-                match worker_event {
-                    crate::neovim::WorkerEvent::Started(started) => {
-                        if started.is_ok() {
-                            let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
-                            for (_, _, _, pending_deadline) in &mut pending_neovim_barriers {
-                                if pending_deadline.is_none() {
-                                    *pending_deadline = Some(deadline);
-                                }
-                            }
-                        } else {
-                            pending_neovim_barriers.clear();
-                        }
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimStarted(started),
-                        );
-                    }
-                    crate::neovim::WorkerEvent::Document(document) => apply_event(
-                        &mut state,
-                        &repository,
-                        &root,
-                        &mut workers,
-                        Event::NeovimDocument(document),
-                    ),
-                    crate::neovim::WorkerEvent::Warning(error) => apply_event(
-                        &mut state,
-                        &repository,
-                        &root,
-                        &mut workers,
-                        Event::NeovimWarning(error),
-                    ),
-                    crate::neovim::WorkerEvent::Failed(error) => {
-                        pending_neovim_barriers.clear();
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimFailed(error),
-                        );
-                    }
-                    crate::neovim::WorkerEvent::Source(source_event) => {
-                        let generation = match &source_event {
-                            crate::neovim::SourceEvent::Action(update) => update.generation,
-                            crate::neovim::SourceEvent::Barrier(update) => update.generation,
-                        };
+            for ordered_event in order_neovim_poll_events(neovim_poll.events) {
+                match ordered_event {
+                    OrderedNeovimPollEvent::Tutor {
+                        generation,
+                        documents,
+                        action,
+                    } => {
                         if !accepts_neovim_generation(&state, generation) {
                             continue;
                         }
-                        match source_event {
-                            crate::neovim::SourceEvent::Barrier(barrier) => {
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::NeovimDocument(barrier.document),
-                                );
-                                let Some((expected_generation, expected_id, action, _deadline)) =
-                                    pending_neovim_barriers.pop_front()
-                                else {
-                                    return Err(
-                                        "Neovim returned an unexpected source barrier".into()
-                                    );
-                                };
-                                if expected_generation != barrier.generation {
-                                    return Err("Neovim source barrier generation mismatch".into());
-                                }
-                                if expected_id != barrier.id {
-                                    return Err(format!(
-                                        "Neovim source barrier mismatch: expected {expected_id}, got {}",
-                                        barrier.id
-                                    ));
-                                }
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::Command(action),
-                                );
-                            }
-                            crate::neovim::SourceEvent::Action(action_update) => {
-                                let (document, action) =
-                                    resolve_tutor_action(action_update, &mut coalesced_document);
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::NeovimDocument(document),
-                                );
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::Command(action),
-                                );
-                            }
+                        for document in documents {
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(document),
+                            );
                         }
+                        apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::Command(action),
+                        );
                     }
+                    OrderedNeovimPollEvent::Worker(worker_event) => match worker_event {
+                        crate::neovim::WorkerEvent::Started(started) => {
+                            if started.is_ok() {
+                                let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
+                                for (_, _, _, pending_deadline) in &mut pending_neovim_barriers {
+                                    if pending_deadline.is_none() {
+                                        *pending_deadline = Some(deadline);
+                                    }
+                                }
+                            } else {
+                                pending_neovim_barriers.clear();
+                            }
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimStarted(started),
+                            );
+                        }
+                        crate::neovim::WorkerEvent::Document(document) => apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::NeovimDocument(document),
+                        ),
+                        crate::neovim::WorkerEvent::Warning(error) => apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::NeovimWarning(error),
+                        ),
+                        crate::neovim::WorkerEvent::Failed(error) => {
+                            pending_neovim_barriers.clear();
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimFailed(error),
+                            );
+                        }
+                        crate::neovim::WorkerEvent::Source(
+                            crate::neovim::SourceEvent::Barrier(barrier),
+                        ) => {
+                            if !accepts_neovim_generation(&state, barrier.generation) {
+                                continue;
+                            }
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(barrier.document),
+                            );
+                            let Some((expected_generation, expected_id, action, _deadline)) =
+                                pending_neovim_barriers.pop_front()
+                            else {
+                                return Err("Neovim returned an unexpected source barrier".into());
+                            };
+                            if expected_generation != barrier.generation {
+                                return Err("Neovim source barrier generation mismatch".into());
+                            }
+                            if expected_id != barrier.id {
+                                return Err(format!(
+                                    "Neovim source barrier mismatch: expected {expected_id}, got {}",
+                                    barrier.id
+                                ));
+                            }
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::Command(action),
+                            );
+                        }
+                        crate::neovim::WorkerEvent::Source(crate::neovim::SourceEvent::Action(
+                            _,
+                        )) => unreachable!("Tutor actions are ordered before runtime dispatch"),
+                    },
                 }
                 needs_draw = true;
             }
@@ -1763,16 +1844,6 @@ pub fn run(
                 .is_some_and(|deadline| Instant::now() >= deadline)
             {
                 return Err("Neovim source barrier timed out".into());
-            }
-            if let Some(document) = coalesced_document {
-                apply_event(
-                    &mut state,
-                    &repository,
-                    &root,
-                    &mut workers,
-                    Event::NeovimDocument(document),
-                );
-                needs_draw = true;
             }
             let terminal_size = terminal
                 .size()
@@ -2085,6 +2156,62 @@ mod tests {
                 }] if source == "exact bytes at key moment" && *intent == expected_intent
             ));
         }
+    }
+
+    #[test]
+    fn ordered_poll_back_autosaves_a_later_document_from_the_same_poll() {
+        use crate::neovim::{
+            ActionUpdate, DocumentUpdate, SessionGeneration, SourceEvent, TutorAction, WorkerEvent,
+        };
+
+        let mut state = interviewer_solve_state();
+        let poll = crate::neovim::PollResult {
+            grid: None,
+            document: Some(DocumentUpdate {
+                text: "newest accepted bytes".into(),
+                mode: "n".into(),
+                changedtick: 3,
+            }),
+            events: vec![
+            WorkerEvent::Source(SourceEvent::Action(ActionUpdate {
+                generation: SessionGeneration(1),
+                action: TutorAction::Back,
+                document: DocumentUpdate {
+                    text: "bytes at back notification".into(),
+                    mode: "n".into(),
+                    changedtick: 2,
+                },
+            })),
+                WorkerEvent::Document(DocumentUpdate {
+                    text: "newest accepted bytes".into(),
+                    mode: "n".into(),
+                    changedtick: 3,
+                }),
+            ],
+        };
+        let mut action_effects = Vec::new();
+        for event in order_neovim_poll_events(poll.events) {
+            match event {
+                OrderedNeovimPollEvent::Tutor {
+                    generation,
+                    documents,
+                    action,
+                } => {
+                    assert_eq!(generation, SessionGeneration(1));
+                    for document in documents {
+                        reduce(&mut state, Event::NeovimDocument(document));
+                    }
+                    action_effects = reduce(&mut state, Event::Command(action));
+                }
+                OrderedNeovimPollEvent::Worker(_) => unreachable!(),
+            }
+        }
+
+        assert!(matches!(
+            action_effects.as_slice(),
+            [Effect::SaveDraft { source, .. }, Effect::LeaveSolve]
+                if source == "newest accepted bytes"
+        ));
     }
 
     #[test]
