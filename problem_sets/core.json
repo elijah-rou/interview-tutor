@@ -1,0 +1,76 @@
+{
+  "schema_version": 2,
+  "id": "core",
+  "name": "Core",
+  "description": "A 17-problem core interview preparation set shared across company-specific preparation.",
+  "members": [
+    {
+      "ordinal": 1,
+      "problem_slug": "merge-intervals"
+    },
+    {
+      "ordinal": 2,
+      "problem_slug": "top-k-frequent-elements"
+    },
+    {
+      "ordinal": 3,
+      "problem_slug": "time-based-key-value-store"
+    },
+    {
+      "ordinal": 4,
+      "problem_slug": "lru-cache"
+    },
+    {
+      "ordinal": 5,
+      "problem_slug": "course-schedule"
+    },
+    {
+      "ordinal": 6,
+      "problem_slug": "number-of-islands"
+    },
+    {
+      "ordinal": 7,
+      "problem_slug": "kth-largest-element-in-a-stream"
+    },
+    {
+      "ordinal": 8,
+      "problem_slug": "coin-change"
+    },
+    {
+      "ordinal": 9,
+      "problem_slug": "longest-substring-without-repeating-characters"
+    },
+    {
+      "ordinal": 10,
+      "problem_slug": "binary-tree-level-order-traversal"
+    },
+    {
+      "ordinal": 11,
+      "problem_slug": "meeting-rooms-ii"
+    },
+    {
+      "ordinal": 12,
+      "problem_slug": "sliding-window-maximum"
+    },
+    {
+      "ordinal": 13,
+      "problem_slug": "two-sum-ii-input-array-is-sorted"
+    },
+    {
+      "ordinal": 14,
+      "problem_slug": "valid-parentheses"
+    },
+    {
+      "ordinal": 15,
+      "problem_slug": "maximum-depth-of-binary-tree"
+    },
+    {
+      "ordinal": 16,
+      "problem_slug": "subarray-sum-equals-k"
+    },
+    {
+      "ordinal": 17,
+      "problem_slug": "subsets"
+    }
+  ]
+}

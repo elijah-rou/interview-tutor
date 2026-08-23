@@ -10,6 +10,25 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_INTERVIEW_SETS = {
+    "core": [
+        "merge-intervals",
+        "top-k-frequent-elements",
+        "time-based-key-value-store",
+        "lru-cache",
+        "course-schedule",
+        "number-of-islands",
+        "kth-largest-element-in-a-stream",
+        "coin-change",
+        "longest-substring-without-repeating-characters",
+        "binary-tree-level-order-traversal",
+        "meeting-rooms-ii",
+        "sliding-window-maximum",
+        "two-sum-ii-input-array-is-sorted",
+        "valid-parentheses",
+        "maximum-depth-of-binary-tree",
+        "subarray-sum-equals-k",
+        "subsets",
+    ],
     "convex": [
         "longest-substring-without-repeating-characters",
         "merge-intervals",
@@ -144,8 +163,11 @@ class GeneralizedCliTests(unittest.TestCase):
         discovered = self.run_command(str(ROOT / "practice"), "sets", "list")
         self.assertEqual(discovered.returncode, 0, discovered.stderr)
         rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
-        self.assertEqual([row[0] for row in rows], ["anti-metal", "blind75", "convex", "depot"])
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "10"])
+        self.assertEqual(
+            [row[0] for row in rows],
+            ["anti-metal", "blind75", "convex", "core", "depot"],
+        )
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -210,7 +232,10 @@ class GeneralizedCliTests(unittest.TestCase):
             "kth-largest-element-in-a-stream",
             "lru-cache",
             "sliding-window-maximum",
+            "subarray-sum-equals-k",
+            "subsets",
             "time-based-key-value-store",
+            "two-sum-ii-input-array-is-sorted",
         ):
             with self.subTest(slug=slug):
                 result = self.run_command(str(ROOT / "python" / "run"), "--problem", slug)
@@ -501,7 +526,7 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(
             global_stats.stdout.splitlines()[0],
-            "All Problems progress (python): 1/79 (1.3%)",
+            "All Problems progress (python): 1/82 (1.2%)",
         )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:

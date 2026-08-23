@@ -1,6 +1,6 @@
 # Interview Tutor
 
-Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional Codex interviewer. The 79-problem global catalog ships the Blind 75, Convex, anti-metal, and Depot sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
+Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional Codex interviewer. The 82-problem global catalog ships the Blind 75, Convex, Core, anti-metal, and Depot sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
 
 ## Requirements and build
 

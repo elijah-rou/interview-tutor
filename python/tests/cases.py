@@ -56,6 +56,7 @@ SIMPLE_CASES: dict[str, tuple[tuple[Any, ...], Any]] = {
         [3, 3, 5, 5, 6, 7],
     ),
     "spiral-matrix": (([[1, 2, 3], [4, 5, 6], [7, 8, 9]],), [1, 2, 3, 6, 9, 8, 7, 4, 5]),
+    "subarray-sum-equals-k": (([1, 1, 1], 2), 2),
     "sum-of-two-integers": ((2, 3), 5),
     "unique-paths": ((3, 7), 28),
     "valid-anagram": (("anagram", "nagaram"), True),
@@ -94,6 +95,18 @@ def test_two_sum(module: ModuleType) -> None:
     if first == second or not (0 <= first < len(nums)) or not (0 <= second < len(nums)):
         raise AssertionError(f"invalid indices: {actual!r}")
     assert_equal(nums[first] + nums[second], target)
+
+
+def test_two_sum_ii(module: ModuleType) -> None:
+    numbers = [2, 7, 11, 15]
+    target = 9
+    actual = call_solution(module, "twoSum", numbers, target)
+    if len(actual) != 2:
+        raise AssertionError(f"expected two indices, got {actual!r}")
+    first, second = actual
+    if not (1 <= first < second <= len(numbers)):
+        raise AssertionError(f"invalid one-based indices: {actual!r}")
+    assert_equal(numbers[first - 1] + numbers[second - 1], target)
 
 
 def test_3sum(module: ModuleType) -> None:
@@ -318,6 +331,12 @@ def test_subtree(module: ModuleType) -> None:
     assert_equal(call_solution(module, "isSubtree", tree([3, 4, 5, 1, 2]), tree([4, 1, 2])), True)
 
 
+def test_subsets(module: ModuleType) -> None:
+    actual = call_solution(module, "subsets", [1, 2])
+    normalized = sorted(sorted(subset) for subset in actual)
+    assert_equal(normalized, [[], [1], [1, 2], [2]])
+
+
 def test_time_map(module: ModuleType) -> None:
     time_map = module.TimeMap()
     time_map.set("foo", "bar", 1)
@@ -352,6 +371,7 @@ def test_word_search_ii(module: ModuleType) -> None:
 
 CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "two-sum": test_two_sum,
+    "two-sum-ii-input-array-is-sorted": test_two_sum_ii,
     "3sum": test_3sum,
     "alien-dictionary": test_alien_dictionary,
     "binary-tree-level-order-traversal": test_binary_tree_level_order_traversal,
@@ -381,6 +401,7 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "same-tree": test_same_tree,
     "serialize-and-deserialize-binary-tree": test_serialize_tree,
     "set-matrix-zeroes": test_set_matrix_zeroes,
+    "subsets": test_subsets,
     "subtree-of-another-tree": test_subtree,
     "time-based-key-value-store": test_time_map,
     "top-k-frequent-elements": test_top_k,

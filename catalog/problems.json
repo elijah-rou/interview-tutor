@@ -1454,6 +1454,50 @@
       ]
     },
     {
+      "slug": "subarray-sum-equals-k",
+      "title": "Subarray Sum Equals K",
+      "difficulty": "Medium",
+      "topic": "Arrays & Hashing",
+      "leetcode_id": 560,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/subarray-sum-equals-k/",
+      "neetcode_url": "https://neetcode.io/problems/subarray-sum-equals-k/question",
+      "statement_markdown": "## Task\n\nGiven an integer list and target `k`, return the number of contiguous nonempty subarrays whose values sum to `k`.\n\n## Example\n\nList `[1, 1, 1]` with `k = 2` returns `2`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/subarray_sum_equals_k.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/subarray_sum_equals_k.rs"
+        }
+      ]
+    },
+    {
+      "slug": "subsets",
+      "title": "Subsets",
+      "difficulty": "Medium",
+      "topic": "Backtracking",
+      "leetcode_id": 78,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/subsets/",
+      "neetcode_url": "https://neetcode.io/problems/subsets/question",
+      "statement_markdown": "## Task\n\nGiven a list of distinct integers, return every subset, including the empty set and the full input. Values within each subset and subsets within the result may appear in any order.\n\n## Example\n\nInput `[1, 2]` returns `[]`, `[1]`, `[2]`, and `[1, 2]`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/subsets.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/subsets.rs"
+        }
+      ]
+    },
+    {
       "slug": "subtree-of-another-tree",
       "title": "Subtree of Another Tree",
       "difficulty": "Easy",
@@ -1560,6 +1604,28 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/two_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "two-sum-ii-input-array-is-sorted",
+      "title": "Two Sum II - Input Array Is Sorted",
+      "difficulty": "Medium",
+      "topic": "Two Pointers",
+      "leetcode_id": 167,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/two-sum-ii-input-array-is-sorted/",
+      "neetcode_url": "https://neetcode.io/problems/two-integer-sum-ii/question",
+      "statement_markdown": "## Task\n\nGiven a nondecreasing integer list and a target with exactly one valid pair, return the distinct pair's one-based indices in increasing order.\n\n## Example\n\nList `[2, 7, 11, 15]` with target `9` returns `[1, 2]`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/two_sum_ii_input_array_is_sorted.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/two_sum_ii_input_array_is_sorted.rs"
         }
       ]
     },
@@ -1740,5 +1806,5 @@
       ]
     }
   ],
-  "catalog_revision": 4
+  "catalog_revision": 5
 }

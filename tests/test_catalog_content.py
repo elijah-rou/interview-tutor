@@ -13,6 +13,28 @@ MAX_STATEMENT_LENGTH = 1_000_000
 REGISTRY_TIMEOUT_SECONDS = 10
 
 EXPECTED_INTERVIEW_SETS = {
+    "core": {
+        "name": "Core",
+        "members": [
+            "merge-intervals",
+            "top-k-frequent-elements",
+            "time-based-key-value-store",
+            "lru-cache",
+            "course-schedule",
+            "number-of-islands",
+            "kth-largest-element-in-a-stream",
+            "coin-change",
+            "longest-substring-without-repeating-characters",
+            "binary-tree-level-order-traversal",
+            "meeting-rooms-ii",
+            "sliding-window-maximum",
+            "two-sum-ii-input-array-is-sorted",
+            "valid-parentheses",
+            "maximum-depth-of-binary-tree",
+            "subarray-sum-equals-k",
+            "subsets",
+        ],
+    },
     "convex": {
         "name": "Convex",
         "members": [
@@ -61,6 +83,24 @@ EXPECTED_INTERVIEW_SETS = {
 }
 
 EXPECTED_NEW_PROBLEMS = {
+    "subarray-sum-equals-k": {
+        "title": "Subarray Sum Equals K",
+        "difficulty": "Medium",
+        "leetcode_id": 560,
+        "leetcode_url": "https://leetcode.com/problems/subarray-sum-equals-k/",
+    },
+    "subsets": {
+        "title": "Subsets",
+        "difficulty": "Medium",
+        "leetcode_id": 78,
+        "leetcode_url": "https://leetcode.com/problems/subsets/",
+    },
+    "two-sum-ii-input-array-is-sorted": {
+        "title": "Two Sum II - Input Array Is Sorted",
+        "difficulty": "Medium",
+        "leetcode_id": 167,
+        "leetcode_url": "https://leetcode.com/problems/two-sum-ii-input-array-is-sorted/",
+    },
     "kth-largest-element-in-a-stream": {
         "title": "Kth Largest Element in a Stream",
         "difficulty": "Easy",
@@ -109,9 +149,9 @@ class CatalogContentTests(unittest.TestCase):
         self.assertEqual(len(set(statements)), len(statements))
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
-    def test_catalog_has_79_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 4)
-        self.assertEqual(len(self.problems), 79)
+    def test_catalog_has_82_problems_and_expected_new_canonical_metadata(self) -> None:
+        self.assertEqual(self.catalog["catalog_revision"], 5)
+        self.assertEqual(len(self.problems), 82)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
             with self.subTest(slug=slug):
@@ -123,8 +163,11 @@ class CatalogContentTests(unittest.TestCase):
                 self.assertFalse(problem["premium"])
                 self.assertEqual(problem["test_revision"], 1)
 
-    def test_all_four_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
-        self.assertEqual(set(self.problem_sets), {"anti-metal", "blind75", "convex", "depot"})
+    def test_all_five_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
+        self.assertEqual(
+            set(self.problem_sets),
+            {"anti-metal", "blind75", "convex", "core", "depot"},
+        )
 
         blind75_members = self.problem_sets["blind75"]["members"]
         blind75_slugs = [member["problem_slug"] for member in blind75_members]
@@ -139,7 +182,10 @@ class CatalogContentTests(unittest.TestCase):
                 self.assertEqual(problem_set["id"], set_id)
                 self.assertEqual(problem_set["name"], expected["name"])
                 members = problem_set["members"]
-                self.assertEqual([member["ordinal"] for member in members], list(range(1, 11)))
+                self.assertEqual(
+                    [member["ordinal"] for member in members],
+                    list(range(1, len(expected["members"]) + 1)),
+                )
                 self.assertEqual(
                     [member["problem_slug"] for member in members],
                     expected["members"],

@@ -65,12 +65,15 @@ pub mod serialize_and_deserialize_binary_tree;
 pub mod set_matrix_zeroes;
 pub mod sliding_window_maximum;
 pub mod spiral_matrix;
+pub mod subarray_sum_equals_k;
+pub mod subsets;
 pub mod subtree_of_another_tree;
 pub mod sum_of_two_integers;
 pub mod three_sum;
 pub mod time_based_key_value_store;
 pub mod top_k_frequent_elements;
 pub mod two_sum;
+pub mod two_sum_ii_input_array_is_sorted;
 pub mod unique_paths;
 pub mod valid_anagram;
 pub mod valid_palindrome;
@@ -249,6 +252,8 @@ pub const PROBLEMS: &[Problem] = &[
     Problem::new("set-matrix-zeroes", set_matrix_zeroes::run_case),
     Problem::new("sliding-window-maximum", sliding_window_maximum::run_case),
     Problem::new("spiral-matrix", spiral_matrix::run_case),
+    Problem::new("subarray-sum-equals-k", subarray_sum_equals_k::run_case),
+    Problem::new("subsets", subsets::run_case),
     Problem::new("subtree-of-another-tree", subtree_of_another_tree::run_case),
     Problem::new("sum-of-two-integers", sum_of_two_integers::run_case),
     Problem::new(
@@ -257,6 +262,10 @@ pub const PROBLEMS: &[Problem] = &[
     ),
     Problem::new("top-k-frequent-elements", top_k_frequent_elements::run_case),
     Problem::new("two-sum", two_sum::run_case),
+    Problem::new(
+        "two-sum-ii-input-array-is-sorted",
+        two_sum_ii_input_array_is_sorted::run_case,
+    ),
     Problem::new("unique-paths", unique_paths::run_case),
     Problem::new("valid-anagram", valid_anagram::run_case),
     Problem::new("valid-palindrome", valid_palindrome::run_case),

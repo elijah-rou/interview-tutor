@@ -241,6 +241,13 @@ PROBLEMS = (
     ),
     Problem("spiral-matrix", "problems/medium/spiral_matrix.py", "Solution", "spiralOrder"),
     Problem(
+        "subarray-sum-equals-k",
+        "problems/medium/subarray_sum_equals_k.py",
+        "Solution",
+        "subarraySum",
+    ),
+    Problem("subsets", "problems/medium/subsets.py", "Solution", "subsets"),
+    Problem(
         "subtree-of-another-tree",
         "problems/easy/subtree_of_another_tree.py",
         "Solution",
@@ -260,6 +267,12 @@ PROBLEMS = (
         "topKFrequent",
     ),
     Problem("two-sum", "problems/easy/two_sum.py", "Solution", "twoSum"),
+    Problem(
+        "two-sum-ii-input-array-is-sorted",
+        "problems/medium/two_sum_ii_input_array_is_sorted.py",
+        "Solution",
+        "twoSum",
+    ),
     Problem("unique-paths", "problems/medium/unique_paths.py", "Solution", "uniquePaths"),
     Problem("valid-anagram", "problems/easy/valid_anagram.py", "Solution", "isAnagram"),
     Problem("valid-palindrome", "problems/easy/valid_palindrome.py", "Solution", "isPalindrome"),
