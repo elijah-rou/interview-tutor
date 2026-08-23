@@ -16,8 +16,11 @@ use std::time::Duration;
 pub use process::resolve_executable;
 
 const COMMAND_CAPACITY: usize = 64;
-const EVENT_CAPACITY: usize = 16;
+const EVENT_CAPACITY: usize = COMMAND_CAPACITY + 16;
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionGeneration(pub u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TutorAction {
@@ -39,19 +42,21 @@ pub struct DocumentUpdate {
 
 #[derive(Default)]
 struct WorkerShared {
+    generation: Option<SessionGeneration>,
     latest_grid: Option<Arc<GridSnapshot>>,
-    latest_document: Option<DocumentUpdate>,
     events: VecDeque<WorkerEvent>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ActionUpdate {
+    pub generation: SessionGeneration,
     pub action: TutorAction,
     pub document: DocumentUpdate,
 }
 
 #[derive(Clone, Debug)]
 pub struct BarrierUpdate {
+    pub generation: SessionGeneration,
     pub id: u64,
     pub document: DocumentUpdate,
 }
@@ -65,6 +70,7 @@ pub enum SourceEvent {
 #[derive(Clone, Debug)]
 pub enum WorkerEvent {
     Started(Result<(), String>),
+    Document(DocumentUpdate),
     Source(SourceEvent),
     Warning(String),
     Failed(String),
@@ -73,12 +79,14 @@ pub enum WorkerEvent {
 #[derive(Default)]
 pub struct PollResult {
     pub grid: Option<Arc<GridSnapshot>>,
+    /// Compatibility view of the newest document; `events` retains every ordered snapshot.
     pub document: Option<DocumentUpdate>,
     pub events: Vec<WorkerEvent>,
 }
 
 enum Command {
     Start {
+        generation: SessionGeneration,
         source: String,
         synthetic_name: String,
         language: String,
@@ -95,16 +103,20 @@ enum Command {
         column: u16,
     },
     Resize(u16, u16),
-    Barrier(u64),
+    Barrier {
+        generation: SessionGeneration,
+        id: u64,
+    },
     AcknowledgeSaved {
         changedtick: u64,
         source: String,
     },
-    Stop,
+    Stop(SessionGeneration),
 }
 
 #[derive(Clone)]
 struct SessionConfig {
+    generation: SessionGeneration,
     source: String,
     synthetic_name: String,
     language: String,
@@ -151,13 +163,49 @@ impl Worker {
         width: u16,
         height: u16,
     ) -> Result<(), String> {
-        self.send(Command::Start {
+        self.start_session_for_generation(
+            SessionGeneration(1),
             source,
             synthetic_name,
             language,
             width,
             height,
-        })
+        )
+    }
+
+    pub fn start_session_for_generation(
+        &self,
+        generation: SessionGeneration,
+        source: String,
+        synthetic_name: String,
+        language: String,
+        width: u16,
+        height: u16,
+    ) -> Result<(), String> {
+        let (width, height) = bounded_grid_size(width, height);
+        {
+            let mut shared = self.shared.lock().expect("Neovim worker lock");
+            shared.generation = Some(generation);
+            shared.latest_grid = None;
+            shared.events.clear();
+        }
+        if let Err(error) = self.send(Command::Start {
+            generation,
+            source,
+            synthetic_name,
+            language,
+            width,
+            height,
+        }) {
+            let mut shared = self.shared.lock().expect("Neovim worker lock");
+            if shared.generation == Some(generation) {
+                shared.generation = None;
+                shared.latest_grid = None;
+                shared.events.clear();
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn input(&self, encoded: String) -> Result<(), String> {
@@ -192,11 +240,26 @@ impl Worker {
     }
 
     pub fn resize(&self, width: u16, height: u16) -> Result<(), String> {
+        let (width, height) = bounded_grid_size(width, height);
         self.send(Command::Resize(width, height))
     }
 
     pub fn barrier(&self, id: u64) -> Result<(), String> {
-        self.send(Command::Barrier(id))
+        let generation = self
+            .shared
+            .lock()
+            .expect("Neovim worker lock")
+            .generation
+            .ok_or("Neovim session is stopped")?;
+        self.barrier_for_generation(generation, id)
+    }
+
+    pub fn barrier_for_generation(
+        &self,
+        generation: SessionGeneration,
+        id: u64,
+    ) -> Result<(), String> {
+        self.send(Command::Barrier { generation, id })
     }
 
     pub fn acknowledge_saved(&self, changedtick: u64, source: String) -> Result<(), String> {
@@ -207,7 +270,25 @@ impl Worker {
     }
 
     pub fn stop_session(&self) -> Result<(), String> {
-        self.send(Command::Stop)
+        let generation = self
+            .shared
+            .lock()
+            .expect("Neovim worker lock")
+            .generation
+            .ok_or("Neovim session is stopped")?;
+        self.stop_session_for_generation(generation)
+    }
+
+    pub fn stop_session_for_generation(&self, generation: SessionGeneration) -> Result<(), String> {
+        {
+            let mut shared = self.shared.lock().expect("Neovim worker lock");
+            if shared.generation == Some(generation) {
+                shared.generation = None;
+                shared.latest_grid = None;
+                shared.events.clear();
+            }
+        }
+        self.send(Command::Stop(generation))
     }
 
     fn send(&self, command: Command) -> Result<(), String> {
@@ -252,11 +333,25 @@ fn take_poll_result(shared: &Arc<Mutex<WorkerShared>>) -> PollResult {
     let mut shared = shared.lock().expect("Neovim worker lock");
     let mut result = PollResult {
         grid: shared.latest_grid.take(),
-        document: shared.latest_document.take(),
         ..PollResult::default()
     };
     result.events.extend(shared.events.drain(..));
+    result.document = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            WorkerEvent::Document(document) => Some(document.clone()),
+            _ => None,
+        })
+        .next_back();
     result
+}
+
+fn bounded_grid_size(width: u16, height: u16) -> (u16, u16) {
+    (
+        width.clamp(1, grid::MAX_GRID_WIDTH as u16),
+        height.clamp(1, grid::MAX_GRID_HEIGHT as u16),
+    )
 }
 
 fn controller(
@@ -273,6 +368,7 @@ fn controller(
         }
         match commands.recv_timeout(Duration::from_millis(20)) {
             Ok(Command::Start {
+                generation,
                 source,
                 synthetic_name,
                 language,
@@ -283,6 +379,7 @@ fn controller(
                     let _ = previous.shutdown();
                 }
                 let mut next_config = SessionConfig {
+                    generation,
                     source,
                     synthetic_name,
                     language,
@@ -292,21 +389,32 @@ fn controller(
                     cancellation: Arc::clone(&cancellation),
                 };
                 match spawn(&executable, &next_config) {
-                    Ok(mut next) => match sync_document(&mut next, &mut next_config, &shared) {
-                        Ok(_) => {
+                    Ok(mut next) => match sync_document(&mut next, &mut next_config) {
+                        Ok((document, publish)) => {
                             process = Some(next);
                             config = Some(next_config);
-                            push_event(&shared, WorkerEvent::Started(Ok(())))
+                            if publish {
+                                push_session_event(
+                                    &shared,
+                                    generation,
+                                    WorkerEvent::Document(document),
+                                );
+                            }
+                            push_session_event(&shared, generation, WorkerEvent::Started(Ok(())));
                         }
                         Err(error) => {
                             let _ = next.shutdown();
                             config = None;
-                            push_event(&shared, WorkerEvent::Started(Err(error)))
+                            push_session_event(
+                                &shared,
+                                generation,
+                                WorkerEvent::Started(Err(error)),
+                            );
                         }
                     },
                     Err(error) => {
                         config = None;
-                        push_event(&shared, WorkerEvent::Started(Err(error)))
+                        push_session_event(&shared, generation, WorkerEvent::Started(Err(error)));
                     }
                 }
             }
@@ -316,7 +424,12 @@ fn controller(
                     .as_mut()
                     .and_then(|process| process.feed_key(&encoded).err());
                 if let Some(error) = input_error {
-                    fail_process(&mut process, &shared, error);
+                    fail_process(
+                        &mut process,
+                        &shared,
+                        config.as_ref().map(|config| config.generation),
+                        error,
+                    );
                 } else {
                     sync_reader_state(&executable, &mut process, &mut config, &shared);
                 }
@@ -337,16 +450,24 @@ fn controller(
                     process.mouse(button, action, modifiers, row, column).err()
                 });
                 if let Some(error) = mouse_error {
-                    fail_process(&mut process, &shared, error);
+                    fail_process(
+                        &mut process,
+                        &shared,
+                        config.as_ref().map(|config| config.generation),
+                        error,
+                    );
                 }
             }
-            Ok(Command::Barrier(id)) => {
+            Ok(Command::Barrier { generation, id }) => {
+                if config.as_ref().map(|config| config.generation) != Some(generation) {
+                    continue;
+                }
                 sync_reader_state(&executable, &mut process, &mut config, &shared);
                 let barrier_error = process
                     .as_mut()
                     .and_then(|process| process.request_barrier(id).err());
                 if let Some(error) = barrier_error {
-                    fail_process(&mut process, &shared, error);
+                    fail_process(&mut process, &shared, Some(generation), error);
                 }
             }
             Ok(Command::AcknowledgeSaved {
@@ -357,7 +478,12 @@ fn controller(
                     .as_mut()
                     .and_then(|process| process.acknowledge_saved(changedtick, source).err());
                 if let Some(error) = acknowledgement_error {
-                    fail_process(&mut process, &shared, error);
+                    fail_process(
+                        &mut process,
+                        &shared,
+                        config.as_ref().map(|config| config.generation),
+                        error,
+                    );
                 }
             }
             Ok(Command::Resize(width, height)) => {
@@ -369,14 +495,22 @@ fn controller(
                     .as_mut()
                     .and_then(|process| process.resize(width, height).err());
                 if let Some(error) = resize_error {
-                    fail_process(&mut process, &shared, error);
+                    fail_process(
+                        &mut process,
+                        &shared,
+                        config.as_ref().map(|config| config.generation),
+                        error,
+                    );
                 }
             }
-            Ok(Command::Stop) => {
+            Ok(Command::Stop(generation)) => {
+                if config.as_ref().map(|config| config.generation) != Some(generation) {
+                    continue;
+                }
                 if let Some(mut current) = process.take()
                     && let Err(error) = current.shutdown()
                 {
-                    push_event(&shared, WorkerEvent::Failed(error));
+                    push_session_event(&shared, generation, WorkerEvent::Failed(error));
                 }
                 config = None;
             }
@@ -414,20 +548,30 @@ fn run_and_sync(
         return;
     };
     if let Err(error) = operation(current) {
-        fail_process(process, shared, error);
+        fail_process(
+            process,
+            shared,
+            config.as_ref().map(|config| config.generation),
+            error,
+        );
         return;
     }
     let candidate = current.snapshot();
-    let _ = handle_snapshot(executable, process, config, shared, candidate);
+    if let Some((document, _recovered, publish)) =
+        handle_snapshot(executable, process, config, shared, candidate)
+        && publish
+        && let Some(generation) = config.as_ref().map(|config| config.generation)
+    {
+        push_session_event(shared, generation, WorkerEvent::Document(document));
+    }
     sync_reader_state(executable, process, config, shared);
 }
 
 fn accept_snapshot(
     process: &RpcProcess,
     config: &mut SessionConfig,
-    shared: &Arc<Mutex<WorkerShared>>,
     snapshot: Snapshot,
-) -> Result<DocumentUpdate, String> {
+) -> Result<(DocumentUpdate, bool), String> {
     if !process.is_solution_buffer(&snapshot.buffer) {
         return Err("Neovim snapshot targeted a non-solution buffer".into());
     }
@@ -436,17 +580,21 @@ fn accept_snapshot(
         .map_err(|_| "overflowed Neovim snapshot reached source acceptance".to_string())?;
     if snapshot.changedtick < config.accepted_changedtick {
         if text == config.source {
-            return Ok(DocumentUpdate {
-                text,
-                mode: snapshot.mode,
-                changedtick: config.accepted_changedtick,
-            });
+            return Ok((
+                DocumentUpdate {
+                    text,
+                    mode: snapshot.mode,
+                    changedtick: config.accepted_changedtick,
+                },
+                false,
+            ));
         }
         return Err("Neovim snapshot changedtick moved backwards".into());
     }
     if snapshot.changedtick == config.accepted_changedtick && text != config.source {
         return Err("Neovim changed bytes without advancing changedtick".into());
     }
+    let publish = snapshot.changedtick > config.accepted_changedtick || text != config.source;
     let update = DocumentUpdate {
         text: text.clone(),
         mode: snapshot.mode,
@@ -454,8 +602,7 @@ fn accept_snapshot(
     };
     config.source = text;
     config.accepted_changedtick = snapshot.changedtick;
-    shared.lock().expect("Neovim worker lock").latest_document = Some(update.clone());
-    Ok(update)
+    Ok((update, publish))
 }
 
 fn recover_overflow(
@@ -479,11 +626,13 @@ fn recover_overflow(
         let _ = replacement.shutdown();
         return Err("Neovim overflow recovery changed source bytes".into());
     }
-    let update = accept_snapshot(&replacement, &mut last_valid, shared, snapshot)?;
+    let generation = last_valid.generation;
+    let (update, _) = accept_snapshot(&replacement, &mut last_valid, snapshot)?;
     *config = Some(last_valid);
     *process = Some(replacement);
-    push_event(
+    push_session_event(
         shared,
+        generation,
         WorkerEvent::Warning(format!(
             "{error}; Neovim restarted from the last valid source"
         )),
@@ -497,7 +646,7 @@ fn handle_snapshot(
     config: &mut Option<SessionConfig>,
     shared: &Arc<Mutex<WorkerShared>>,
     candidate: Result<Snapshot, String>,
-) -> Option<(DocumentUpdate, bool)> {
+) -> Option<(DocumentUpdate, bool, bool)> {
     let overflow = candidate
         .as_ref()
         .ok()
@@ -509,9 +658,14 @@ fn handle_snapshot(
         }
         .to_string();
         return match recover_overflow(executable, process, config, shared, reason) {
-            Ok(update) => Some((update, true)),
+            Ok(update) => Some((update, true, true)),
             Err(error) => {
-                fail_process(process, shared, error);
+                fail_process(
+                    process,
+                    shared,
+                    config.as_ref().map(|config| config.generation),
+                    error,
+                );
                 None
             }
         };
@@ -519,7 +673,12 @@ fn handle_snapshot(
     let snapshot = match candidate {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            fail_process(process, shared, error);
+            fail_process(
+                process,
+                shared,
+                config.as_ref().map(|config| config.generation),
+                error,
+            );
             return None;
         }
     };
@@ -527,11 +686,16 @@ fn handle_snapshot(
         .as_ref()
         .zip(config.as_mut())
         .ok_or_else(|| "Neovim session is unavailable".to_string())
-        .and_then(|(process, config)| accept_snapshot(process, config, shared, snapshot));
+        .and_then(|(process, config)| accept_snapshot(process, config, snapshot));
     match result {
-        Ok(update) => Some((update, false)),
+        Ok((update, publish)) => Some((update, false, publish)),
         Err(error) => {
-            fail_process(process, shared, error);
+            fail_process(
+                process,
+                shared,
+                config.as_ref().map(|config| config.generation),
+                error,
+            );
             None
         }
     }
@@ -564,8 +728,13 @@ fn sync_reader_state(
             reader.error.take(),
         )
     };
-    if let Some(grid) = grid {
-        shared.lock().expect("Neovim worker lock").latest_grid = Some(grid);
+    if let Some(grid) = grid
+        && let Some(generation) = config.as_ref().map(|config| config.generation)
+    {
+        let mut shared = shared.lock().expect("Neovim worker lock");
+        if shared.generation == Some(generation) {
+            shared.latest_grid = Some(grid);
+        }
     }
     let events = events.into_iter().collect::<Vec<_>>();
     let mut reader_replaced = false;
@@ -579,6 +748,7 @@ fn sync_reader_state(
                 fail_process(
                     process,
                     shared,
+                    config.as_ref().map(|config| config.generation),
                     "Neovim dirty event targeted a non-solution buffer".into(),
                 );
                 return;
@@ -600,26 +770,43 @@ fn sync_reader_state(
                 .ok_or_else(|| "Neovim session is unavailable".to_string())
                 .and_then(|process| process.resolve_notified_snapshot(snapshot)),
         };
-        let Some((document, recovered)) =
+        let Some((document, recovered, publish)) =
             handle_snapshot(executable, process, config, shared, candidate)
         else {
             return;
         };
+        let Some(generation) = config.as_ref().map(|config| config.generation) else {
+            return;
+        };
         match event {
-            OriginEvent::Dirty { .. } => {}
+            OriginEvent::Dirty { .. } => {
+                if publish {
+                    push_session_event(shared, generation, WorkerEvent::Document(document));
+                }
+            }
             OriginEvent::Action { action, .. } => match parse_action(&action) {
-                Ok(action) => push_event(
+                Ok(action) => push_session_event(
                     shared,
-                    WorkerEvent::Source(SourceEvent::Action(ActionUpdate { action, document })),
+                    generation,
+                    WorkerEvent::Source(SourceEvent::Action(ActionUpdate {
+                        generation,
+                        action,
+                        document,
+                    })),
                 ),
                 Err(error) => {
-                    fail_process(process, shared, error);
+                    fail_process(process, shared, Some(generation), error);
                     return;
                 }
             },
-            OriginEvent::Barrier { id, .. } => push_event(
+            OriginEvent::Barrier { id, .. } => push_session_event(
                 shared,
-                WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate { id, document })),
+                generation,
+                WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate {
+                    generation,
+                    id,
+                    document,
+                })),
             ),
         }
         if recovered {
@@ -628,17 +815,21 @@ fn sync_reader_state(
         }
     }
     if !reader_replaced && let Some(error) = error {
-        fail_process(process, shared, error);
+        fail_process(
+            process,
+            shared,
+            config.as_ref().map(|config| config.generation),
+            error,
+        );
     }
 }
 
 fn sync_document(
     process: &mut RpcProcess,
     config: &mut SessionConfig,
-    shared: &Arc<Mutex<WorkerShared>>,
-) -> Result<DocumentUpdate, String> {
+) -> Result<(DocumentUpdate, bool), String> {
     let snapshot = process.snapshot()?;
-    accept_snapshot(process, config, shared, snapshot)
+    accept_snapshot(process, config, snapshot)
 }
 
 fn parse_action(action: &str) -> Result<TutorAction, String> {
@@ -657,29 +848,39 @@ fn parse_action(action: &str) -> Result<TutorAction, String> {
 fn fail_process(
     process: &mut Option<RpcProcess>,
     shared: &Arc<Mutex<WorkerShared>>,
+    generation: Option<SessionGeneration>,
     error: String,
 ) {
-    if let Some(mut process) = process.take() {
+    let error = if let Some(mut process) = process.take() {
         let stderr = process.stderr_tail();
         let _ = process.shutdown();
-        let error = if stderr.trim().is_empty() {
+        if stderr.trim().is_empty() {
             error
         } else {
             format!(
                 "{error}; Neovim stderr: {}",
                 stderr.chars().take(512).collect::<String>()
             )
-        };
-        push_event(shared, WorkerEvent::Failed(error));
+        }
     } else {
-        push_event(shared, WorkerEvent::Failed(error));
+        error
+    };
+    if let Some(generation) = generation {
+        push_session_event(shared, generation, WorkerEvent::Failed(error));
     }
 }
 
-fn push_event(shared: &Arc<Mutex<WorkerShared>>, event: WorkerEvent) {
+fn push_session_event(
+    shared: &Arc<Mutex<WorkerShared>>,
+    generation: SessionGeneration,
+    event: WorkerEvent,
+) {
     let mut shared = shared.lock().expect("Neovim worker lock");
+    if shared.generation != Some(generation) {
+        return;
+    }
     if shared.events.len() == EVENT_CAPACITY {
-        shared.events.pop_front();
+        shared.events.clear();
         shared.events.push_back(WorkerEvent::Failed(
             "Neovim event queue exceeded bound".into(),
         ));
@@ -718,12 +919,68 @@ mod tests {
                         return;
                     }
                     WorkerEvent::Failed(error) => panic!("Neovim failed during startup: {error}"),
-                    WorkerEvent::Source(_) | WorkerEvent::Warning(_) => {}
+                    WorkerEvent::Document(_) | WorkerEvent::Source(_) | WorkerEvent::Warning(_) => {
+                    }
                 }
             }
             assert!(Instant::now() < deadline, "Neovim startup timed out");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn accepted_documents_are_polled_in_order_without_collapsing_edit_and_undo() {
+        let shared = Arc::new(Mutex::new(WorkerShared::default()));
+        let generation = SessionGeneration(7);
+        shared.lock().unwrap().generation = Some(generation);
+        for (text, changedtick) in [("edited\n", 2), ("saved\n", 3)] {
+            push_session_event(
+                &shared,
+                generation,
+                WorkerEvent::Document(DocumentUpdate {
+                    text: text.into(),
+                    mode: "n".into(),
+                    changedtick,
+                }),
+            );
+        }
+
+        let poll = take_poll_result(&shared);
+        let documents = poll
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                WorkerEvent::Document(document) => Some(document),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(documents.len(), 2);
+        let mut host = crate::editor::EditorDocument::new("saved\n".into()).unwrap();
+        for document in documents {
+            host.install_neovim_snapshot(document.text, &document.mode, document.changedtick)
+                .unwrap();
+        }
+        assert_eq!(host.text(), "saved\n");
+        assert_eq!(host.revision, 2);
+        assert!(!host.dirty());
+    }
+
+    #[test]
+    fn stale_session_events_are_discarded_and_grid_requests_are_clamped() {
+        let shared = Arc::new(Mutex::new(WorkerShared::default()));
+        shared.lock().unwrap().generation = Some(SessionGeneration(2));
+        push_session_event(
+            &shared,
+            SessionGeneration(1),
+            WorkerEvent::Document(DocumentUpdate {
+                text: "stale".into(),
+                mode: "n".into(),
+                changedtick: 2,
+            }),
+        );
+        assert!(take_poll_result(&shared).events.is_empty());
+        assert_eq!(bounded_grid_size(u16::MAX, u16::MAX), (512, 256));
+        assert_eq!(bounded_grid_size(0, 0), (1, 1));
     }
 
     #[test]
@@ -810,7 +1067,8 @@ mod tests {
                     WorkerEvent::Failed(error) => {
                         panic!("overflow recovery must not fail the editor: {error}")
                     }
-                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                    WorkerEvent::Document(_) | WorkerEvent::Started(_) | WorkerEvent::Source(_) => {
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -872,7 +1130,8 @@ mod tests {
                 match event {
                     WorkerEvent::Source(SourceEvent::Barrier(update)) => barrier = Some(update),
                     WorkerEvent::Failed(error) => panic!("paste rejection killed Neovim: {error}"),
-                    WorkerEvent::Started(_)
+                    WorkerEvent::Document(_)
+                    | WorkerEvent::Started(_)
                     | WorkerEvent::Source(SourceEvent::Action(_))
                     | WorkerEvent::Warning(_) => {}
                 }
@@ -1029,6 +1288,7 @@ mod tests {
                         sequence.push("failed".to_string());
                         failed = true;
                     }
+                    WorkerEvent::Document(_) => {}
                     WorkerEvent::Warning(error) => panic!("unexpected warning: {error}"),
                 }
             }
@@ -1048,11 +1308,22 @@ mod tests {
             mode: "n".into(),
             changedtick: 3,
         };
-        push_event(
+        let generation = SessionGeneration(1);
+        shared.lock().unwrap().generation = Some(generation);
+        push_session_event(
             &shared,
-            WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate { id: 9, document })),
+            generation,
+            WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate {
+                generation,
+                id: 9,
+                document,
+            })),
         );
-        push_event(&shared, WorkerEvent::Failed("crashed after barrier".into()));
+        push_session_event(
+            &shared,
+            generation,
+            WorkerEvent::Failed("crashed after barrier".into()),
+        );
 
         let poll = take_poll_result(&shared);
         assert!(matches!(
@@ -1075,7 +1346,8 @@ mod tests {
                     )
                     .unwrap(),
                 WorkerEvent::Failed(_) => {}
-                WorkerEvent::Started(_)
+                WorkerEvent::Document(_)
+                | WorkerEvent::Started(_)
                 | WorkerEvent::Source(SourceEvent::Action(_))
                 | WorkerEvent::Warning(_) => unreachable!(),
             }
@@ -1114,7 +1386,8 @@ mod tests {
                 match event {
                     WorkerEvent::Source(SourceEvent::Barrier(update)) => barrier = Some(update),
                     WorkerEvent::Failed(error) => panic!("source barrier failed: {error}"),
-                    WorkerEvent::Started(_)
+                    WorkerEvent::Document(_)
+                    | WorkerEvent::Started(_)
                     | WorkerEvent::Source(SourceEvent::Action(_))
                     | WorkerEvent::Warning(_) => {}
                 }
@@ -1156,7 +1429,8 @@ mod tests {
                 match event {
                     WorkerEvent::Source(SourceEvent::Action(update)) => action = Some(update),
                     WorkerEvent::Failed(error) => panic!("Tutor action failed: {error}"),
-                    WorkerEvent::Started(_)
+                    WorkerEvent::Document(_)
+                    | WorkerEvent::Started(_)
                     | WorkerEvent::Source(SourceEvent::Barrier(_))
                     | WorkerEvent::Warning(_) => {}
                 }
@@ -1220,7 +1494,8 @@ mod tests {
                     WorkerEvent::Failed(error) => {
                         panic!("native read overflow must recover cleanly: {error}")
                     }
-                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                    WorkerEvent::Document(_) | WorkerEvent::Started(_) | WorkerEvent::Source(_) => {
+                    }
                 }
             }
             assert!(Instant::now() < deadline, "native read recovery timed out");
@@ -1247,7 +1522,8 @@ mod tests {
             let event = poll.events.into_iter().find_map(|event| match event {
                 WorkerEvent::Source(SourceEvent::Barrier(update)) => Some(update),
                 WorkerEvent::Failed(error) => panic!("restarted Neovim failed: {error}"),
-                WorkerEvent::Started(_)
+                WorkerEvent::Document(_)
+                | WorkerEvent::Started(_)
                 | WorkerEvent::Source(SourceEvent::Action(_))
                 | WorkerEvent::Warning(_) => None,
             });
@@ -1294,7 +1570,8 @@ mod tests {
                     WorkerEvent::Failed(error) => {
                         panic!("normal input overflow must recover: {error}")
                     }
-                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                    WorkerEvent::Document(_) | WorkerEvent::Started(_) | WorkerEvent::Source(_) => {
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(10));

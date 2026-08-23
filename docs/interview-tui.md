@@ -25,7 +25,7 @@ Global solve actions are:
 
 - `Space t`: save the current revision atomically and run local tests
 - `Space s`: submit the current revision
-- Ctrl-C: cancel the operation selected by focus; Interview wins when it is focused and both Codex and the local runner are active, otherwise the local runner is cancelled
+- Ctrl-C: cancel the operation selected by focus; Interview wins when it is focused and both the selected interviewer and local runner are active, otherwise the local runner is cancelled
 - `Space h`: request a hint outside Editor Insert/Command mode and outside the active composer
 - `Space r`: clear the Interview session when Interview is focused
 - `Space b`: leave solve from Editor Normal mode or any accessory pane
@@ -52,11 +52,11 @@ The host accepts at most 1 MiB and 100,000 logical lines. If a native Neovim ope
 
 Ctrl-S, F5, `Space t`, `:TutorTest`, and a plain `:write` atomically save if dirty and run the local suite. They never create an attempt row. A clean buffer still runs. If another local run is active, only the newest requested save/test revision is retained; submit is rejected until that run completes. A failed save starts no runner.
 
-F9, `Space s`, and `:TutorSubmit` save, run, then record exactly one attempt after the runner returns an execution result. Pass, fail, timeout, and explicit cancellation outcomes are recorded; preflight/spawn failures that produce no execution result are not. Repeating submit records another attempt. Local runner results remain authoritative even when Codex is enabled.
+F9, `Space s`, and `:TutorSubmit` save, run, then record exactly one attempt after the runner returns an execution result. Pass, fail, timeout, and explicit cancellation outcomes are recorded; preflight/spawn failures that produce no execution result are not. Repeating submit records another attempt. Local runner results remain authoritative with any interviewer backend.
 
 Edits are allowed during any run. Revisions increase monotonically across accepted Neovim source snapshots, while dirty state compares exact bytes against the last saved bytes. Source-consuming Tutor mappings are delivered after preceding Neovim input and bind the run to that accepted snapshot.
 
-Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, Codex errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
+Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, interviewer errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
 
 ## Layout
 
@@ -80,7 +80,7 @@ The interviewer asks one focused question at a time. Automatic submission review
 
 Interviewer and hint responses are accepted only if operation ID, role, captured source revision, and current editor revision still match. A submission-review response instead matches the active review's operation, role, and recorded revision, so editing during review does not relabel it as feedback on current source. The UI labels it `Submission review · recorded revision N`; it cannot change the authoritative local result. The transcript and queued review are bounded and memory-only; `Space r`, leaving solve mode, and process exit clear them. No transcript is written by Interview Tutor.
 
-Protocol/authentication/turn failures show an error without disabling local solve. Press `i` to explicitly reconnect for the next distinct operation. Failed content is not replayed. Pi uses a fresh no-session RPC process per application turn; Codex permits at most one replacement app-server process. Ctrl-C sends the selected transport's bounded abort/interrupt and requires both acknowledgement and terminal settlement. Use `--interviewer none` to disable all probing and spawning. See [interviewer setup, privacy, and troubleshooting](codex-compatibility.md).
+Protocol/authentication/turn failures show an error without disabling local solve. Press `i` to explicitly reconnect for the next distinct operation. Pi is the default and uses a fresh no-session RPC process per application turn. Codex is an explicit compatibility transport and permits at most one replacement app-server process. Rejected or stale Codex turns replace their role-specific remote thread before another turn, while the accepted application transcript is preserved. Failed content is not replayed. Ctrl-C sends the selected transport's bounded abort/interrupt and requires both acknowledgement and terminal settlement. Use `--interviewer none` to disable all probing and spawning. See [interviewer setup, privacy, and troubleshooting](codex-compatibility.md).
 
 ## Signals and verification
 

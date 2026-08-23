@@ -29,6 +29,7 @@ pub enum Effect {
         language_slug: String,
     },
     StartNeovim {
+        generation: crate::neovim::SessionGeneration,
         source: String,
         synthetic_name: String,
         language: String,
@@ -74,7 +75,9 @@ pub enum Effect {
     },
     ResetInterviewer,
     LeaveSolve,
-    StopNeovim,
+    StopNeovim {
+        generation: crate::neovim::SessionGeneration,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

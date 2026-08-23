@@ -23,6 +23,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const NEOVIM_SOURCE_BARRIER_TIMEOUT: Duration = Duration::from_secs(3);
+const RUNNER_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct TerminalGuard;
 impl TerminalGuard {
@@ -312,6 +314,7 @@ struct InterviewerWorker {
     enabled: bool,
     sender: Option<SyncSender<InterviewerWorkerCommand>>,
     events: Option<Receiver<Event>>,
+    done: Option<Receiver<()>>,
     join: Option<JoinHandle<()>>,
     control_pid: Arc<std::sync::atomic::AtomicI32>,
     active_cancellation:
@@ -360,6 +363,7 @@ impl InterviewerWorker {
             enabled,
             sender: None,
             events: None,
+            done: None,
             join: None,
             control_pid: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             active_cancellation: Arc::new(std::sync::Mutex::new(None)),
@@ -382,8 +386,10 @@ impl InterviewerWorker {
         assert!(self.join.is_none());
         assert!(self.sender.is_none());
         assert!(self.events.is_none());
+        assert!(self.done.is_none());
         let (sender, commands) = mpsc::sync_channel(2);
         let (event_sender, events) = mpsc::sync_channel(64);
+        let (done_sender, done) = mpsc::sync_channel(1);
         let thread_control_pid = Arc::clone(&self.control_pid);
         let thread_cancellation = Arc::clone(&self.active_cancellation);
         let thread_pending_response = Arc::clone(&self.pending_response);
@@ -590,9 +596,11 @@ impl InterviewerWorker {
                     InterviewerWorkerCommand::Shutdown => break,
                 }
             }
+            let _ = done_sender.try_send(());
         });
         self.sender = Some(sender);
         self.events = Some(events);
+        self.done = Some(done);
         self.join = Some(join);
     }
     fn poll(&mut self) -> Vec<Event> {
@@ -612,6 +620,7 @@ impl InterviewerWorker {
         }
         if disconnected {
             self.events = None;
+            self.done = None;
             self.sender = None;
             *self
                 .active_cancellation
@@ -806,8 +815,19 @@ impl InterviewerWorker {
             drop(sender);
         }
         self.kill_control_process();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        let settled = self.done.as_ref().is_none_or(|done| {
+            matches!(
+                done.recv_timeout(WORKER_SHUTDOWN_TIMEOUT),
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected)
+            )
+        });
+        self.done = None;
+        if settled {
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        } else {
+            self.join.take();
         }
     }
 }
@@ -834,6 +854,7 @@ fn runtime_execution_limits() -> ExecutionLimits {
 struct RunnerWorker {
     sender: SyncSender<WorkerCommand>,
     events: Receiver<Event>,
+    done: Receiver<()>,
     join: Option<JoinHandle<()>>,
     signal_state: Option<SignalState>,
     active: Option<(
@@ -892,6 +913,7 @@ impl RunnerWorker {
     ) -> Self {
         let (sender, commands) = mpsc::sync_channel(2);
         let (event_sender, events) = mpsc::sync_channel(64);
+        let (done_sender, done) = mpsc::sync_channel(1);
         let join = thread::spawn(move || {
             while let Ok(command) = commands.recv() {
                 match command {
@@ -961,10 +983,12 @@ impl RunnerWorker {
                     }
                 }
             }
+            let _ = done_sender.try_send(());
         });
         Self {
             sender,
             events,
+            done,
             join: Some(join),
             signal_state,
             active: None,
@@ -1006,13 +1030,36 @@ impl RunnerWorker {
             cancellation.cancel(exit_code);
         }
     }
-    fn leave(&mut self) {
-        if let Some((_, _, _, cancellation)) = &self.active {
-            cancellation.cancel(130);
-        }
-        if self.active.is_some() {
-            let _ = self.events.recv();
-            self.active = None;
+    fn leave(&mut self) -> Result<(), String> {
+        self.leave_with_timeout(RUNNER_RELEASE_TIMEOUT)
+    }
+
+    fn leave_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        let Some((operation, revision, intent, cancellation)) = self.active.as_ref() else {
+            return Ok(());
+        };
+        let expected = (*operation, *revision, *intent);
+        cancellation.cancel(130);
+        match self.events.recv_timeout(timeout) {
+            Ok(Event::RunFinished(operation, revision, intent, _, _))
+                if (operation, revision, intent) == expected =>
+            {
+                self.active = None;
+                Ok(())
+            }
+            Ok(_) => {
+                Err("runner worker returned a mismatched completion while leaving Solve".into())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("runner cancellation timed out; draft was not saved".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.active = None;
+                if let Some(join) = self.join.take() {
+                    let _ = join.join();
+                }
+                Ok(())
+            }
         }
     }
     fn poll(&mut self) -> Vec<Event> {
@@ -1044,14 +1091,23 @@ impl RunnerWorker {
         events
     }
     fn shutdown(mut self) {
+        self.shutdown_with_timeout(WORKER_SHUTDOWN_TIMEOUT);
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Duration) {
         if let Some((_, _, _, cancellation)) = &self.active {
             cancellation.cancel(130);
         }
         let _ = self.sender.try_send(WorkerCommand::Shutdown);
-        let join = self.join.take();
-        drop(self.sender);
-        if let Some(join) = join {
-            let _ = join.join();
+        match self.done.recv_timeout(timeout) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(join) = self.join.take() {
+                    let _ = join.join();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.join.take();
+            }
         }
     }
 }
@@ -1164,6 +1220,7 @@ fn apply_effects(
                         .as_ref()
                         .ok_or("problem detail unavailable")?;
                     Ok(Box::new(SolveSession {
+                        generation: crate::neovim::SessionGeneration(operation.0),
                         problem_id: detail.id,
                         problem_slug: detail.slug.clone(),
                         problem_title: detail.title.clone(),
@@ -1193,6 +1250,7 @@ fn apply_effects(
                 effects.extend(reduce(state, Event::SolveOpened(operation, result)));
             }
             Effect::StartNeovim {
+                generation,
                 source,
                 synthetic_name,
                 language,
@@ -1201,7 +1259,8 @@ fn apply_effects(
                     .ok()
                     .and_then(|(width, height)| render::neovim_grid_size(state, width, height))
                     .unwrap_or((1, 1));
-                if let Err(error) = neovim_worker.start_session(
+                if let Err(error) = neovim_worker.start_session_for_generation(
+                    generation,
                     source,
                     synthetic_name,
                     language,
@@ -1312,9 +1371,24 @@ fn apply_effects(
                 let _ = interviewer_worker.send(InterviewerWorkerCommand::Cancel { operation });
             }
             Effect::ResetInterviewer => interviewer_worker.reset(),
-            Effect::LeaveSolve => worker.leave(),
-            Effect::StopNeovim => {
-                if let Err(error) = neovim_worker.stop_session() {
+            Effect::LeaveSolve => match worker.leave() {
+                Ok(()) => {
+                    if let Some(solve) = state.solve.as_mut() {
+                        solve.running = None;
+                        solve.cancellation = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(solve) = state.solve.as_mut() {
+                        solve.pending_draft_save = None;
+                    }
+                    state.status = "Runner cancellation failed · still in Solve".into();
+                    state.error = Some(error);
+                    return;
+                }
+            },
+            Effect::StopNeovim { generation } => {
+                if let Err(error) = neovim_worker.stop_session_for_generation(generation) {
                     state.error = Some(error);
                 }
             }
@@ -1362,7 +1436,9 @@ fn resolve_tutor_action(
     update: crate::neovim::ActionUpdate,
     coalesced_document: &mut Option<crate::neovim::DocumentUpdate>,
 ) -> (crate::neovim::DocumentUpdate, crate::app::Action) {
-    let crate::neovim::ActionUpdate { action, document } = update;
+    let crate::neovim::ActionUpdate {
+        action, document, ..
+    } = update;
     let app_action = match action {
         crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
         crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
@@ -1390,6 +1466,17 @@ fn resolve_tutor_action(
     (document, app_action)
 }
 
+fn accepts_neovim_generation(
+    state: &AppState,
+    generation: crate::neovim::SessionGeneration,
+) -> bool {
+    state.screen == crate::app::Screen::Solve
+        && state
+            .solve
+            .as_ref()
+            .is_some_and(|solve| solve.generation == generation)
+}
+
 fn matching_save_acknowledgement(state: &AppState, event: &Event) -> Option<(u64, String)> {
     let Event::RunFinished(operation, revision, intent, Some(source), _) = event else {
         return None;
@@ -1405,6 +1492,14 @@ fn matching_save_acknowledgement(state: &AppState, event: &Event) -> Option<(u64
         .editor
         .neovim_changedtick()
         .map(|changedtick| (changedtick, source.clone()))
+}
+
+fn routes_mouse_to_neovim(state: &AppState) -> bool {
+    state.screen == crate::app::Screen::Solve
+        && state
+            .solve
+            .as_ref()
+            .is_some_and(|solve| solve.pane == SolvePane::Editor)
 }
 
 fn neovim_mouse_kind(
@@ -1500,6 +1595,7 @@ pub fn run(
         let mut needs_draw = true;
         let mut next_neovim_barrier_id = 1_u64;
         let mut pending_neovim_barriers: std::collections::VecDeque<(
+            crate::neovim::SessionGeneration,
             u64,
             crate::app::Action,
             Option<Instant>,
@@ -1548,13 +1644,13 @@ pub fn run(
                 );
                 needs_draw = true;
             }
-            let mut coalesced_document = neovim_poll.document;
+            let mut coalesced_document = None;
             for worker_event in neovim_poll.events {
                 match worker_event {
                     crate::neovim::WorkerEvent::Started(started) => {
                         if started.is_ok() {
                             let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
-                            for (_, _, pending_deadline) in &mut pending_neovim_barriers {
+                            for (_, _, _, pending_deadline) in &mut pending_neovim_barriers {
                                 if pending_deadline.is_none() {
                                     *pending_deadline = Some(deadline);
                                 }
@@ -1570,6 +1666,13 @@ pub fn run(
                             Event::NeovimStarted(started),
                         );
                     }
+                    crate::neovim::WorkerEvent::Document(document) => apply_event(
+                        &mut state,
+                        &repository,
+                        &root,
+                        &mut workers,
+                        Event::NeovimDocument(document),
+                    ),
                     crate::neovim::WorkerEvent::Warning(error) => apply_event(
                         &mut state,
                         &repository,
@@ -1587,59 +1690,76 @@ pub fn run(
                             Event::NeovimFailed(error),
                         );
                     }
-                    crate::neovim::WorkerEvent::Source(source_event) => match source_event {
-                        crate::neovim::SourceEvent::Barrier(barrier) => {
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::NeovimDocument(barrier.document),
-                            );
-                            let Some((expected_id, action, _deadline)) =
-                                pending_neovim_barriers.pop_front()
-                            else {
-                                return Err("Neovim returned an unexpected source barrier".into());
-                            };
-                            if expected_id != barrier.id {
-                                return Err(format!(
-                                    "Neovim source barrier mismatch: expected {expected_id}, got {}",
-                                    barrier.id
-                                ));
+                    crate::neovim::WorkerEvent::Source(source_event) => {
+                        let generation = match &source_event {
+                            crate::neovim::SourceEvent::Action(update) => update.generation,
+                            crate::neovim::SourceEvent::Barrier(update) => update.generation,
+                        };
+                        if !accepts_neovim_generation(&state, generation) {
+                            continue;
+                        }
+                        match source_event {
+                            crate::neovim::SourceEvent::Barrier(barrier) => {
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimDocument(barrier.document),
+                                );
+                                let Some((expected_generation, expected_id, action, _deadline)) =
+                                    pending_neovim_barriers.pop_front()
+                                else {
+                                    return Err(
+                                        "Neovim returned an unexpected source barrier".into()
+                                    );
+                                };
+                                if expected_generation != barrier.generation {
+                                    return Err("Neovim source barrier generation mismatch".into());
+                                }
+                                if expected_id != barrier.id {
+                                    return Err(format!(
+                                        "Neovim source barrier mismatch: expected {expected_id}, got {}",
+                                        barrier.id
+                                    ));
+                                }
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::Command(action),
+                                );
                             }
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::Command(action),
-                            );
+                            crate::neovim::SourceEvent::Action(action_update) => {
+                                let (document, action) =
+                                    resolve_tutor_action(action_update, &mut coalesced_document);
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimDocument(document),
+                                );
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::Command(action),
+                                );
+                            }
                         }
-                        crate::neovim::SourceEvent::Action(action_update) => {
-                            let (document, action) =
-                                resolve_tutor_action(action_update, &mut coalesced_document);
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::NeovimDocument(document),
-                            );
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::Command(action),
-                            );
-                        }
-                    },
+                    }
                 }
                 needs_draw = true;
             }
+            let current_neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
+            pending_neovim_barriers
+                .retain(|(generation, _, _, _)| current_neovim_generation == Some(*generation));
             if pending_neovim_barriers
                 .front()
-                .and_then(|(_, _, deadline)| *deadline)
+                .and_then(|(_, _, _, deadline)| *deadline)
                 .is_some_and(|deadline| Instant::now() >= deadline)
             {
                 return Err("Neovim source barrier timed out".into());
@@ -1701,11 +1821,16 @@ pub fn run(
                             next_neovim_barrier_id = next_neovim_barrier_id
                                 .checked_add(1)
                                 .ok_or("Neovim source barrier id overflow")?;
+                            let generation = state
+                                .solve
+                                .as_ref()
+                                .expect("Solve action has a Neovim generation")
+                                .generation;
                             workers
                                 .neovim
                                 .as_ref()
                                 .expect("runtime Neovim worker exists")
-                                .barrier(id)?;
+                                .barrier_for_generation(generation, id)?;
                             let deadline = state
                                 .solve
                                 .as_ref()
@@ -1714,7 +1839,7 @@ pub fn run(
                                         == crate::app::model::EditorRuntimeStatus::Ready
                                 })
                                 .then(|| Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT);
-                            pending_neovim_barriers.push_back((id, action, deadline));
+                            pending_neovim_barriers.push_back((generation, id, action, deadline));
                         } else {
                             apply_event(
                                 &mut state,
@@ -1771,7 +1896,9 @@ pub fn run(
                     let size = terminal
                         .size()
                         .map_err(|error| format!("cannot read terminal size: {error}"))?;
-                    if let Some(area) = render::neovim_grid_area(&state, size.width, size.height)
+                    if routes_mouse_to_neovim(&state)
+                        && let Some(area) =
+                            render::neovim_grid_area(&state, size.width, size.height)
                         && mouse.column >= area.x
                         && mouse.column < area.right()
                         && mouse.row >= area.y
@@ -1894,6 +2021,7 @@ mod tests {
         });
         let (document, action) = resolve_tutor_action(
             ActionUpdate {
+                generation: crate::neovim::SessionGeneration(1),
                 action: TutorAction::Back,
                 document: DocumentUpdate {
                     text: "bytes at back notification".into(),
@@ -1934,6 +2062,7 @@ mod tests {
             });
             let (document, action) = resolve_tutor_action(
                 ActionUpdate {
+                    generation: crate::neovim::SessionGeneration(1),
                     action: tutor_action,
                     document: DocumentUpdate {
                         text: "exact bytes at key moment".into(),
@@ -1969,6 +2098,7 @@ mod tests {
             let mut coalesced = None;
             let (_, action) = resolve_tutor_action(
                 ActionUpdate {
+                    generation: crate::neovim::SessionGeneration(1),
                     action: tutor_action,
                     document: DocumentUpdate {
                         text: "source".into(),
@@ -1980,6 +2110,41 @@ mod tests {
             );
             assert_eq!(action, expected);
         }
+    }
+
+    #[test]
+    fn old_neovim_source_actions_are_ignored_after_leaving_or_reopening_solve() {
+        use crate::app::Screen;
+        use crate::neovim::SessionGeneration;
+
+        let mut state = interviewer_solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        let old_generation = state.solve.as_ref().unwrap().generation;
+        assert!(accepts_neovim_generation(&state, old_generation));
+
+        reduce(&mut state, Event::Command(crate::app::Action::Back));
+        assert_eq!(state.screen, Screen::ProblemList);
+        assert!(!accepts_neovim_generation(&state, old_generation));
+        if accepts_neovim_generation(&state, old_generation) {
+            reduce(&mut state, Event::Command(crate::app::Action::Back));
+            reduce(&mut state, Event::Command(crate::app::Action::Quit));
+        }
+        assert_eq!(state.screen, Screen::ProblemList);
+        assert!(!state.quit);
+
+        let mut reopened = interviewer_solve_state();
+        reopened.solve.as_mut().unwrap().generation = SessionGeneration(old_generation.0 + 1);
+        assert!(!accepts_neovim_generation(&reopened, old_generation));
+        assert!(!reopened.quit);
+    }
+
+    #[test]
+    fn editor_mouse_is_ignored_while_an_accessory_has_focus() {
+        let mut state = interviewer_solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        assert!(!routes_mouse_to_neovim(&state));
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        assert!(routes_mouse_to_neovim(&state));
     }
 
     #[test]
@@ -2320,6 +2485,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0);
         state.screen = Screen::Solve;
         state.solve = Some(SolveSession {
+            generation: crate::neovim::SessionGeneration(1),
             problem_id: 1,
             problem_slug: "p".into(),
             problem_title: "P".into(),
@@ -2512,6 +2678,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0);
         state.screen = Screen::Solve;
         state.solve = Some(SolveSession {
+            generation: crate::neovim::SessionGeneration(1),
             problem_id: 1,
             problem_slug: "p".into(),
             problem_title: "P".into(),
@@ -2856,6 +3023,59 @@ mod tests {
             .unwrap();
         assert!(cancellation.is_cancelled());
         worker.shutdown();
+    }
+
+    #[test]
+    fn runner_leave_and_shutdown_deadlines_do_not_hang_on_uncooperative_services() {
+        let release = Arc::new(AtomicBool::new(false));
+        let observed_release = Arc::clone(&release);
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let services = RunnerServices {
+            save: Arc::new(|_, _, _| Ok(())),
+            execute: Arc::new(move |_, cancellation| {
+                started_sender.send(()).unwrap();
+                while !observed_release.load(Ordering::Acquire) {
+                    if cancellation.is_cancelled() {
+                        thread::yield_now();
+                    }
+                }
+                Ok(ExecutionResult::test_result(
+                    Termination::Cancelled,
+                    "cancelled",
+                ))
+            }),
+            record: Arc::new(|_, _| panic!("record must not run")),
+            finalize_cancelled: Arc::new(|_, _| panic!("finalize must not run")),
+        };
+        let mut worker = RunnerWorker::start_with_services(services);
+        worker
+            .run(
+                OperationId(71),
+                1,
+                RunIntent::Test,
+                plan(),
+                "source".into(),
+                false,
+            )
+            .unwrap();
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let started = Instant::now();
+        assert!(
+            worker
+                .leave_with_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(worker.active.is_some());
+
+        let started = Instant::now();
+        worker.shutdown_with_timeout(Duration::from_millis(20));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(worker.join.is_none());
+        release.store(true, Ordering::Release);
     }
 
     #[test]

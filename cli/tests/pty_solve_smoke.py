@@ -337,7 +337,7 @@ def main() -> int:
             assert payloads[1]["source"] == recorded_source
             assert payloads[1]["source"] != "X" + recorded_source
             assert payloads[1]["userQuestion"] == ""
-            assert turns[0]["params"]["threadId"] == turns[1]["params"]["threadId"]
+            assert turns[0]["params"]["threadId"] != turns[1]["params"]["threadId"]
 
             os.write(master, b"\t\t\t r")
             wait_for(master, process, output, screen, "offline · memory", deadline)

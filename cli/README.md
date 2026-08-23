@@ -36,7 +36,7 @@ cargo test --manifest-path cli/Cargo.toml --locked -- --test-threads=1
 
 ## Solve behavior
 
-From problem detail, Enter loads the catalog-planned source over bounded MessagePack-RPC into a host-owned scratch buffer rendered by required clean embedded Neovim. Ctrl-S/F5/`Space t` atomically save and test without an attempt. F9/`Space s`/`:TutorSubmit` save, test, and record one attempt after the runner terminates. A failed save starts no child. Explicit submit can request Codex review only after recording succeeds, and review uses that operation's exact captured source revision. See [the TUI guide](../docs/interview-tui.md).
+From problem detail, Enter loads the catalog-planned source over bounded MessagePack-RPC into a host-owned scratch buffer rendered by required clean embedded Neovim. Ctrl-S/F5/`Space t` atomically save and test without an attempt. F9/`Space s`/`:TutorSubmit` save, test, and record one attempt after the runner terminates. A failed save starts no child. Explicit submit can request review from the selected interviewer only after recording succeeds, and review uses that operation's exact captured source revision. See [the TUI guide](../docs/interview-tui.md).
 
 The host accepts at most 1 MiB and 100,000 logical lines. An oversized native operation is rejected by restarting Neovim from the last valid exact source without changing the application revision. Linux `openat2` resolution confines loads and same-directory atomic saves to the planned regular source beneath the canonical project root; Neovim never receives that path.
 

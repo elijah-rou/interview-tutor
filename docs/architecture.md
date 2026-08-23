@@ -9,8 +9,8 @@ Interview Tutor separates a small control plane from bounded local data and proc
 3. **Execution planning:** `database::resolve_problem` and `runner::plan_execution` turn stable language/problem/set selectors into an explicit project root, runner, source path, and invoked-set context. Neither the TUI nor the root launchers infer an adapter from display text.
 4. **Source/editor:** `source` performs Linux-anchored load/save of exactly the planned regular file. `editor` owns bounded Unicode-grapheme text, modes, revision/dirty state, and highlighting.
 5. **Local runner:** `runner` executes the selected language adapter without a shell, sanitizes/bounds output, controls the process group, and returns one authoritative result. Recording is a separate explicit database operation.
-6. **Application/TUI:** `app` is the state/reducer/effect boundary. `tui` owns terminal entry/restoration, input/rendering, the repository connection on the main thread, and bounded runner/Codex workers.
-7. **Codex boundary:** `codex` validates one trusted configured executable and exact app-server version, constructs the disclosed payload, enforces protocol/resource bounds, and retains only a memory transcript. It cannot alter runner results or progress directly.
+6. **Application/TUI:** `app` is the state/reducer/effect boundary. `tui` owns terminal entry/restoration, input/rendering, the repository connection on the main thread, and bounded Neovim, runner, and interviewer workers.
+7. **Interviewer boundary:** `interviewer` owns backend-neutral prompts, response validation, and the memory-only transcript. Pi is the default transport; `pi` runs a fresh no-session RPC process per turn, while `codex` is an explicit exact-version app-server compatibility transport. Neither can alter runner results or progress directly.
 
 ## Catalog and database model
 
@@ -29,9 +29,9 @@ Database open validates the catalog before use, enables a 5-second SQLite busy t
 
 ## Control plane and data plane
 
-Control messages are small, typed values: selectors, `ExecutionPlan`, operation ID, source revision, run intent, cancellation token, and reducer effects/events. They determine which immutable snapshot an operation owns. Stale operation IDs are ignored. Interviewer and hint responses for stale source revisions cannot describe the current buffer or enter a Codex transcript; submission review is explicitly labeled and retained as feedback on its matching recorded revision.
+Control messages are small, typed values: selectors, `ExecutionPlan`, operation ID, Solve-session generation, source revision, run intent, cancellation token, and reducer effects/events. They determine which immutable snapshot an operation owns. Stale operation IDs and Neovim generations are ignored. Interviewer and hint responses for stale source revisions cannot describe the current buffer or enter the application transcript; submission review is explicitly labeled and retained as feedback on its matching recorded revision.
 
-Data values are explicitly bounded at ingress: statement/source text, source snapshots, stdout/stderr chunks, rendered output, composer text, protocol lines, assistant responses, transcript entries, and temporary submitted-source copies. The TUI never parses CLI tables. The local runner never writes progress. Codex never executes the language adapter and cannot mark a problem complete.
+Data values are explicitly bounded at ingress: statement/source text, ordered source snapshots, stdout/stderr chunks, rendered output, composer text, protocol lines, assistant responses, transcript entries, and temporary submitted-source copies. The TUI never parses CLI tables. The local runner never writes progress. The selected interviewer never executes the language adapter and cannot mark a problem complete.
 
 ## Threads and channels
 
@@ -39,9 +39,9 @@ The main thread owns `AppState`, the primary SQLite connection, Crossterm/Ratatu
 
 - One runner worker has a command channel of 2 and event channel of 64. It serializes source save, synchronous execute, and optional attempt record/finalization. App state retains at most the newest queued save/test; submit is rejected while a run is active.
 - During execution, the local runner creates at most two pipe reader threads. Their bounded channel uses the configured event capacity (64 by default). The coordinator continuously drains into sanitized bounded retention. Optional caller progress uses nonblocking `try_send`; full/disconnected consumers increment a drop count and cannot delay cleanup. All reader threads are joined.
-- One Codex worker has a command channel of 2 and event channel of 64. It owns one app-server process/session and serializes connect/turn/reset. The process reader channel holds 64 protocol messages, and pending request IDs are capped at 16. Interviewer/reviewer and hinter use two separate ephemeral app-server conversation threads; these are protocol resources, not additional application authority. Application state can retain one newest recorded-submission review while Codex is busy or reconnecting; replacement and reset are deterministic.
+- One interviewer worker has a command channel of 2 and event channel of 64 and serializes connect/turn/reset for the selected transport. Pi uses a fresh process for each application turn. Codex compatibility owns one app-server process with bounded protocol queues and separate ephemeral interviewer/reviewer and hinter threads. Application state can retain one newest recorded-submission review while the interviewer is busy or reconnecting; replacement and reset are deterministic.
 
-Worker events carry operation/revision/role identity. A Codex response is held pending until the reducer explicitly accepts the matching turn. Interviewer and hint turns also require the current editor revision; submission review instead remains bound to its recorded revision and is labeled accordingly. Cancellation, reset, or stale operation/role identity discards a response before transcript commit. Both workers are cancelled and joined before terminal restoration.
+Worker events carry operation/revision/role identity. A selected-backend response is held pending until the reducer explicitly accepts the matching turn. Interviewer and hint turns also require the current editor revision; submission review instead remains bound to its recorded revision and is labeled accordingly. Cancellation, reset, or stale operation/role identity rejects the backend turn and discards it before transcript commit. Workers receive cancellation and have explicit shutdown deadlines before terminal restoration.
 
 ## Resource bounds
 
@@ -71,11 +71,11 @@ A save opens the anchored parent descriptor, verifies the existing target, creat
 
 CLI execution registers scoped SIGINT/SIGTERM handlers against its cancellation token. After all runner threads join and an attempt is recorded, the remaining main thread blocks both signals, checks cancellation plus pending signals, restores handlers, consumes pending signals, and restores the mask. A signal observed at this cutoff rewrites that attempt to Cancelled with exit 130/143. A later signal cannot rewrite a published run.
 
-The TUI shares signal state with the runner worker. Immediately after a submit record and before `RunFinished`, the worker performs the same completion cutoff. Runtime SIGINT/SIGTERM cancels active work, resets Codex, joins workers, restores alternate screen/raw mode/cursor and prior signal dispositions/mask, then exits 130/143. Panic and startup-error paths use the same terminal guard.
+The TUI shares signal state with the runner worker. Immediately after a submit record and before `RunFinished`, the worker performs the same completion cutoff. Runtime SIGINT/SIGTERM cancels active work, resets the selected interviewer, settles workers within explicit deadlines, restores alternate screen/raw mode/cursor and prior signal dispositions/mask, then exits 130/143. Panic and startup-error paths use the same terminal guard.
 
-## Codex privacy boundary
+## Interviewer privacy boundary
 
-Only after disclosure consent does the Codex worker start the configured process. Its application payload has five fields: statement, source, bounded latest output, bounded in-memory transcript, and question. Hint turns omit transcript. Submission review uses the exact captured submitted revision after recording and wipes that temporary copy when dropped.
+Only after disclosure consent does the interviewer worker start the selected Pi or Codex compatibility transport. Pi is selected by default. The backend-neutral application payload has five fields: statement, source, bounded latest output, bounded in-memory transcript, and question. Hint turns omit transcript. Submission review uses the exact captured submitted revision after recording and wipes that temporary copy when dropped.
 
 Each process gets an empty mode-0700 temporary cwd and a cleared environment containing only `HOME`, `CODEX_HOME`, `PATH`, locale, proxy, and certificate variables. Threads request and verify ephemeral/null-path storage, exact cwd, read-only sandbox, no sandbox network, disabled web search, and never-approve. The wrapper rejects command/file/permission/user-input/MCP requests and reads no API key or token.
 

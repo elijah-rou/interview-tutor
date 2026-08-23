@@ -1,7 +1,7 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
 use super::model::{
-    AppState, DiscardAction, EditorRuntimeStatus, Focus, InterviewerStatus, MAX_COMPOSER_BYTES,
-    MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
+    AppState, DiscardAction, DiscardConfirmation, EditorRuntimeStatus, Focus, InterviewerStatus,
+    MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
 };
 use crate::editor::{EditorCommand, Mode};
 use crate::interviewer::Mode as InterviewerMode;
@@ -148,6 +148,7 @@ fn finalize_interviewer_turn_and_dispatch_review(
 }
 
 fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
+    let neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
     state.solve = None;
     state.interviewer.clear_session();
     state.screen = Screen::ProblemList;
@@ -156,7 +157,9 @@ fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
     state.progress_scroll = 0;
     let mut effects = load_effect(state);
     effects.push(Effect::ResetInterviewer);
-    effects.push(Effect::StopNeovim);
+    if let Some(generation) = neovim_generation {
+        effects.push(Effect::StopNeovim { generation });
+    }
     if drain_runner {
         effects.push(Effect::LeaveSolve);
     }
@@ -171,8 +174,12 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     solve.editor.error = None;
 
     if action == Action::Quit && solve.editor.dirty() {
-        if solve.discard_confirmation != Some(DiscardAction::Quit) {
-            solve.discard_confirmation = Some(DiscardAction::Quit);
+        let confirmation = DiscardConfirmation {
+            action: DiscardAction::Quit,
+            revision: solve.editor.revision,
+        };
+        if solve.discard_confirmation != Some(confirmation) {
+            solve.discard_confirmation = Some(confirmation);
             state.status = "Unsaved changes · Ctrl-Q again to quit".into();
             state.error = Some("unsaved changes; repeat quit to discard".into());
             return Vec::new();
@@ -388,8 +395,6 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             let revision = solve.editor.revision;
             let source = solve.editor.text().to_string();
             solve.pending_draft_save = Some((operation, revision, source.clone()));
-            solve.running = None;
-            solve.cancellation = None;
             solve.pending_save = None;
             solve.quit_after_save = None;
             solve.refresh_after_submit = false;
@@ -521,6 +526,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 state.error = None;
             }
             if solve.editor.revision != revision_before {
+                solve.discard_confirmation = None;
                 solve.stale = solve
                     .latest_run_revision
                     .is_some_and(|revision| revision != solve.editor.revision);
@@ -555,7 +561,12 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Quit
-            if !solve.editor.dirty() || solve.discard_confirmation == Some(DiscardAction::Quit) =>
+            if !solve.editor.dirty()
+                || solve.discard_confirmation
+                    == Some(DiscardConfirmation {
+                        action: DiscardAction::Quit,
+                        revision: solve.editor.revision,
+                    }) =>
         {
             state.interviewer.clear_session();
             state.quit = true;
@@ -646,6 +657,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     solve.editor_status = EditorRuntimeStatus::Failed;
                     state.error = Some(error);
                 } else if solve.editor.revision != revision_before {
+                    solve.discard_confirmation = None;
                     solve.stale = solve
                         .latest_run_revision
                         .is_some_and(|revision| revision != solve.editor.revision);
@@ -1144,6 +1156,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             match result {
                 Ok(solve) => {
                     let effect = Effect::StartNeovim {
+                        generation: solve.generation,
                         source: solve.editor.text().to_string(),
                         synthetic_name: format!(
                             "interview://{}.{}",
@@ -1325,6 +1338,7 @@ mod tests {
         let mut state = state();
         state.screen = Screen::Solve;
         state.solve = Some(SolveSession {
+            generation: crate::neovim::SessionGeneration(1),
             problem_id: 1,
             problem_slug: "p".into(),
             problem_title: "P".into(),
@@ -1505,10 +1519,41 @@ mod tests {
         assert!(!state.quit);
         assert_eq!(
             state.solve.as_ref().unwrap().discard_confirmation,
-            Some(DiscardAction::Quit)
+            Some(DiscardConfirmation {
+                action: DiscardAction::Quit,
+                revision: 1,
+            })
         );
         reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
+    }
+
+    #[test]
+    fn dirty_quit_confirmation_is_invalidated_by_a_new_source_snapshot() {
+        let mut state = solve_state();
+        reduce(
+            &mut state,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "first dirty source".into(),
+                mode: "n".into(),
+                changedtick: 2,
+            }),
+        );
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(!state.quit);
+
+        reduce(
+            &mut state,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "second dirty source".into(),
+                mode: "n".into(),
+                changedtick: 3,
+            }),
+        );
+        reduce(&mut state, Event::Command(Action::Quit));
+
+        assert!(!state.quit);
+        assert!(state.solve.as_ref().unwrap().editor.dirty());
     }
 
     #[test]
@@ -1540,7 +1585,7 @@ mod tests {
         };
         assert_eq!(*revision, 1);
         assert_eq!(source, "newest draft\n");
-        assert!(state.solve.as_ref().unwrap().running.is_none());
+        assert!(state.solve.as_ref().unwrap().running.is_some());
         assert!(state.solve.as_ref().unwrap().pending_save.is_none());
         assert_eq!(state.screen, Screen::Solve);
 
@@ -1566,7 +1611,7 @@ mod tests {
         assert!(
             completion
                 .iter()
-                .any(|effect| matches!(effect, Effect::StopNeovim))
+                .any(|effect| matches!(effect, Effect::StopNeovim { .. }))
         );
     }
 
@@ -1993,7 +2038,10 @@ mod tests {
         assert!(!state.quit);
         assert_eq!(
             state.solve.as_ref().unwrap().discard_confirmation,
-            Some(DiscardAction::Quit)
+            Some(DiscardConfirmation {
+                action: DiscardAction::Quit,
+                revision: 1,
+            })
         );
         state
             .interviewer

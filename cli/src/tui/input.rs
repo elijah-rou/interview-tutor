@@ -218,6 +218,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0);
         state.screen = Screen::Solve;
         state.solve = Some(SolveSession {
+            generation: crate::neovim::SessionGeneration(1),
             problem_id: 1,
             problem_slug: "p".into(),
             problem_title: "P".into(),

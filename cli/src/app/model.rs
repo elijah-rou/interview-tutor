@@ -159,6 +159,12 @@ pub enum DiscardAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiscardConfirmation {
+    pub action: DiscardAction,
+    pub revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccessoryPaneState {
     pub problem_expanded: bool,
     pub output_expanded: bool,
@@ -264,6 +270,7 @@ pub enum EditorRuntimeStatus {
 
 #[derive(Clone, Debug)]
 pub struct SolveSession {
+    pub generation: crate::neovim::SessionGeneration,
     pub problem_id: i64,
     pub problem_slug: String,
     pub problem_title: String,
@@ -285,7 +292,7 @@ pub struct SolveSession {
     pub stale: bool,
     pub latest_run_revision: Option<u64>,
     pub quit_after_save: Option<(Option<OperationId>, u64)>,
-    pub discard_confirmation: Option<DiscardAction>,
+    pub discard_confirmation: Option<DiscardConfirmation>,
     pub refresh_after_submit: bool,
     pub submitted_source: Option<SubmittedSource>,
 }
@@ -488,6 +495,7 @@ mod tests {
     #[test]
     fn run_output_bound_includes_utf8_truncation_marker() {
         let mut solve = SolveSession {
+            generation: crate::neovim::SessionGeneration(1),
             problem_id: 1,
             problem_slug: "p".into(),
             problem_title: "P".into(),
