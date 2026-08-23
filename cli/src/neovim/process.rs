@@ -1,14 +1,17 @@
 use super::grid::{GridSnapshot, GridState};
 use super::msgpack::{self, Value, array, map};
 use std::collections::VecDeque;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,22 +19,86 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const PROCESS_TERM_GRACE: Duration = Duration::from_millis(100);
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_ORIGIN_EVENTS: usize = 32;
 const MIN_API_LEVEL: u64 = 11;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ExecutableIdentity {
-    device: u64,
-    inode: u64,
-    uid: u32,
-    mode: u32,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
+struct ValidatedExecutable {
+    file: File,
+    display_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct Cancellation {
+    local: Arc<AtomicBool>,
+    external: Arc<AtomicBool>,
+}
+
+impl Cancellation {
+    fn new(external: Arc<AtomicBool>) -> Self {
+        Self {
+            local: Arc::new(AtomicBool::new(false)),
+            external,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.local.load(Ordering::Acquire) || self.external.load(Ordering::Acquire)
+    }
+
+    fn cancel(&self) {
+        self.local.store(true, Ordering::Release);
+    }
+}
+
+struct BoundedThread {
+    name: &'static str,
+    join: Option<JoinHandle<()>>,
+    done: Receiver<()>,
+}
+
+impl BoundedThread {
+    fn spawn(
+        name: &'static str,
+        operation: impl FnOnce() + Send + 'static,
+    ) -> Result<Self, String> {
+        let (done_sender, done) = mpsc::sync_channel(1);
+        let join = thread::Builder::new()
+            .name(format!("neovim-{name}"))
+            .spawn(move || {
+                operation();
+                let _ = done_sender.try_send(());
+            })
+            .map_err(|error| format!("cannot start Neovim {name} reader: {error}"))?;
+        Ok(Self {
+            name,
+            join: Some(join),
+            done,
+        })
+    }
+
+    fn join_before(&mut self, deadline: Instant) -> Result<(), String> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.done.recv_timeout(remaining) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                if self.join.take().is_some_and(|join| join.join().is_err()) {
+                    Err(format!("Neovim {} reader panicked", self.name))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.join.take();
+                Err(format!(
+                    "Neovim {} reader did not stop before deadline",
+                    self.name
+                ))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,16 +136,19 @@ pub struct RpcProcess {
     input: Option<ChildStdin>,
     responses: Receiver<RpcResponse>,
     shared: Arc<Mutex<ReaderShared>>,
-    stdout_reader: Option<JoinHandle<()>>,
-    stderr_reader: Option<JoinHandle<()>>,
+    stdout_reader: Option<BoundedThread>,
+    stderr_reader: Option<BoundedThread>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
     temp_dir: Option<PathBuf>,
+    process_group: i32,
+    cancellation: Cancellation,
     next_id: u64,
     pub channel_id: u64,
     buffer: Value,
 }
 
 impl RpcProcess {
+    #[cfg(test)]
     pub fn start(
         executable: &Path,
         source: &str,
@@ -87,56 +157,145 @@ impl RpcProcess {
         width: u16,
         height: u16,
     ) -> Result<Self, String> {
-        let executable = fs::canonicalize(executable)
-            .map_err(|error| format!("cannot resolve Neovim executable: {error}"))?;
-        let identity = trusted_identity(&executable)?;
-        validate_version(&executable)?;
-        if trusted_identity(&executable)? != identity {
-            return Err("Neovim executable changed after version probe".into());
+        Self::start_with_cancellation(
+            executable,
+            source,
+            synthetic_name,
+            language,
+            width,
+            height,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub(super) fn start_with_cancellation(
+        executable: &Path,
+        source: &str,
+        synthetic_name: &str,
+        language: &str,
+        width: u16,
+        height: u16,
+        external_cancellation: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        if external_cancellation.load(Ordering::Acquire) {
+            return Err("Neovim startup was cancelled".into());
         }
+        let canonical = fs::canonicalize(executable)
+            .map_err(|error| format!("cannot resolve Neovim executable: {error}"))?;
+        let executable = ValidatedExecutable::open(&canonical)?;
+        validate_version(&executable, &external_cancellation)?;
         let temp_dir = create_temp_dir()?;
-        let mut command = Command::new(&executable);
+        let mut command = executable.command();
         command
             .arg("--clean")
+            .arg("--cmd")
+            .arg("let g:loaded_clipboard_provider = 0")
             .arg("--embed")
             .current_dir(&temp_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_process_group_and_limits(&mut command, None);
-        if trusted_identity(&executable)? != identity {
-            let _ = fs::remove_dir(&temp_dir);
-            return Err("Neovim executable changed before spawn".into());
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start Neovim: {error}"))?;
-        #[cfg(debug_assertions)]
-        if let Some(path) = std::env::var_os("INTERVIEW_TUTOR_TEST_NEOVIM_PID_FILE")
-            && let Err(error) = fs::write(&path, format!("{}\n", child.id()))
-        {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
+        configure_process_group_and_limits(&mut command, None, Some(executable.raw_fd()));
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let cleanup = remove_temp_tree(&temp_dir);
+                return Err(with_cleanup_error(
+                    format!("cannot start Neovim: {error}"),
+                    cleanup,
+                ));
             }
-            let _ = child.wait();
-            return Err(format!("cannot write Neovim test PID file: {error}"));
-        }
-        let input = child.stdin.take().ok_or("Neovim stdin pipe unavailable")?;
-        let output = child
-            .stdout
-            .take()
-            .ok_or("Neovim stdout pipe unavailable")?;
-        let error = child
-            .stderr
-            .take()
-            .ok_or("Neovim stderr pipe unavailable")?;
+        };
+        let process_group = i32::try_from(child.id()).expect("Linux process IDs fit i32");
+        let setup = (|| {
+            #[cfg(debug_assertions)]
+            if let Some(path) = std::env::var_os("INTERVIEW_TUTOR_TEST_NEOVIM_PID_FILE") {
+                fs::write(&path, format!("{}\n", child.id()))
+                    .map_err(|error| format!("cannot write Neovim test PID file: {error}"))?;
+            }
+            let input = child.stdin.take().ok_or("Neovim stdin pipe unavailable")?;
+            let output = child
+                .stdout
+                .take()
+                .ok_or("Neovim stdout pipe unavailable")?;
+            let error = child
+                .stderr
+                .take()
+                .ok_or("Neovim stderr pipe unavailable")?;
+            set_nonblocking(input.as_raw_fd())?;
+            set_nonblocking(output.as_raw_fd())?;
+            set_nonblocking(error.as_raw_fd())?;
+            Ok::<_, String>((input, output, error))
+        })();
+        let (input, output, error) = match setup {
+            Ok(pipes) => pipes,
+            Err(error) => {
+                let process_cleanup = terminate_process_group(
+                    &mut child,
+                    process_group,
+                    Instant::now() + SHUTDOWN_TIMEOUT,
+                );
+                let cleanup = process_cleanup.and_then(|_| remove_temp_tree(&temp_dir));
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
+
+        let cancellation = Cancellation::new(external_cancellation);
         let (response_sender, responses) = mpsc::sync_channel(2);
         let shared = Arc::new(Mutex::new(ReaderShared::default()));
         let reader_shared = Arc::clone(&shared);
-        let stdout_reader = thread::spawn(move || read_rpc(output, response_sender, reader_shared));
+        let stdout_cancellation = cancellation.clone();
+        let mut stdout_reader = match BoundedThread::spawn("stdout", move || {
+            read_rpc(
+                InterruptibleReader::new(output, stdout_cancellation.clone()),
+                response_sender,
+                reader_shared,
+                stdout_cancellation,
+            )
+        }) {
+            Ok(reader) => reader,
+            Err(error) => {
+                cancellation.cancel();
+                let process_cleanup = terminate_process_group(
+                    &mut child,
+                    process_group,
+                    Instant::now() + SHUTDOWN_TIMEOUT,
+                );
+                let cleanup = process_cleanup.and_then(|_| remove_temp_tree(&temp_dir));
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
         let stderr = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_STDERR_BYTES)));
         let stderr_reader_buffer = Arc::clone(&stderr);
-        let stderr_reader = thread::spawn(move || drain_stderr(error, stderr_reader_buffer));
+        let stderr_cancellation = cancellation.clone();
+        let stderr_reader = match BoundedThread::spawn("stderr", move || {
+            drain_stderr(
+                InterruptibleReader::new(error, stderr_cancellation),
+                stderr_reader_buffer,
+            )
+        }) {
+            Ok(reader) => reader,
+            Err(error) => {
+                cancellation.cancel();
+                let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+                let mut cleanup_errors = Vec::new();
+                if let Err(cleanup) = terminate_process_group(&mut child, process_group, deadline) {
+                    cleanup_errors.push(cleanup);
+                }
+                if let Err(cleanup) = stdout_reader.join_before(deadline) {
+                    cleanup_errors.push(cleanup);
+                }
+                if let Err(cleanup) = remove_temp_tree(&temp_dir) {
+                    cleanup_errors.push(cleanup);
+                }
+                let cleanup = if cleanup_errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(cleanup_errors.join("; "))
+                };
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
         let mut process = Self {
             child: Some(child),
             input: Some(input),
@@ -146,16 +305,15 @@ impl RpcProcess {
             stderr_reader: Some(stderr_reader),
             stderr,
             temp_dir: Some(temp_dir),
+            process_group,
+            cancellation,
             next_id: 1,
             channel_id: 0,
             buffer: Value::Nil,
         };
         if let Err(error) = process.initialize(source, synthetic_name, language, width, height) {
             let cleanup = process.shutdown();
-            return Err(match cleanup {
-                Ok(()) => error,
-                Err(cleanup) => format!("{error}; Neovim cleanup failed: {cleanup}"),
-            });
+            return Err(with_cleanup_error(error, cleanup));
         }
         Ok(process)
     }
@@ -479,32 +637,45 @@ return true
             Value::Array(parameters),
         ]);
         let bytes = msgpack::encode(&request)?;
+        let deadline = Instant::now() + timeout;
         let input = self.input.as_mut().ok_or("Neovim RPC input is closed")?;
-        input
-            .write_all(&bytes)
-            .map_err(|error| format!("cannot write Neovim RPC request: {error}"))?;
-        input
-            .flush()
-            .map_err(|error| format!("cannot flush Neovim RPC request: {error}"))?;
-        match self.responses.recv_timeout(timeout) {
-            Ok(response) if response.id == id => {
-                if response.error == Value::Nil {
-                    Ok(response.result)
-                } else {
-                    Err(format!(
-                        "Neovim {method} failed: {}",
-                        bounded_value(&response.error)
-                    ))
+        write_request(input, &bytes, deadline, &self.cancellation, method)?;
+        flush_request(input, deadline, &self.cancellation, method)?;
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(format!("Neovim {method} was cancelled"));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("Neovim {method} timed out"));
+            }
+            match self
+                .responses
+                .recv_timeout(remaining.min(CANCEL_POLL_INTERVAL))
+            {
+                Ok(response) if response.id == id => {
+                    return if response.error == Value::Nil {
+                        Ok(response.result)
+                    } else {
+                        Err(format!(
+                            "Neovim {method} failed: {}",
+                            bounded_value(&response.error)
+                        ))
+                    };
+                }
+                Ok(response) => {
+                    return Err(format!(
+                        "Neovim RPC response id mismatch: expected {id}, got {}",
+                        response.id
+                    ));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self
+                        .reader_error()
+                        .unwrap_or_else(|| format!("Neovim disconnected during {method}")));
                 }
             }
-            Ok(response) => Err(format!(
-                "Neovim RPC response id mismatch: expected {id}, got {}",
-                response.id
-            )),
-            Err(RecvTimeoutError::Timeout) => Err(format!("Neovim {method} timed out")),
-            Err(RecvTimeoutError::Disconnected) => Err(self
-                .reader_error()
-                .unwrap_or_else(|| format!("Neovim disconnected during {method}"))),
         }
     }
 
@@ -517,80 +688,304 @@ return true
     }
 
     pub fn shutdown(&mut self) -> Result<(), String> {
-        if self.child.is_none() {
-            return Ok(());
-        }
+        self.cancellation.cancel();
         self.input.take();
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-        let mut error = None;
-        if let Some(child) = self.child.as_mut() {
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if Instant::now() < deadline => {
-                        thread::sleep(Duration::from_millis(10))
-                    }
-                    Ok(None) => {
-                        unsafe {
-                            libc::kill(-(child.id() as i32), libc::SIGTERM);
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                        if child.try_wait().ok().flatten().is_none() {
-                            unsafe {
-                                libc::kill(-(child.id() as i32), libc::SIGKILL);
-                            }
-                        }
-                        if let Err(wait_error) = child.wait() {
-                            error = Some(format!("cannot reap Neovim: {wait_error}"));
-                        }
-                        break;
-                    }
-                    Err(wait_error) => {
-                        error = Some(format!("cannot inspect Neovim exit: {wait_error}"));
-                        break;
-                    }
-                }
-            }
+        let mut errors = Vec::new();
+        if let Some(mut child) = self.child.take()
+            && let Err(error) = terminate_process_group(&mut child, self.process_group, deadline)
+        {
+            errors.push(error);
         }
-        self.child = None;
-        if let Some(reader) = self.stdout_reader.take() {
-            if reader.join().is_err() && error.is_none() {
-                error = Some("Neovim stdout reader panicked".into());
-            }
+        if let Some(mut reader) = self.stdout_reader.take()
+            && let Err(error) = reader.join_before(deadline)
+        {
+            errors.push(error);
         }
-        if let Some(reader) = self.stderr_reader.take() {
-            if reader.join().is_err() && error.is_none() {
-                error = Some("Neovim stderr reader panicked".into());
-            }
+        if let Some(mut reader) = self.stderr_reader.take()
+            && let Err(error) = reader.join_before(deadline)
+        {
+            errors.push(error);
         }
         if let Some(temp_dir) = self.temp_dir.take()
-            && let Err(remove_error) = fs::remove_dir(&temp_dir)
-            && error.is_none()
+            && let Err(error) = remove_temp_tree(&temp_dir)
         {
-            error = Some(format!(
-                "cannot remove Neovim temporary directory: {remove_error}"
-            ));
+            errors.push(error);
         }
-        error.map_or(Ok(()), Err)
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     pub fn stderr_tail(&self) -> String {
-        String::from_utf8_lossy(
-            &self
-                .stderr
-                .lock()
-                .expect("Neovim stderr lock")
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-        )
-        .into_owned()
+        let bytes = self
+            .stderr
+            .lock()
+            .expect("Neovim stderr lock")
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        sanitize_diagnostic(&String::from_utf8_lossy(&bytes))
     }
 }
 
 impl Drop for RpcProcess {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+struct InterruptibleReader<R> {
+    inner: R,
+    cancellation: Cancellation,
+}
+
+impl<R> InterruptibleReader<R> {
+    fn new(inner: R, cancellation: Cancellation) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+impl<R: Read + AsRawFd> Read for InterruptibleReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Neovim pipe read cancelled",
+                ));
+            }
+            let mut descriptor = libc::pollfd {
+                fd: self.inner.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe {
+                libc::poll(
+                    &mut descriptor,
+                    1,
+                    i32::try_from(CANCEL_POLL_INTERVAL.as_millis()).unwrap(),
+                )
+            };
+            if result == 0 {
+                continue;
+            }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Neovim pipe descriptor became invalid",
+                ));
+            }
+            match self.inner.read(buffer) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
+fn set_nonblocking(descriptor: RawFd) -> Result<(), String> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(format!(
+            "cannot inspect Neovim pipe flags: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(format!(
+            "cannot make Neovim pipe nonblocking: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn wait_writable(
+    descriptor: RawFd,
+    deadline: Instant,
+    cancellation: &Cancellation,
+    method: &str,
+) -> Result<(), String> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(format!("Neovim {method} was cancelled while writing"));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("Neovim {method} timed out while writing"));
+        }
+        let timeout = remaining.min(CANCEL_POLL_INTERVAL);
+        let mut poll = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let result = unsafe {
+            libc::poll(
+                &mut poll,
+                1,
+                i32::try_from(timeout.as_millis().max(1)).unwrap(),
+            )
+        };
+        if result == 0 {
+            continue;
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("cannot wait to write Neovim RPC request: {error}"));
+        }
+        if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err("Neovim RPC input closed while writing".into());
+        }
+        if poll.revents & libc::POLLOUT != 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn write_request(
+    input: &mut ChildStdin,
+    bytes: &[u8],
+    deadline: Instant,
+    cancellation: &Cancellation,
+    method: &str,
+) -> Result<(), String> {
+    let mut written = 0;
+    while written < bytes.len() {
+        wait_writable(input.as_raw_fd(), deadline, cancellation, method)?;
+        match input.write(&bytes[written..]) {
+            Ok(0) => return Err("Neovim RPC input closed while writing".into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("cannot write Neovim RPC request: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn flush_request(
+    input: &mut ChildStdin,
+    deadline: Instant,
+    cancellation: &Cancellation,
+    method: &str,
+) -> Result<(), String> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(format!("Neovim {method} was cancelled while flushing"));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("Neovim {method} timed out while flushing"));
+        }
+        match input.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                wait_writable(input.as_raw_fd(), deadline, cancellation, method)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("cannot flush Neovim RPC request: {error}")),
+        }
+    }
+}
+
+fn signal_process_group(process_group: i32, signal: i32) -> Result<(), String> {
+    assert!(process_group > 0);
+    if unsafe { libc::kill(-process_group, signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(format!("cannot signal Neovim process group: {error}"))
+    }
+}
+
+fn terminate_process_group(
+    child: &mut Child,
+    process_group: i32,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = signal_process_group(process_group, libc::SIGTERM) {
+        errors.push(error);
+    }
+    let grace_deadline = deadline.min(Instant::now() + PROCESS_TERM_GRACE);
+    let mut reaped = false;
+    while Instant::now() < grace_deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                reaped = true;
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                errors.push(format!("cannot inspect Neovim exit: {error}"));
+                break;
+            }
+        }
+    }
+    if let Err(error) = signal_process_group(process_group, libc::SIGKILL) {
+        errors.push(error);
+    }
+    while !reaped && Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => reaped = true,
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                errors.push(format!("cannot inspect Neovim exit: {error}"));
+                break;
+            }
+        }
+    }
+    if !reaped {
+        errors.push("Neovim direct child was not reaped before deadline".into());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn sanitize_diagnostic(text: &str) -> String {
+    text.chars()
+        .map(|character| match character as u32 {
+            0x00..=0x1f | 0x7f..=0x9f => '�',
+            _ => character,
+        })
+        .collect()
+}
+
+fn remove_temp_tree(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot remove Neovim temporary directory: {error}")),
+    }
+}
+
+fn with_cleanup_error(error: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup) => format!("{error}; Neovim cleanup failed: {cleanup}"),
     }
 }
 
@@ -689,13 +1084,16 @@ fn read_rpc(
     mut output: impl Read,
     response_sender: SyncSender<RpcResponse>,
     shared: Arc<Mutex<ReaderShared>>,
+    cancellation: Cancellation,
 ) {
     let mut grid = GridState::default();
     loop {
         let value = match msgpack::decode(&mut output) {
             Ok(value) => value,
             Err(error) => {
-                shared.lock().expect("Neovim reader lock").error = Some(error);
+                if !cancellation.is_cancelled() {
+                    shared.lock().expect("Neovim reader lock").error = Some(error);
+                }
                 break;
             }
         };
@@ -711,15 +1109,18 @@ fn read_rpc(
                         Some("Neovim RPC response id is invalid".into());
                     break;
                 };
-                if response_sender
-                    .send(RpcResponse {
-                        id,
-                        error: message[2].clone(),
-                        result: message[3].clone(),
-                    })
-                    .is_err()
-                {
-                    break;
+                match response_sender.try_send(RpcResponse {
+                    id,
+                    error: message[2].clone(),
+                    result: message[3].clone(),
+                }) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        shared.lock().expect("Neovim reader lock").error =
+                            Some("Neovim RPC response queue exceeds bound".into());
+                        break;
+                    }
+                    Err(TrySendError::Disconnected(_)) => break,
                 }
             }
             Some(2) if message.len() == 3 => {
@@ -734,8 +1135,8 @@ fn read_rpc(
                     break;
                 };
                 let result: Result<(), String> = (|| match method {
-                    "redraw" => grid.apply_redraw(&message[2]).map(|snapshot| {
-                        if let Some(snapshot) = snapshot {
+                    "redraw" => grid.apply_redraw(&message[2]).map(|snapshots| {
+                        for snapshot in snapshots {
                             shared.lock().expect("Neovim reader lock").latest_grid = Some(snapshot);
                         }
                     }),
@@ -917,7 +1318,7 @@ pub fn resolve_executable(requested: Option<&Path>) -> Result<PathBuf, String> {
     };
     let canonical = fs::canonicalize(&candidate)
         .map_err(|error| format!("cannot resolve Neovim executable: {error}"))?;
-    trusted_identity(&canonical)?;
+    ValidatedExecutable::open(&canonical)?;
     Ok(canonical)
 }
 
@@ -935,36 +1336,58 @@ fn find_executable(path: &Path) -> Result<PathBuf, String> {
     Err(format!("cannot find Neovim executable: {}", path.display()))
 }
 
-fn trusted_identity(path: &Path) -> Result<ExecutableIdentity, String> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("cannot inspect Neovim executable: {error}"))?;
-    if !metadata.is_file() {
-        return Err("Neovim executable must be a regular file".into());
+impl ValidatedExecutable {
+    fn open(path: &Path) -> Result<Self, String> {
+        let encoded = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "Neovim executable path contains NUL")?;
+        let descriptor = unsafe {
+            libc::open(
+                encoded.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor == -1 {
+            return Err(format!(
+                "cannot open Neovim executable: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot inspect Neovim executable: {error}"))?;
+        if !metadata.is_file() {
+            return Err("Neovim executable must be a regular file".into());
+        }
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid && metadata.uid() != 0 {
+            return Err("Neovim executable must be owned by the effective user or root".into());
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return Err("Neovim executable must not be group/world writable".into());
+        }
+        if metadata.mode() & 0o111 == 0 {
+            return Err("Neovim executable is not executable".into());
+        }
+        Ok(Self {
+            file,
+            display_path: path.to_path_buf(),
+        })
     }
-    let effective_uid = unsafe { libc::geteuid() };
-    if metadata.uid() != effective_uid && metadata.uid() != 0 {
-        return Err("Neovim executable must be owned by the effective user or root".into());
+
+    fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
-    if metadata.mode() & 0o022 != 0 {
-        return Err("Neovim executable must not be group/world writable".into());
+
+    fn command(&self) -> Command {
+        Command::new(format!("/proc/self/fd/{}", self.raw_fd()))
     }
-    if metadata.permissions().mode() & 0o111 == 0 {
-        return Err("Neovim executable is not executable".into());
-    }
-    Ok(ExecutableIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        uid: metadata.uid(),
-        mode: metadata.mode(),
-        size: metadata.size(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
-    })
 }
 
-fn validate_version(executable: &Path) -> Result<(), String> {
+fn validate_version(
+    executable: &ValidatedExecutable,
+    cancellation: &Arc<AtomicBool>,
+) -> Result<(), String> {
     const MAX_VERSION_BYTES: u64 = 64 * 1024;
     let temp_dir = create_temp_dir()?;
     let result = (|| {
@@ -972,38 +1395,77 @@ fn validate_version(executable: &Path) -> Result<(), String> {
         let stderr_path = temp_dir.join("stderr");
         let stdout = create_probe_file(&stdout_path)?;
         let stderr = create_probe_file(&stderr_path)?;
-        let mut command = Command::new(executable);
+        let mut command = executable.command();
         command
             .arg("--version")
             .current_dir(&temp_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        configure_process_group_and_limits(&mut command, Some(MAX_VERSION_BYTES));
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot probe Neovim version: {error}"))?;
+        configure_process_group_and_limits(
+            &mut command,
+            Some(MAX_VERSION_BYTES),
+            Some(executable.raw_fd()),
+        );
+        let mut child = command.spawn().map_err(|error| {
+            format!(
+                "cannot probe Neovim version through validated descriptor {}: {error}",
+                executable.display_path.display()
+            )
+        })?;
+        let process_group = i32::try_from(child.id()).expect("Linux process IDs fit i32");
         let deadline = Instant::now() + Duration::from_secs(5);
         let status = loop {
+            if cancellation.load(Ordering::Acquire) {
+                let cleanup = terminate_process_group(
+                    &mut child,
+                    process_group,
+                    Instant::now() + SHUTDOWN_TIMEOUT,
+                );
+                return Err(with_cleanup_error(
+                    "Neovim version probe was cancelled".into(),
+                    cleanup,
+                ));
+            }
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => {
+                    let mut cleanup_error =
+                        signal_process_group(process_group, libc::SIGTERM).err();
+                    if let Err(error) = signal_process_group(process_group, libc::SIGKILL)
+                        && cleanup_error.is_none()
+                    {
+                        cleanup_error = Some(error);
+                    }
+                    if let Some(error) = cleanup_error {
+                        return Err(error);
+                    }
+                    break status;
+                }
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Ok(None) => {
-                    unsafe {
-                        libc::kill(-(child.id() as i32), libc::SIGTERM);
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                    if child.try_wait().ok().flatten().is_none() {
-                        unsafe {
-                            libc::kill(-(child.id() as i32), libc::SIGKILL);
-                        }
-                    }
-                    let _ = child.wait();
-                    return Err("Neovim version probe timed out".into());
+                    let cleanup = terminate_process_group(
+                        &mut child,
+                        process_group,
+                        Instant::now() + SHUTDOWN_TIMEOUT,
+                    );
+                    return Err(with_cleanup_error(
+                        "Neovim version probe timed out".into(),
+                        cleanup,
+                    ));
                 }
-                Err(error) => return Err(format!("cannot inspect Neovim version probe: {error}")),
+                Err(error) => {
+                    let cleanup = terminate_process_group(
+                        &mut child,
+                        process_group,
+                        Instant::now() + SHUTDOWN_TIMEOUT,
+                    );
+                    return Err(with_cleanup_error(
+                        format!("cannot inspect Neovim version probe: {error}"),
+                        cleanup,
+                    ));
+                }
             }
         };
         if !status.success() {
@@ -1042,12 +1504,10 @@ fn validate_version(executable: &Path) -> Result<(), String> {
         }
         Ok(())
     })();
-    let cleanup = fs::remove_dir_all(&temp_dir)
-        .map_err(|error| format!("cannot remove Neovim version directory: {error}"));
-    match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
+    let cleanup = remove_temp_tree(&temp_dir);
+    match result {
+        Ok(()) => cleanup,
+        Err(error) => Err(with_cleanup_error(error, cleanup)),
     }
 }
 
@@ -1078,9 +1538,18 @@ fn create_temp_dir() -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn configure_process_group_and_limits(command: &mut Command, file_size: Option<u64>) {
+fn configure_process_group_and_limits(
+    command: &mut Command,
+    file_size: Option<u64>,
+    executable_descriptor: Option<RawFd>,
+) {
     unsafe {
         command.pre_exec(move || {
+            if let Some(descriptor) = executable_descriptor
+                && libc::fcntl(descriptor, libc::F_SETFD, 0) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -1119,6 +1588,92 @@ fn bounded_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn rpc_response(id: u64, result: Value) -> Value {
+        array([Value::Unsigned(1), Value::Unsigned(id), Value::Nil, result])
+    }
+
+    fn compatible_api() -> Value {
+        array([
+            Value::Unsigned(7),
+            map([
+                (
+                    "version",
+                    map([
+                        ("api_level", Value::Unsigned(MIN_API_LEVEL)),
+                        ("api_compatible", Value::Unsigned(MIN_API_LEVEL)),
+                        ("api_prerelease", Value::Bool(false)),
+                    ]),
+                ),
+                ("ui_options", array([Value::String("ext_linegrid".into())])),
+            ]),
+        ])
+    }
+
+    fn shell_encoded(value: &Value) -> String {
+        msgpack::encode(value)
+            .unwrap()
+            .into_iter()
+            .map(|byte| format!("\\{byte:03o}"))
+            .collect()
+    }
+
+    fn fake_neovim(
+        version_tail: &str,
+        embedded_prefix: &str,
+        initialize: bool,
+        embedded_tail: &str,
+    ) -> (PathBuf, PathBuf) {
+        let root = create_temp_dir().unwrap();
+        let executable = root.join("fake-nvim");
+        let responses = initialize.then(|| {
+            [
+                rpc_response(1, compatible_api()),
+                rpc_response(2, Value::Nil),
+                rpc_response(3, Value::Nil),
+                rpc_response(4, Value::Unsigned(1)),
+                rpc_response(5, Value::Bool(true)),
+                rpc_response(6, Value::Nil),
+            ]
+            .iter()
+            .map(|response| format!("sleep 0.02\nprintf '{}'\n", shell_encoded(response)))
+            .collect::<String>()
+        });
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then\n  printf 'NVIM v0.11.5\\n'\n  {version_tail}\n  exit 0\nfi\n{embedded_prefix}\n{}{embedded_tail}\n",
+                responses.unwrap_or_default(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        (root, executable)
+    }
+
+    fn wait_for_file(path: &Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "fixture file timed out: {path:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_process_exit(process_id: u32, timeout: Duration) {
+        let process = PathBuf::from(format!("/proc/{process_id}"));
+        let deadline = Instant::now() + timeout;
+        while process.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "fixture process did not exit: {process_id}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn real_neovim_round_trips_exact_source_and_reports_api() {
@@ -1141,6 +1696,246 @@ mod tests {
             assert!(snapshot.mode.starts_with('n'));
             process.shutdown().unwrap();
         }
+    }
+
+    #[test]
+    fn clipboard_provider_is_disabled_before_clean_neovim_initializes() {
+        let executable = resolve_executable(None).unwrap();
+        let mut process = RpcProcess::start(
+            &executable,
+            "x\n",
+            "interview://clipboard.py",
+            "python",
+            20,
+            8,
+        )
+        .unwrap();
+        let loaded = process
+            .call(
+                "nvim_get_var",
+                vec![Value::String("loaded_clipboard_provider".into())],
+            )
+            .unwrap();
+        assert_eq!(loaded.as_u64(), Some(0));
+        process.shutdown().unwrap();
+    }
+
+    #[test]
+    fn validated_descriptor_survives_path_replacement_between_check_and_exec() {
+        let (root, executable_path) = fake_neovim("", "", false, "exit 0");
+        let executable = ValidatedExecutable::open(&executable_path).unwrap();
+        let original = root.join("validated-original");
+        fs::rename(&executable_path, &original).unwrap();
+        fs::write(&executable_path, "#!/bin/sh\nprintf 'NVIM v2.0.0\\n'\n").unwrap();
+        fs::set_permissions(&executable_path, fs::Permissions::from_mode(0o700)).unwrap();
+        validate_version(&executable, &Arc::new(AtomicBool::new(false))).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_rpc_ids_envelopes_and_eof_fail_without_hanging() {
+        for (name, payload, expected) in [
+            (
+                "id",
+                "printf '\\224\\001\\243bad\\300\\300'\n",
+                "response id is invalid",
+            ),
+            ("envelope", "printf '\\221\\300'\n", "envelope is malformed"),
+            ("eof", "exit 0\n", "MessagePack stream"),
+        ] {
+            let (root, executable) = fake_neovim("", payload, false, "sleep 30");
+            let started = Instant::now();
+            let error = RpcProcess::start(
+                &executable,
+                "x\n",
+                &format!("interview://{name}.py"),
+                "python",
+                20,
+                8,
+            )
+            .err()
+            .expect("malicious RPC must fail");
+            assert!(error.contains(expected), "unexpected error: {error}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn response_flood_is_bounded_and_shutdown_stays_bounded() {
+        let flood = (0..16)
+            .map(|_| {
+                format!(
+                    "printf '{}'\n",
+                    shell_encoded(&rpc_response(999, Value::Nil))
+                )
+            })
+            .collect::<String>();
+        let (root, executable) = fake_neovim("", "", true, &format!("{flood}sleep 30"));
+        let mut process =
+            RpcProcess::start(&executable, "x\n", "interview://flood.py", "python", 20, 8).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if process
+                .reader_error()
+                .is_some_and(|error| error.contains("response queue exceeds bound"))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "response flood was not rejected");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        process.shutdown().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_read_and_no_response_paths_obey_rpc_deadlines() {
+        let (root, executable) = fake_neovim("", "", true, "sleep 30");
+        let mut process = RpcProcess::start(
+            &executable,
+            "x\n",
+            "interview://no-read.py",
+            "python",
+            20,
+            8,
+        )
+        .unwrap();
+        let started = Instant::now();
+        let error = process
+            .call_with_timeout(
+                "nvim_paste",
+                vec![Value::String("x".repeat(1024 * 1024))],
+                Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert!(error.contains("timed out while writing"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        process.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, executable) = fake_neovim("", "", true, "sleep 30");
+        let mut process =
+            RpcProcess::start(&executable, "x\n", "interview://hang.py", "python", 20, 8).unwrap();
+        let started = Instant::now();
+        let error = process
+            .call_with_timeout("nvim_get_mode", Vec::new(), Duration::from_millis(200))
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        process.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stderr_flood_is_retained_bounded_and_control_sanitized() {
+        let tail = "head -c 131072 /dev/zero | tr '\\000' '\\033' >&2\nsleep 30";
+        let (root, executable) = fake_neovim("", "", true, tail);
+        let mut process =
+            RpcProcess::start(&executable, "x\n", "interview://stderr.py", "python", 20, 8)
+                .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process.stderr.lock().unwrap().len() < MAX_STDERR_BYTES {
+            assert!(
+                Instant::now() < deadline,
+                "stderr flood did not reach bound"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let tail = process.stderr_tail();
+        assert_eq!(tail.chars().count(), MAX_STDERR_BYTES);
+        assert!(!tail.chars().any(char::is_control));
+        process.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_and_embedded_direct_exit_kill_descendants_and_release_readers() {
+        let root = create_temp_dir().unwrap();
+        let version_pid_file = root.join("version-descendant.pid");
+        let (fixture_root, executable) = fake_neovim(
+            &format!(
+                "(trap '' TERM; sleep 30) & printf '%s\\n' $! > '{}'",
+                version_pid_file.display()
+            ),
+            "",
+            false,
+            "exit 0",
+        );
+        let validated = ValidatedExecutable::open(&executable).unwrap();
+        validate_version(&validated, &Arc::new(AtomicBool::new(false))).unwrap();
+        wait_for_file(&version_pid_file, Duration::from_secs(1));
+        let version_pid = fs::read_to_string(&version_pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        wait_for_process_exit(version_pid, Duration::from_secs(2));
+        fs::remove_dir_all(fixture_root).unwrap();
+
+        let embedded_pid_file = root.join("embedded-descendant.pid");
+        let (fixture_root, executable) = fake_neovim(
+            "",
+            "",
+            true,
+            &format!(
+                "(trap '' TERM; sleep 30) & printf '%s\\n' $! > '{}'\nexit 0",
+                embedded_pid_file.display()
+            ),
+        );
+        let mut process = RpcProcess::start(
+            &executable,
+            "x\n",
+            "interview://descendant.py",
+            "python",
+            20,
+            8,
+        )
+        .unwrap();
+        wait_for_file(&embedded_pid_file, Duration::from_secs(1));
+        let embedded_pid = fs::read_to_string(&embedded_pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let started = Instant::now();
+        process.shutdown().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        wait_for_process_exit(embedded_pid, Duration::from_secs(2));
+        fs::remove_dir_all(fixture_root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_embedded_start_removes_nonempty_owned_temp_tree() {
+        let root = create_temp_dir().unwrap();
+        let cwd_file = root.join("embedded-cwd");
+        let prefix = format!(
+            "mkdir residue\nprintf '%s' \"$PWD\" > '{}'\nprintf '\\221\\300'",
+            cwd_file.display()
+        );
+        let (fixture_root, executable) = fake_neovim("", &prefix, false, "sleep 30");
+        assert!(
+            RpcProcess::start(
+                &executable,
+                "x\n",
+                "interview://residue.py",
+                "python",
+                20,
+                8,
+            )
+            .is_err()
+        );
+        wait_for_file(&cwd_file, Duration::from_secs(1));
+        let embedded_cwd = PathBuf::from(fs::read_to_string(&cwd_file).unwrap());
+        assert!(
+            !embedded_cwd.exists(),
+            "temporary tree leaked: {embedded_cwd:?}"
+        );
+        fs::remove_dir_all(fixture_root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

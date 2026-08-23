@@ -548,6 +548,13 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         quit_from_editor(session)
 
     assert pid_file.exists()
+    neovim_pid = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2.0
+    while Path(f"/proc/{neovim_pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not Path(f"/proc/{neovim_pid}").exists(), (
+        f"embedded Neovim remained alive after editor shutdown: {neovim_pid}"
+    )
     return "visual+count+text-object+macro+dot+search+named-register+Tutor commands"
 
 

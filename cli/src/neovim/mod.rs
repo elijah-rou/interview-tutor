@@ -7,7 +7,8 @@ use grid::GridSnapshot;
 use process::{OriginEvent, RpcProcess, Snapshot};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -16,6 +17,7 @@ pub use process::resolve_executable;
 
 const COMMAND_CAPACITY: usize = 64;
 const EVENT_CAPACITY: usize = 16;
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TutorAction {
@@ -101,7 +103,6 @@ enum Command {
         source: String,
     },
     Stop,
-    Shutdown,
 }
 
 #[derive(Clone)]
@@ -112,12 +113,15 @@ struct SessionConfig {
     width: u16,
     height: u16,
     accepted_changedtick: u64,
+    cancellation: Arc<AtomicBool>,
 }
 
 pub struct Worker {
     sender: Option<SyncSender<Command>>,
     shared: Arc<Mutex<WorkerShared>>,
     join: Option<JoinHandle<()>>,
+    done: Receiver<()>,
+    cancellation: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -125,11 +129,19 @@ impl Worker {
         let (sender, commands) = mpsc::sync_channel(COMMAND_CAPACITY);
         let shared = Arc::new(Mutex::new(WorkerShared::default()));
         let thread_shared = Arc::clone(&shared);
-        let join = thread::spawn(move || controller(executable, commands, thread_shared));
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let thread_cancellation = Arc::clone(&cancellation);
+        let (done_sender, done) = mpsc::sync_channel(1);
+        let join = thread::spawn(move || {
+            controller(executable, commands, thread_shared, thread_cancellation);
+            let _ = done_sender.try_send(());
+        });
         Self {
             sender: Some(sender),
             shared,
             join: Some(join),
+            done,
+            cancellation,
         }
     }
 
@@ -221,25 +233,28 @@ impl Worker {
     }
 
     pub fn shutdown(mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.try_send(Command::Shutdown);
-            drop(sender);
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        self.shutdown_inner();
+    }
+
+    fn shutdown_inner(&mut self) {
+        self.cancellation.store(true, Ordering::Release);
+        self.sender.take();
+        match self.done.recv_timeout(WORKER_SHUTDOWN_TIMEOUT) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                if let Some(join) = self.join.take() {
+                    let _ = join.join();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.join.take();
+            }
         }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.try_send(Command::Shutdown);
-            drop(sender);
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        self.shutdown_inner();
     }
 }
 
@@ -247,10 +262,14 @@ fn controller(
     executable: PathBuf,
     commands: mpsc::Receiver<Command>,
     shared: Arc<Mutex<WorkerShared>>,
+    cancellation: Arc<AtomicBool>,
 ) {
     let mut process: Option<RpcProcess> = None;
     let mut config: Option<SessionConfig> = None;
     loop {
+        if cancellation.load(Ordering::Acquire) {
+            break;
+        }
         match commands.recv_timeout(Duration::from_millis(20)) {
             Ok(Command::Start {
                 source,
@@ -269,6 +288,7 @@ fn controller(
                     width,
                     height,
                     accepted_changedtick: 0,
+                    cancellation: Arc::clone(&cancellation),
                 };
                 match spawn(&executable, &next_config) {
                     Ok(mut next) => match sync_document(&mut next, &mut next_config, &shared) {
@@ -359,7 +379,7 @@ fn controller(
                 }
                 config = None;
             }
-            Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 sync_reader_state(&executable, &mut process, &mut config, &shared);
             }
@@ -371,13 +391,14 @@ fn controller(
 }
 
 fn spawn(executable: &Path, config: &SessionConfig) -> Result<RpcProcess, String> {
-    RpcProcess::start(
+    RpcProcess::start_with_cancellation(
         executable,
         &config.source,
         &config.synthetic_name,
         &config.language,
         config.width,
         config.height,
+        Arc::clone(&config.cancellation),
     )
 }
 
@@ -662,7 +683,60 @@ fn push_event(shared: &Arc<Mutex<WorkerShared>>, event: WorkerEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn out_of_band_shutdown_ignores_a_full_queue_and_cancels_startup() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "interview-worker-shutdown-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let marker = root.join("embedded-started");
+        let executable = root.join("fake-nvim");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then printf 'NVIM v0.11.5\\n'; exit 0; fi\nprintf started > '{}'\nsleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://cancel.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "fake Neovim did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut queue_full = false;
+        for _ in 0..=COMMAND_CAPACITY {
+            if worker.input("x".into()).is_err() {
+                queue_full = true;
+                break;
+            }
+        }
+        assert!(queue_full, "test did not fill the worker command queue");
+        let started = Instant::now();
+        worker.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn oversized_candidate_restarts_from_exact_last_valid_document() {

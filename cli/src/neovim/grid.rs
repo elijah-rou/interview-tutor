@@ -7,6 +7,7 @@ pub const MAX_GRID_WIDTH: usize = 512;
 pub const MAX_GRID_HEIGHT: usize = 256;
 pub const MAX_GRID_CELLS: usize = MAX_GRID_WIDTH * MAX_GRID_HEIGHT;
 pub const MAX_HIGHLIGHTS: usize = 65_536;
+const MAX_FLUSHES_PER_BATCH: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GridCell {
@@ -159,11 +160,11 @@ impl Default for GridState {
 }
 
 impl GridState {
-    pub fn apply_redraw(&mut self, batch: &Value) -> Result<Option<Arc<GridSnapshot>>, String> {
+    pub fn apply_redraw(&mut self, batch: &Value) -> Result<Vec<Arc<GridSnapshot>>, String> {
         let events = batch
             .as_array()
             .ok_or("Neovim redraw batch is not an array")?;
-        let mut flush = false;
+        let mut snapshots = Vec::new();
         for event in events {
             let event = event
                 .as_array()
@@ -189,7 +190,12 @@ impl GridState {
                     "mode_change" => self.change_mode(arguments)?,
                     "busy_start" => self.cursor_visible = false,
                     "busy_stop" => self.cursor_visible = true,
-                    "flush" => flush = true,
+                    "flush" => {
+                        if snapshots.len() == MAX_FLUSHES_PER_BATCH {
+                            return Err("Neovim redraw batch exceeds flush bound".into());
+                        }
+                        snapshots.push(Arc::new(self.snapshot()));
+                    }
                     "option_set" | "set_title" | "set_icon" | "mouse_on" | "mouse_off" | "bell"
                     | "visual_bell" | "hl_group_set" | "chdir" | "update_menu" | "suspend" => {}
                     "connect" | "restart" => {
@@ -199,7 +205,7 @@ impl GridState {
                 }
             }
         }
-        Ok(flush.then(|| Arc::new(self.snapshot())))
+        Ok(snapshots)
     }
 
     fn snapshot(&self) -> GridSnapshot {
@@ -320,7 +326,7 @@ impl GridState {
             for _ in 0..repeat {
                 let index = row * self.width + column;
                 self.cells[index] = GridCell {
-                    text: text.into(),
+                    text: sanitize_symbol(text),
                     highlight: inherited_highlight,
                 };
                 column += 1;
@@ -487,6 +493,15 @@ impl GridState {
     }
 }
 
+fn sanitize_symbol(text: &str) -> String {
+    text.chars()
+        .map(|character| match character as u32 {
+            0x00..=0x1f | 0x7f..=0x9f => '�',
+            _ => character,
+        })
+        .collect()
+}
+
 fn usize_value(value: Option<&Value>, name: &str) -> Result<usize, String> {
     usize::try_from(
         value
@@ -574,10 +589,11 @@ mod tests {
                 ])],
             ),
         ]);
-        assert!(grid.apply_redraw(&no_flush).unwrap().is_none());
+        assert!(grid.apply_redraw(&no_flush).unwrap().is_empty());
         let flushed = grid
             .apply_redraw(&redraw([event("flush", [Value::Array(Vec::new())])]))
             .unwrap()
+            .pop()
             .unwrap();
         assert_eq!(flushed.cell(0, 0).unwrap().text, "a");
         assert_eq!(flushed.cell(0, 0).unwrap().highlight, 7);
@@ -616,6 +632,7 @@ mod tests {
                 event("flush", [Value::Array(Vec::new())]),
             ]))
             .unwrap()
+            .pop()
             .unwrap();
         assert_eq!(snapshot.cell(0, 0).unwrap().text, "b");
     }
@@ -643,11 +660,71 @@ mod tests {
                 event("flush", [Value::Array(Vec::new())]),
             ]))
             .unwrap()
+            .pop()
             .unwrap();
         assert_eq!(snapshot.cursor_shape, CursorShape::Vertical);
         assert!(snapshot.cursor_blink);
         assert_eq!(snapshot.cursor_cell_percentage, 25);
         assert_eq!(snapshot.mode, "insert");
+    }
+
+    #[test]
+    fn each_flush_captures_state_at_its_exact_position() {
+        let mut grid = GridState::default();
+        let snapshots = grid
+            .apply_redraw(&redraw([
+                event(
+                    "grid_line",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(0),
+                        array([array([Value::String("a".into())])]),
+                        Value::Bool(false),
+                    ])],
+                ),
+                event("flush", [Value::Array(Vec::new())]),
+                event(
+                    "grid_line",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(0),
+                        array([array([Value::String("b".into())])]),
+                        Value::Bool(false),
+                    ])],
+                ),
+                event("flush", [Value::Array(Vec::new())]),
+            ]))
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].cell(0, 0).unwrap().text, "a");
+        assert_eq!(snapshots[1].cell(0, 0).unwrap().text, "b");
+    }
+
+    #[test]
+    fn grid_symbols_do_not_publish_terminal_controls() {
+        let mut grid = GridState::default();
+        let snapshot = grid
+            .apply_redraw(&redraw([
+                event(
+                    "grid_line",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(0),
+                        array([array([Value::String("\u{1b}\u{85}x".into())])]),
+                        Value::Bool(false),
+                    ])],
+                ),
+                event("flush", [Value::Array(Vec::new())]),
+            ]))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let text = &snapshot.cell(0, 0).unwrap().text;
+        assert_eq!(text, "��x");
+        assert!(!text.chars().any(char::is_control));
     }
 
     #[test]
@@ -670,7 +747,7 @@ mod tests {
                 [Value::Array(Vec::new())]
             )]))
             .unwrap()
-            .is_none()
+            .is_empty()
         );
     }
 }
