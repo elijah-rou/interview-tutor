@@ -41,6 +41,12 @@ pub enum Effect {
         write_source: bool,
         intent: RunIntent,
     },
+    SaveDraft {
+        operation: OperationId,
+        plan: ExecutionPlan,
+        source: String,
+        revision: u64,
+    },
     CancelRun {
         operation: OperationId,
     },
@@ -68,6 +74,7 @@ pub enum Effect {
     },
     ResetCodex,
     LeaveSolve,
+    StopNeovim,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +120,7 @@ pub enum Action {
     InterviewDisclosure(bool),
     Hint,
     ResetInterview,
+    ToggleCollapse,
     Editor(EditorAction),
 }
 
@@ -133,6 +141,7 @@ pub enum Event {
         Option<String>,
         Result<ExecutionResult, String>,
     ),
+    DraftSaved(OperationId, u64, String, Result<(), String>),
     CodexConnected(OperationId, Result<(), String>),
     CodexFinished(
         OperationId,

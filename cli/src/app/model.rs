@@ -145,8 +145,24 @@ pub enum SolvePane {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscardAction {
-    Back,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccessoryPaneState {
+    pub problem_expanded: bool,
+    pub output_expanded: bool,
+    pub interview_expanded: bool,
+}
+
+impl Default for AccessoryPaneState {
+    fn default() -> Self {
+        Self {
+            problem_expanded: true,
+            output_expanded: true,
+            interview_expanded: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -248,12 +264,14 @@ pub struct SolveSession {
     pub editor_view: Option<Arc<crate::neovim::grid::GridSnapshot>>,
     pub editor_status: EditorRuntimeStatus,
     pub pane: SolvePane,
+    pub accessory_panes: AccessoryPaneState,
     pub output: String,
     pub output_scroll: u16,
     pub problem_scroll: u16,
     pub running: Option<(OperationId, u64, RunIntent)>,
     pub cancellation: Option<CancellationToken>,
     pub pending_save: Option<(u64, String)>,
+    pub pending_draft_save: Option<(OperationId, u64, String)>,
     pub stale: bool,
     pub latest_run_revision: Option<u64>,
     pub quit_after_save: Option<(Option<OperationId>, u64)>,
@@ -469,12 +487,14 @@ mod tests {
             editor_view: None,
             editor_status: EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
+            accessory_panes: AccessoryPaneState::default(),
             output: String::new(),
             output_scroll: 0,
             problem_scroll: 0,
             running: None,
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,

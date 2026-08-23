@@ -439,8 +439,13 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
         session.send(ESCAPE)
         session.wait_screen("Normal · DIRTY")
         session.send(b" b")
-        session.wait_screen("Unsaved changes")
-        assert "Editor" in session.screen.text()
+        session.wait_screen("Problems [active]")
+        assert fixture.solution.read_text(encoding="utf-8").startswith("Xprint")
+        assert query_attempts(database) == []
+        session.send(ENTER)
+        session.wait_screen("Matrix statement")
+        session.send(ENTER)
+        session.wait_screen("Editor")
 
         session.send(F5)
         session.wait_screen("Run complete")
@@ -566,7 +571,7 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         session.wait_screen("PASTE")
         session.send(b"\x1b[<0;70;10M\x1b[<0;70;10m")
 
-        session.send(F5)
+        session.send(b" t")
         session.wait_screen("Run complete")
         expected_source = (
             "#print('initial')!!!\n" * 4 + "BRACKETED\nPASTE\n"
@@ -578,7 +583,7 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         session.wait_screen("Run complete")
         assert query_attempts(database) == []
 
-        session.send(F9)
+        session.send(b" s")
         session.wait_screen("Submit recorded")
         assert fixture.solution.read_text(encoding="utf-8") == expected_source
         assert query_attempts(database) == [("pass", 0)]
@@ -681,6 +686,56 @@ def compact_case(fixture: MatrixFixture) -> str:
     return "attempts test=0 submit=1(pass) turns=7 compact=80x24 status=0"
 
 
+def autosave_back_case(fixture: MatrixFixture) -> str:
+    fixture.set_runner("cancel")
+    database = fixture.database("autosave-back")
+    pid_file = fixture.temporary / "autosave-back-runner.pid"
+    environment, home = fixture.environment(no_codex=True, pid_file=pid_file)
+    with fixture.launch(database, environment, no_codex=True) as session:
+        open_solve(session)
+        session.send(b" t")
+        session.wait_predicate("active test runner", pid_file.exists)
+        session.send(b"iACTIVE-DRAFT-" + ESCAPE)
+        session.wait_screen("ACTIVE-DRAFT-")
+        session.send(b":TutorBack" + ENTER)
+        session.wait_screen("Problems [active]")
+        assert fixture.solution.read_text(encoding="utf-8").startswith(
+            "ACTIVE-DRAFT-"
+        )
+        assert query_attempts(database) == []
+        session.send(b"q")
+        session.wait_exit(0)
+    assert not (home / "fake-version-probe").exists()
+
+    fixture.set_runner("normal")
+    failure_database = fixture.database("autosave-failure")
+    failure_environment, failure_home = fixture.environment(no_codex=True)
+    with fixture.launch(
+        failure_database, failure_environment, no_codex=True
+    ) as session:
+        open_solve(session)
+        session.send(b"iFAILED-DRAFT-" + ESCAPE)
+        session.wait_screen("FAILED-DRAFT-")
+        fixture.solution.unlink()
+        decoy = fixture.root / "draft-save-decoy.py"
+        decoy.write_text("decoy\n", encoding="utf-8")
+        fixture.solution.symlink_to(decoy)
+        session.send(b" b")
+        session.wait_screen("Draft save failed")
+        session.wait_screen("retry Space-b")
+        assert "Editor" in session.screen.text()
+        assert decoy.read_text(encoding="utf-8") == "decoy\n"
+        assert query_attempts(failure_database) == []
+        session.send(b" q")
+        session.wait_screen("Unsaved changes")
+        session.send(b" q")
+        session.wait_exit(0)
+        fixture.solution.unlink()
+        fixture.solution.write_text("print('initial')\n", encoding="utf-8")
+    assert not (failure_home / "fake-version-probe").exists()
+    return "active_runner=drained TutorBack=autosaved attempts=0 failure=dirty-solve"
+
+
 def resize_case(fixture: MatrixFixture) -> str:
     fixture.set_runner("normal")
     database = fixture.database("resize")
@@ -691,6 +746,38 @@ def resize_case(fixture: MatrixFixture) -> str:
         session.wait_screen("RESIZE-界")
         session.send(ESCAPE)
         session.wait_screen("Normal · DIRTY")
+
+        def assert_collapsed(*labels: str) -> None:
+            session.settle()
+            view = session.screen.text()
+            for label in ["Problem", "Output", "Interview"]:
+                assert (f"{label} [+]" in view) == (label in labels), (
+                    labels,
+                    view,
+                )
+
+        session.send(b"\t c")
+        assert_collapsed("Problem")
+        session.send(b"\t c")
+        assert_collapsed("Problem", "Output")
+        session.send(SHIFT_TAB + b" c")
+        assert_collapsed("Output")
+        session.send(b"\t\t c")
+        assert_collapsed("Output", "Interview")
+        session.send(SHIFT_TAB + SHIFT_TAB + b" c")
+        assert_collapsed("Problem", "Output", "Interview")
+        session.send(b"\t c")
+        assert_collapsed("Problem", "Interview")
+        session.send(SHIFT_TAB + b" c")
+        assert_collapsed("Interview")
+        session.send(b"\t\t c")
+        assert_collapsed()
+
+        session.send(b" c" + SHIFT_TAB + b" c" + SHIFT_TAB + b" c")
+        assert_collapsed("Problem", "Output", "Interview")
+        session.resize(100, 30)
+        session.wait_screen("Problem [+]")
+        assert "Solve panes" not in session.screen.text()
         session.resize(59, 19)
         session.wait_screen("Terminal too small")
         session.wait_screen("Resize to at least 60 × 20")
@@ -698,13 +785,21 @@ def resize_case(fixture: MatrixFixture) -> str:
         assert session.process.poll() is None
         session.resize(80, 24)
         session.wait_screen("Solve panes")
+        session.wait_screen("Problem [+]")
+        session.wait_screen("Output [+]")
+        session.wait_screen("Interview [+]")
         session.wait_screen("RESIZE-界")
         session.resize(120, 40)
-        session.wait_screen("Problem / Examples")
+        assert_collapsed("Problem", "Output", "Interview")
+        session.send(b"i")
+        session.wait_screen("Interview [active] [-]")
+        assert_collapsed("Problem", "Output")
         session.wait_screen("RESIZE-界")
+        session.send(b"\t")
+        session.wait_screen("Editor · Neovim [active]")
         quit_from_editor(session, dirty=True)
     assert not (home / "fake-version-probe").exists()
-    return "sizes=120x40,59x19,80x24,120x40 buffer=preserved status=0"
+    return "collapse_masks=8 sizes=120x40,100x30,59x19,80x24 state+focus=preserved"
 
 
 def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
@@ -1034,6 +1129,7 @@ def full_matrix(fixture: MatrixFixture, matrix: Matrix) -> None:
     matrix.run("workflow-120x40", lambda: full_workflow_case(fixture))
     matrix.run("neovim-full-surface", lambda: broad_neovim_case(fixture))
     matrix.run("compact-80x24", lambda: compact_case(fixture))
+    matrix.run("autosave-back", lambda: autosave_back_case(fixture))
     matrix.run("resize-preservation", lambda: resize_case(fixture))
 
     for mode in [

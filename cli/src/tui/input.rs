@@ -35,40 +35,21 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     }
     let solve = state.solve.as_ref()?;
     let mode = solve.editor.mode;
+    let pane = solve.pane;
+    let editor_failed = solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed;
+
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        state.leader_pending = false;
         return Some(Action::Cancel);
     }
-    if solve.pane == crate::app::model::SolvePane::Editor
-        && solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.code == KeyCode::F(5)
     {
-        if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
-            || key.code == KeyCode::BackTab
-        {
-            return Some(Action::PreviousFocus);
-        }
-        if key.code == KeyCode::Tab {
-            return Some(Action::NextFocus);
-        }
-        if state.leader_pending {
-            state.leader_pending = false;
-            return match key.code {
-                KeyCode::Char('b') => Some(Action::Back),
-                KeyCode::Char('q') => Some(Action::Quit),
-                _ => None,
-            };
-        }
-        if key.code == KeyCode::Char(' ') {
-            state.leader_pending = true;
-        }
-        return None;
-    }
-    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(Action::SaveTest);
-    }
-    if key.code == KeyCode::F(5) {
+        state.leader_pending = false;
         return Some(Action::SaveTest);
     }
     if key.code == KeyCode::F(9) {
+        state.leader_pending = false;
         return Some(Action::Submit);
     }
     if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
@@ -81,56 +62,63 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         state.leader_pending = false;
         return Some(Action::NextFocus);
     }
-    if solve.pane == crate::app::model::SolvePane::Interview {
-        if state.codex.status == crate::app::model::CodexStatus::Disclosure {
-            return match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => Some(Action::InterviewDisclosure(true)),
-                KeyCode::Esc | KeyCode::Char('n') => Some(Action::InterviewDisclosure(false)),
-                _ => None,
-            };
-        }
-        if state.codex.composer_focused {
-            return match key.code {
-                KeyCode::Esc => Some(Action::InterviewEscape),
-                KeyCode::Enter => Some(Action::InterviewSend),
-                KeyCode::Backspace => Some(Action::InterviewBackspace),
-                KeyCode::Char(character)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    Some(Action::InterviewChar(character))
-                }
-                _ => None,
-            };
+
+    if pane == crate::app::model::SolvePane::Interview && state.codex.composer_focused {
+        state.leader_pending = false;
+        return match key.code {
+            KeyCode::Esc => Some(Action::InterviewEscape),
+            KeyCode::Enter => Some(Action::InterviewSend),
+            KeyCode::Backspace => Some(Action::InterviewBackspace),
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Some(Action::InterviewChar(character))
+            }
+            _ => None,
+        };
+    }
+
+    let host_leader_eligible =
+        pane != crate::app::model::SolvePane::Editor || editor_failed && mode == Mode::Normal;
+    if host_leader_eligible && state.leader_pending {
+        state.leader_pending = false;
+        let leader_action = match key.code {
+            KeyCode::Char('t') => Some(Action::SaveTest),
+            KeyCode::Char('s') => Some(Action::Submit),
+            KeyCode::Char('b') => Some(Action::Back),
+            KeyCode::Char('c') => Some(Action::ToggleCollapse),
+            KeyCode::Char('h') => Some(Action::Hint),
+            KeyCode::Char('r') if pane == crate::app::model::SolvePane::Interview => {
+                Some(Action::ResetInterview)
+            }
+            KeyCode::Char('q') if pane == crate::app::model::SolvePane::Editor => {
+                Some(Action::Quit)
+            }
+            _ => None,
+        };
+        if leader_action.is_some() {
+            return leader_action;
         }
     }
-    if solve.pane != crate::app::model::SolvePane::Editor {
-        if state.leader_pending {
-            state.leader_pending = false;
-            return match key.code {
-                KeyCode::Char('t') => Some(Action::SaveTest),
-                KeyCode::Char('s') => Some(Action::Submit),
-                KeyCode::Char('h') => Some(Action::Hint),
-                KeyCode::Char('r') if solve.pane == crate::app::model::SolvePane::Interview => {
-                    Some(Action::ResetInterview)
-                }
-                KeyCode::Char('q') if solve.pane == crate::app::model::SolvePane::Editor => {
-                    Some(Action::Quit)
-                }
-                KeyCode::Char('b') if solve.pane == crate::app::model::SolvePane::Editor => {
-                    Some(Action::Back)
-                }
-                _ => None,
-            };
-        }
-        if key.code == KeyCode::Char(' ') {
-            state.leader_pending = true;
-            return None;
-        }
+    if host_leader_eligible && key.code == KeyCode::Char(' ') {
+        state.leader_pending = true;
+        return None;
     }
-    if solve.pane != crate::app::model::SolvePane::Editor && key.code == KeyCode::Char('i') {
-        return Some(Action::InterviewFocus);
+
+    if pane == crate::app::model::SolvePane::Interview
+        && state.codex.status == crate::app::model::CodexStatus::Disclosure
+    {
+        return match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => Some(Action::InterviewDisclosure(true)),
+            KeyCode::Esc | KeyCode::Char('n') => Some(Action::InterviewDisclosure(false)),
+            _ => None,
+        };
     }
-    if solve.pane != crate::app::model::SolvePane::Editor {
+
+    if pane != crate::app::model::SolvePane::Editor {
+        if key.code == KeyCode::Char('i') {
+            return Some(Action::InterviewFocus);
+        }
         return match key.code {
             KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
             KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
@@ -138,6 +126,10 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             _ => None,
         };
     }
+    if editor_failed {
+        return None;
+    }
+
     match mode {
         Mode::Insert => match key.code {
             KeyCode::Esc => Some(Action::Editor(EditorAction::Escape)),
@@ -228,12 +220,14 @@ mod tests {
             editor_view: None,
             editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
+            accessory_panes: crate::app::model::AccessoryPaneState::default(),
             output: String::new(),
             output_scroll: 0,
             problem_scroll: 0,
             running: None,
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,
@@ -463,6 +457,107 @@ mod tests {
                 &mut state
             ),
             Some(Action::Editor(EditorAction::Insert(' ')))
+        );
+    }
+
+    #[test]
+    fn accessory_leader_routes_all_milestone_actions_and_unknown_keys_continue() {
+        let mut state = solve_state();
+        for pane in [SolvePane::Problem, SolvePane::Output, SolvePane::Interview] {
+            state.solve.as_mut().unwrap().pane = pane;
+            state.codex.composer_focused = false;
+            state.codex.status = crate::app::model::CodexStatus::Ready;
+            for (key, expected) in [
+                ('t', Action::SaveTest),
+                ('s', Action::Submit),
+                ('b', Action::Back),
+                ('c', Action::ToggleCollapse),
+            ] {
+                assert_eq!(
+                    action_for_key(
+                        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                        &mut state
+                    ),
+                    None
+                );
+                assert_eq!(
+                    action_for_key(
+                        KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                        &mut state
+                    ),
+                    Some(expected.clone()),
+                    "pane {pane:?} key {key}"
+                );
+            }
+
+            assert_eq!(
+                action_for_key(
+                    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                    &mut state
+                ),
+                None
+            );
+            assert_eq!(
+                action_for_key(
+                    KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                    &mut state
+                ),
+                Some(Action::InterviewFocus),
+                "unknown leader key must continue normal accessory routing"
+            );
+        }
+    }
+
+    #[test]
+    fn leader_precedence_respects_composer_and_disclosure() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.status = crate::app::model::CodexStatus::Ready;
+        state.codex.composer_focused = true;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::InterviewChar(' '))
+        );
+        assert!(!state.leader_pending);
+
+        state.codex.composer_focused = false;
+        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::ToggleCollapse)
+        );
+        assert_eq!(
+            state.codex.status,
+            crate::app::model::CodexStatus::Disclosure
+        );
+
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::InterviewDisclosure(true)),
+            "unknown leader key must continue into disclosure routing"
         );
     }
 

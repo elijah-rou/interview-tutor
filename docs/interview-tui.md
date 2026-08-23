@@ -19,19 +19,22 @@ The status line reports the selected language and current operation. Errors rema
 
 ## Solve panes and keys
 
-Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. Tab and Shift-Tab cycle them. Focused Problem, Output, and Interview panes scroll with Up/Down; Interview scrolls from newest toward older bounded transcript content and returns to newest when a message is appended or the session is cleared. Outside the Editor, `i` focuses the Interview composer. In the Editor it retains Vim insert behavior.
+Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. Tab and Shift-Tab always cycle all four, including collapsed accessory rails. Problem, Output, and Interview collapse independently; Editor cannot collapse. Focused expanded accessories scroll with Up/Down. Interview scrolls from newest toward older bounded transcript content and returns to newest when a message is appended or the session is cleared. Collapsing Interview closes its composer without clearing its transcript or active operation. Outside the Editor, `i` expands Interview and focuses its composer. In the Editor it retains Vim insert behavior.
 
 Global solve actions are:
 
-- Ctrl-S, F5, or `Space t`: save the current revision atomically and run local tests
-- F9 or `Space s`: submit the current revision
+- `Space t`: save the current revision atomically and run local tests
+- `Space s`: submit the current revision
 - Ctrl-C: cancel the operation selected by focus; Interview wins when it is focused and both Codex and the local runner are active, otherwise the local runner is cancelled
 - `Space h`: request a hint outside Editor Insert/Command mode and outside the active composer
 - `Space r`: clear the Interview session when Interview is focused
-- `Space b`: go back from Editor Normal mode
+- `Space b`: leave solve from Editor Normal mode or any accessory pane
+- `Space c`: collapse or expand the focused accessory; Editor reports that it cannot collapse
 - `Space q`: quit from Editor Normal mode
 
-Back and application quit are guarded when the buffer is dirty. The first identical action warns; the second discards. An edit or different action clears the confirmation. Esc never discards solve changes. Use `:TutorBack` or the reserved Normal-mode leader mappings for application navigation; native `:q` applies Neovim's own buffer/window rules and does not replace application navigation.
+F5 and F9 remain compatibility aliases for test and submit. In accessories, the Space leader precedes disclosure and scrolling; the active Interview composer instead receives typed spaces. Unknown leader keys clear the leader and continue normal accessory routing.
+
+Back atomically autosaves a dirty draft without running tests or recording an attempt, then opens the selected set's problem list directly. It first cancels and joins an active local runner. Save failure or an edit newer than the captured save keeps Solve open and dirty for retry. Clean Back opens the problem list without a save. Application quit remains separately guarded when dirty: repeat `Space q` to discard and quit. Esc never discards solve changes. `:TutorBack` uses the same Back behavior; native `:q` applies Neovim's own buffer/window rules and does not replace application navigation.
 
 ## Embedded Neovim
 
@@ -55,11 +58,11 @@ Output is bounded and sanitized. `STALE` appears only when displayed output belo
 
 ## Layout
 
-- At 100x30 and larger: Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible.
-- At 80x24: one selected pane appears behind tabs.
+- At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become narrow titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space.
+- At 80x24: one selected pane appears behind collapse-marked tabs. A collapsed accessory keeps focus on its tab while Editor renders as the content fallback.
 - Below 60x20: only a resize panel appears. It still reports the guarded `Space q` behavior and any active error.
 
-Resizing preserves the editor buffer, cursor state, operations, and displayed status.
+Resizing preserves the editor buffer, cursor state, operations, focused pane, each independent collapse state, and displayed status.
 
 ## Local source and process boundary
 
@@ -81,4 +84,4 @@ Protocol/authentication/turn failures show an error without disabling local solv
 
 SIGINT and SIGTERM cancel active work, join workers, restore terminal state and prior signal dispositions, and exit with 130 or 143. For submit, the runner worker checks shared signal state immediately after recording and before publishing completion. A signal observed by that cutoff rewrites that exact attempt to Cancelled; a later signal applies only to runtime teardown.
 
-Run `make test-pty` for the 33-case serial acceptance matrix and `make test-race` for the 20-case cancellation matrix plus repeated Rust race tests. Both use only local fake fixtures, including an explicitly configured fake Codex executable. Exact bounds and gate contents are documented in [testing](testing.md).
+Run `make test-pty` for the bounded serial acceptance matrix and `make test-race` for the 20-case cancellation matrix plus repeated Rust race tests. Both use only local fake fixtures, including an explicitly configured fake Codex executable. Exact bounds and gate contents are documented in [testing](testing.md).

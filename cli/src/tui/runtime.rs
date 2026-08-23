@@ -1112,12 +1112,14 @@ fn apply_effects(
                         editor_view: None,
                         editor_status: crate::app::model::EditorRuntimeStatus::Starting,
                         pane: SolvePane::Editor,
+                        accessory_panes: crate::app::model::AccessoryPaneState::default(),
                         output: "No test run yet".into(),
                         output_scroll: 0,
                         problem_scroll: 0,
                         running: None,
                         cancellation: None,
                         pending_save: None,
+                        pending_draft_save: None,
                         stale: false,
                         latest_run_revision: None,
                         quit_after_save: None,
@@ -1163,6 +1165,18 @@ fn apply_effects(
                         Event::RunFinished(operation, revision, intent, None, Err(error)),
                     ))
                 }
+            }
+            Effect::SaveDraft {
+                operation,
+                plan,
+                source,
+                revision,
+            } => {
+                let result = source::atomic_save(&plan.root, &plan.solution_path, &source);
+                effects.extend(reduce(
+                    state,
+                    Event::DraftSaved(operation, revision, source, result),
+                ));
             }
             Effect::CancelRun { operation } => worker.cancel(operation),
             Effect::ConnectCodex { operation } => {
@@ -1218,8 +1232,8 @@ fn apply_effects(
                 let _ = codex_worker.send(CodexWorkerCommand::Cancel { operation });
             }
             Effect::ResetCodex => codex_worker.reset(),
-            Effect::LeaveSolve => {
-                worker.leave();
+            Effect::LeaveSolve => worker.leave(),
+            Effect::StopNeovim => {
                 if let Err(error) = neovim_worker.stop_session() {
                     state.error = Some(error);
                 }
@@ -1501,8 +1515,7 @@ pub fn run(
                                 crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
                                 crate::neovim::TutorAction::Back => crate::app::Action::Back,
                                 crate::neovim::TutorAction::Collapse => {
-                                    state.status = "Editor cannot be collapsed".into();
-                                    continue;
+                                    crate::app::Action::ToggleCollapse
                                 }
                                 crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
                                 crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
@@ -2081,12 +2094,14 @@ mod tests {
             editor_view: None,
             editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Interview,
+            accessory_panes: crate::app::model::AccessoryPaneState::default(),
             output: String::new(),
             output_scroll: 0,
             problem_scroll: 0,
             running: None,
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,
@@ -2271,12 +2286,14 @@ mod tests {
             editor_view: None,
             editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
+            accessory_panes: crate::app::model::AccessoryPaneState::default(),
             output: String::new(),
             output_scroll: 0,
             problem_scroll: 0,
             running: Some((OperationId(3), 0, RunIntent::Test)),
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,

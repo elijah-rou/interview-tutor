@@ -112,29 +112,56 @@ fn footer_text(width: u16) -> &'static str {
     }
 }
 
+fn first_fitting_footer(candidates: impl IntoIterator<Item = String>, width: u16) -> String {
+    candidates
+        .into_iter()
+        .find(|candidate| UnicodeWidthStr::width(candidate.as_str()) <= usize::from(width))
+        .unwrap_or_default()
+}
+
 fn solve_footer_text(state: &AppState, width: u16) -> String {
     let solve = state
         .solve
         .as_ref()
         .expect("solve footer requires solve state");
-    let base = if solve.pane == SolvePane::Interview
+    let collapse_verb = match solve.pane {
+        SolvePane::Problem if !solve.accessory_panes.problem_expanded => "expand",
+        SolvePane::Output if !solve.accessory_panes.output_expanded => "expand",
+        SolvePane::Interview if !solve.accessory_panes.interview_expanded => "expand",
+        SolvePane::Problem | SolvePane::Output | SolvePane::Interview => "collapse",
+        SolvePane::Editor => "pane",
+    };
+    let mut candidates = if solve.pane == SolvePane::Interview
         && state.codex.status == crate::app::model::CodexStatus::Disclosure
     {
-        "y/Enter accept · n/Esc decline".to_string()
+        vec![
+            "y/Enter accept · n/Esc decline · Space t/s/b/c".to_string(),
+            "y accept · n decline · Space actions".to_string(),
+            "y accept · n decline".to_string(),
+        ]
     } else if solve.pane == SolvePane::Interview && state.codex.composer_focused {
-        "Type question · Enter send · Esc close".to_string()
+        vec![
+            "Type question · Enter send · Esc close · Tab panes".to_string(),
+            "Enter send · Esc close · Tab panes".to_string(),
+        ]
     } else {
         match (solve.pane, solve.editor.mode) {
-            (SolvePane::Editor, Mode::Normal) => {
-                "i insert · Space-h hint · F5 test · F9 submit · Tab panes".into()
-            }
-            (SolvePane::Editor, Mode::Insert) => {
-                "Esc normal · F5 test · F9 submit · Tab panes".into()
-            }
-            (SolvePane::Editor, Mode::Visual) => {
-                "Neovim Visual · F5 test · F9 submit · Tab panes".into()
-            }
-            (SolvePane::Editor, Mode::Command) => "Neovim command · Esc normal · Tab panes".into(),
+            (SolvePane::Editor, Mode::Normal) => vec![
+                "Space t test · s submit · b back · Tab panes".to_string(),
+                "Space t/s/b · Tab panes".to_string(),
+            ],
+            (SolvePane::Editor, Mode::Insert) => vec![
+                "Esc returns to Normal for Space actions · Tab panes".to_string(),
+                "Esc normal · Tab panes".to_string(),
+            ],
+            (SolvePane::Editor, Mode::Visual) => vec![
+                "Neovim Visual · Esc then Space actions · Tab panes".to_string(),
+                "Visual · Esc normal · Tab panes".to_string(),
+            ],
+            (SolvePane::Editor, Mode::Command) => vec![
+                "Neovim command · Esc then Space actions · Tab panes".to_string(),
+                "Command · Esc normal · Tab panes".to_string(),
+            ],
             (SolvePane::Interview, _)
                 if matches!(
                     state.codex.status,
@@ -142,12 +169,25 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
                         | crate::app::model::CodexStatus::Disconnected
                 ) =>
             {
-                "i retry · Space-h hint · Space-r reset · Tab panes".into()
+                vec![
+                    format!(
+                        "i retry · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                    ),
+                    format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+                ]
             }
-            (SolvePane::Interview, _) => "i ask · ↑/↓ scroll · Space-h hint · Space-r reset".into(),
-            (SolvePane::Problem | SolvePane::Output, _) => {
-                "i interview · ↑/↓ scroll · Space-h hint · Tab panes".into()
-            }
+            (SolvePane::Interview, _) => vec![
+                format!(
+                    "i ask · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                ),
+                format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+            ],
+            (SolvePane::Problem | SolvePane::Output, _) => vec![
+                format!(
+                    "i interview · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                ),
+                format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+            ],
         }
     };
     let codex_active = state.codex.active.is_some() || state.codex.connecting.is_some();
@@ -159,21 +199,18 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
     } else {
         None
     };
-    let expanded = cancel.map_or_else(
-        || base.clone(),
-        |target| format!("{base} · Ctrl-C {target}"),
-    );
-    if UnicodeWidthStr::width(expanded.as_str()) <= usize::from(width) {
-        return expanded;
-    }
     if let Some(target) = cancel {
-        let compact = format!("F5 test · F9 submit · Tab panes · Ctrl-C {target}");
-        if UnicodeWidthStr::width(compact.as_str()) <= usize::from(width) {
-            return compact;
-        }
+        let mut with_cancel = candidates
+            .iter()
+            .map(|candidate| format!("{candidate} · Ctrl-C {target}"))
+            .collect::<Vec<_>>();
+        with_cancel.push(format!("Space actions · Ctrl-C {target} · Tab panes"));
+        with_cancel.append(&mut candidates);
+        candidates = with_cancel;
     }
-    assert!(UnicodeWidthStr::width(base.as_str()) <= 60);
-    base
+    candidates.push("Space actions · Tab panes".into());
+    candidates.push("Tab panes".into());
+    first_fitting_footer(candidates, width)
 }
 
 fn progress(state: &AppState) -> Paragraph<'static> {
@@ -365,9 +402,9 @@ fn solve_problem(state: &AppState) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
     Paragraph::new(markdown_text(&solve.statement))
         .block(block(if solve.pane == SolvePane::Problem {
-            "Problem / Examples [active]"
+            "Problem / Examples [active] [-]"
         } else {
-            "Problem / Examples"
+            "Problem / Examples [-]"
         }))
         .wrap(Wrap { trim: false })
         .scroll((solve.problem_scroll, 0))
@@ -376,9 +413,9 @@ fn solve_output(state: &AppState) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
     Paragraph::new(solve.output.clone())
         .block(block(if solve.pane == SolvePane::Output {
-            "Output / Test [active]"
+            "Output / Test [active] [-]"
         } else {
-            "Output / Test"
+            "Output / Test [-]"
         }))
         .wrap(Wrap { trim: false })
         .scroll((solve.output_scroll, 0))
@@ -460,34 +497,121 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let offset = latest_offset.saturating_sub(retained_below);
     Paragraph::new(lines)
         .block(block(if solve.pane == SolvePane::Interview {
-            "Interview [active]"
+            "Interview [active] [-]"
         } else {
-            "Interview"
+            "Interview [-]"
         }))
         .wrap(Wrap { trim: false })
         .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
 }
+const FULL_SOLVE_WIDTH: u16 = 100;
+const FULL_SOLVE_CONTENT_HEIGHT: u16 = 27;
+const SIDE_RAIL_WIDTH: u16 = 16;
+
+#[derive(Clone, Copy)]
+struct FullSolveLayout {
+    problem: Rect,
+    editor: Rect,
+    interview: Rect,
+    output: Rect,
+}
+
+fn accessory_expanded(state: &AppState, pane: SolvePane) -> bool {
+    let solve = state.solve.as_ref().expect("solve state");
+    match pane {
+        SolvePane::Editor => true,
+        SolvePane::Problem => solve.accessory_panes.problem_expanded,
+        SolvePane::Output => solve.accessory_panes.output_expanded,
+        SolvePane::Interview => solve.accessory_panes.interview_expanded,
+    }
+}
+
+fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
+    if area.width < FULL_SOLVE_WIDTH || area.height < FULL_SOLVE_CONTENT_HEIGHT {
+        return None;
+    }
+    let solve = state.solve.as_ref()?;
+    let vertical = if solve.accessory_panes.output_expanded {
+        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area)
+    };
+    let problem_width = if solve.accessory_panes.problem_expanded {
+        area.width.saturating_mul(30) / 100
+    } else {
+        SIDE_RAIL_WIDTH
+    };
+    let interview_width = if solve.accessory_panes.interview_expanded {
+        area.width.saturating_mul(25) / 100
+    } else {
+        SIDE_RAIL_WIDTH
+    };
+    assert!(problem_width.saturating_add(interview_width) < area.width);
+    let upper = Layout::horizontal([
+        Constraint::Length(problem_width),
+        Constraint::Min(1),
+        Constraint::Length(interview_width),
+    ])
+    .split(vertical[0]);
+    Some(FullSolveLayout {
+        problem: upper[0],
+        editor: upper[1],
+        interview: upper[2],
+        output: vertical[1],
+    })
+}
+
+fn collapsed_rail(label: &str, active: bool) -> Paragraph<'static> {
+    let title = if active {
+        format!("*{label} [+]")
+    } else {
+        format!("{label} [+]")
+    };
+    Paragraph::new("Space-c expand")
+        .block(block(&title))
+        .wrap(Wrap { trim: true })
+}
+
+fn compact_pane_label(label: &str, expanded: bool) -> Line<'static> {
+    Line::from(format!("{label} {}", if expanded { "[-]" } else { "[+]" }))
+}
+
 fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let solve = state.solve.as_ref().unwrap();
-    if area.width >= 100 && area.height >= 28 {
-        let vertical =
-            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area);
-        let upper = Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(45),
-            Constraint::Percentage(25),
-        ])
-        .split(vertical[0]);
-        frame.render_widget(solve_problem(state), upper[0]);
-        solve_editor(frame, state, upper[1]);
-        frame.render_widget(solve_interview(state, upper[2]), upper[2]);
-        frame.render_widget(solve_output(state), vertical[1]);
+    if let Some(layout) = full_solve_layout(state, area) {
+        if solve.accessory_panes.problem_expanded {
+            frame.render_widget(solve_problem(state), layout.problem);
+        } else {
+            frame.render_widget(
+                collapsed_rail("Problem", solve.pane == SolvePane::Problem),
+                layout.problem,
+            );
+        }
+        solve_editor(frame, state, layout.editor);
+        if solve.accessory_panes.interview_expanded {
+            frame.render_widget(solve_interview(state, layout.interview), layout.interview);
+        } else {
+            frame.render_widget(
+                collapsed_rail("Interview", solve.pane == SolvePane::Interview),
+                layout.interview,
+            );
+        }
+        if solve.accessory_panes.output_expanded {
+            frame.render_widget(solve_output(state), layout.output);
+        } else {
+            frame.render_widget(
+                collapsed_rail("Output", solve.pane == SolvePane::Output),
+                layout.output,
+            );
+        }
     } else {
         let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
-        let panes = ["Editor", "Problem", "Output", "Interview"]
-            .into_iter()
-            .map(Line::from)
-            .collect::<Vec<_>>();
+        let panes = vec![
+            Line::from("Editor"),
+            compact_pane_label("Problem", solve.accessory_panes.problem_expanded),
+            compact_pane_label("Output", solve.accessory_panes.output_expanded),
+            compact_pane_label("Interview", solve.accessory_panes.interview_expanded),
+        ];
         let selected = match solve.pane {
             SolvePane::Editor => 0,
             SolvePane::Problem => 1,
@@ -502,10 +626,17 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
         );
         match solve.pane {
             SolvePane::Editor => solve_editor(frame, state, chunks[1]),
-            SolvePane::Problem => frame.render_widget(solve_problem(state), chunks[1]),
-            SolvePane::Output => frame.render_widget(solve_output(state), chunks[1]),
-            SolvePane::Interview => {
+            SolvePane::Problem if solve.accessory_panes.problem_expanded => {
+                frame.render_widget(solve_problem(state), chunks[1])
+            }
+            SolvePane::Output if solve.accessory_panes.output_expanded => {
+                frame.render_widget(solve_output(state), chunks[1])
+            }
+            SolvePane::Interview if solve.accessory_panes.interview_expanded => {
                 frame.render_widget(solve_interview(state, chunks[1]), chunks[1])
+            }
+            SolvePane::Problem | SolvePane::Output | SolvePane::Interview => {
+                solve_editor(frame, state, chunks[1])
             }
         }
     }
@@ -517,16 +648,9 @@ pub fn neovim_grid_area(state: &AppState, width: u16, height: u16) -> Option<Rec
         return None;
     }
     let content = Rect::new(0, 2, width, height.saturating_sub(3));
-    let editor = if content.width >= 100 && content.height >= 28 {
-        let vertical = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(content);
-        Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(45),
-            Constraint::Percentage(25),
-        ])
-        .split(vertical[0])[1]
-    } else if solve.pane == SolvePane::Editor {
+    let editor = if let Some(layout) = full_solve_layout(state, content) {
+        layout.editor
+    } else if solve.pane == SolvePane::Editor || !accessory_expanded(state, solve.pane) {
         Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(content)[1]
     } else {
         return None;
@@ -644,7 +768,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         frame.render_widget(Clear, popup);
         let help = if state.screen == Screen::Solve {
             format!(
-                "Solve help\n\nCurrent: {}\nEditor Normal: i inserts\nProblem/Output/Interview: i focuses Interview\nSpace-h hints outside Insert/Command/composer\n↑/↓ scrolls the focused non-editor pane\nTab/Shift-Tab changes pane · F5 test · F9 submit",
+                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane\nEditor cannot collapse; Tab/Shift-Tab visits collapsed rails\nProblem/Output/Interview: i expands and focuses Interview\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
@@ -906,12 +1030,14 @@ mod tests {
             editor_view: None,
             editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
+            accessory_panes: crate::app::model::AccessoryPaneState::default(),
             output: "compiler error".into(),
             output_scroll: 0,
             problem_scroll: 0,
             running: None,
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,
@@ -1016,6 +1142,76 @@ mod tests {
     }
 
     #[test]
+    fn collapse_combinations_render_full_rails_compact_markers_and_editor_fallback() {
+        for mask in 0_u8..8 {
+            let mut state = solve_state();
+            let problem_expanded = mask & 1 == 0;
+            let output_expanded = mask & 2 == 0;
+            let interview_expanded = mask & 4 == 0;
+            state.solve.as_mut().unwrap().accessory_panes = crate::app::model::AccessoryPaneState {
+                problem_expanded,
+                output_expanded,
+                interview_expanded,
+            };
+
+            let full = rendered(&state, 100, 30);
+            assert!(!full.contains("Solve panes"), "mask {mask}");
+            assert_eq!(full.contains("Problem [+]"), !problem_expanded);
+            assert_eq!(full.contains("Output [+]"), !output_expanded);
+            assert_eq!(full.contains("Interview [+]"), !interview_expanded);
+
+            let compact = rendered(&state, 80, 24);
+            assert!(compact.contains("Solve panes"), "mask {mask}");
+            assert_eq!(compact.contains("Problem [+]"), !problem_expanded);
+            assert_eq!(compact.contains("Output [+]"), !output_expanded);
+            assert_eq!(compact.contains("Interview [+]"), !interview_expanded);
+            assert!(rendered(&state, 59, 19).contains("Terminal too small"));
+        }
+
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .problem_expanded = false;
+        let compact = rendered(&state, 80, 24);
+        assert!(compact.contains("Problem [+]"));
+        assert!(compact.contains("Waiting for Neovim redraw"));
+        assert!(neovim_grid_area(&state, 80, 24).is_some());
+    }
+
+    #[test]
+    fn collapsed_accessories_redistribute_full_editor_space() {
+        let mut state = solve_state();
+        let base = neovim_grid_size(&state, 100, 30).unwrap();
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .problem_expanded = false;
+        let side_collapsed = neovim_grid_size(&state, 100, 30).unwrap();
+        assert!(side_collapsed.0 > base.0);
+        assert_eq!(side_collapsed.1, base.1);
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .output_expanded = false;
+        let output_collapsed = neovim_grid_size(&state, 100, 30).unwrap();
+        assert!(output_collapsed.0 >= side_collapsed.0);
+        assert!(output_collapsed.1 > side_collapsed.1);
+
+        let preserved = state.solve.as_ref().unwrap().accessory_panes;
+        assert!(rendered(&state, 80, 24).contains("Problem [+]"));
+        assert!(rendered(&state, 100, 30).contains("Problem [+]"));
+        assert_eq!(state.solve.as_ref().unwrap().accessory_panes, preserved);
+    }
+
+    #[test]
     fn solve_header_preserves_exact_codex_state_and_memory_badge_at_supported_widths() {
         let mut state = solve_state();
         for status in [
@@ -1068,9 +1264,10 @@ mod tests {
     #[test]
     fn solve_footer_reports_context_and_cancel_target_without_clipping() {
         let mut state = solve_state();
-        assert!(rendered_footer(&state, 80).contains("i insert"));
+        assert!(rendered_footer(&state, 80).contains("Space t test"));
+        assert!(!rendered_footer(&state, 80).contains("F5"));
         state.solve.as_mut().unwrap().pane = SolvePane::Problem;
-        assert!(rendered_footer(&state, 80).contains("i interview"));
+        assert!(rendered_footer(&state, 80).contains("Space t/s/b"));
         state.solve.as_mut().unwrap().running = Some((
             crate::app::model::OperationId(1),
             0,
@@ -1084,9 +1281,16 @@ mod tests {
             crate::codex::prompt::Mode::Interviewer,
         ));
         assert!(rendered_footer(&state, 80).contains("Ctrl-C Codex"));
-        for width in [60_u16, 80, 120] {
+        for width in [1_u16, 10, 20, 60, 80, 120] {
             assert!(rendered_footer(&state, width).width() <= usize::from(width));
         }
+
+        state.codex.active = None;
+        state.solve.as_mut().unwrap().running = None;
+        state.show_help = true;
+        let help = rendered(&state, 100, 30);
+        assert!(help.contains("Space leader"));
+        assert!(help.contains("F5 test · F9 submit"));
     }
 
     #[test]

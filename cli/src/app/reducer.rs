@@ -141,6 +141,22 @@ fn finalize_codex_turn_and_dispatch_review(
     effects
 }
 
+fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
+    state.solve = None;
+    state.codex.clear_session();
+    state.screen = Screen::ProblemList;
+    state.focus = Focus::Main;
+    state.detail_scroll = 0;
+    state.progress_scroll = 0;
+    let mut effects = load_effect(state);
+    effects.push(Effect::ResetCodex);
+    effects.push(Effect::StopNeovim);
+    if drain_runner {
+        effects.push(Effect::LeaveSolve);
+    }
+    effects
+}
+
 fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     let Some(solve) = state.solve.as_mut() else {
         return Vec::new();
@@ -148,22 +164,11 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     state.error = None;
     solve.editor.error = None;
 
-    let requested_discard = match action {
-        Action::Back => Some(DiscardAction::Back),
-        Action::Quit => Some(DiscardAction::Quit),
-        _ => None,
-    };
-    if let Some(discard) = requested_discard
-        && solve.editor.mode == Mode::Normal
-        && solve.editor.dirty()
-    {
-        if solve.discard_confirmation != Some(discard) {
-            solve.discard_confirmation = Some(discard);
-            state.status = match discard {
-                DiscardAction::Back => "Unsaved changes · Space-b again to discard".into(),
-                DiscardAction::Quit => "Unsaved changes · Space-q again to quit".into(),
-            };
-            state.error = Some("unsaved changes; repeat the same guarded action to discard".into());
+    if action == Action::Quit && solve.editor.mode == Mode::Normal && solve.editor.dirty() {
+        if solve.discard_confirmation != Some(DiscardAction::Quit) {
+            solve.discard_confirmation = Some(DiscardAction::Quit);
+            state.status = "Unsaved changes · Space-q again to quit".into();
+            state.error = Some("unsaved changes; repeat quit to discard".into());
             return Vec::new();
         }
     } else {
@@ -173,6 +178,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::InterviewFocus => {
             solve.pane = SolvePane::Interview;
+            solve.accessory_panes.interview_expanded = true;
             if !state.codex.enabled {
                 state.codex.status = CodexStatus::Disabled;
                 state.codex.composer_focused = false;
@@ -357,17 +363,56 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
         Action::Back => {
-            let effect = solve
-                .running
-                .map(|(operation, _, _)| Effect::CancelRun { operation });
-            state.solve = None;
-            state.codex.clear_session();
-            state.screen = Screen::ProblemDetail;
-            state.status = "Ready".into();
-            let mut effects = effect.into_iter().collect::<Vec<_>>();
-            effects.push(Effect::ResetCodex);
-            effects.push(Effect::LeaveSolve);
-            effects
+            if !solve.editor.dirty() {
+                return enter_problem_list(state, true);
+            }
+            if solve.pending_draft_save.is_some() {
+                state.status = "Draft save already in progress…".into();
+                return Vec::new();
+            }
+            let operation = next_operation(state);
+            let solve = state.solve.as_mut().expect("solve exists");
+            let revision = solve.editor.revision;
+            let source = solve.editor.text().to_string();
+            solve.pending_draft_save = Some((operation, revision, source.clone()));
+            solve.running = None;
+            solve.cancellation = None;
+            solve.pending_save = None;
+            solve.quit_after_save = None;
+            solve.refresh_after_submit = false;
+            solve.submitted_source = None;
+            state.status = "Saving draft…".into();
+            vec![
+                Effect::SaveDraft {
+                    operation,
+                    plan: solve.plan.clone(),
+                    source,
+                    revision,
+                },
+                Effect::LeaveSolve,
+            ]
+        }
+        Action::ToggleCollapse => {
+            match solve.pane {
+                SolvePane::Editor => {
+                    state.status = "Editor cannot be collapsed".into();
+                }
+                SolvePane::Problem => {
+                    solve.accessory_panes.problem_expanded =
+                        !solve.accessory_panes.problem_expanded;
+                }
+                SolvePane::Output => {
+                    solve.accessory_panes.output_expanded = !solve.accessory_panes.output_expanded;
+                }
+                SolvePane::Interview => {
+                    solve.accessory_panes.interview_expanded =
+                        !solve.accessory_panes.interview_expanded;
+                    if !solve.accessory_panes.interview_expanded {
+                        state.codex.composer_focused = false;
+                    }
+                }
+            }
+            Vec::new()
         }
         Action::NextFocus | Action::PreviousFocus => {
             state.codex.composer_focused = false;
@@ -667,6 +712,39 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.codex.status = CodexStatus::Disconnected;
                 state.error = Some(error);
                 return Vec::new();
+            }
+            Event::DraftSaved(operation, revision, source, result) => {
+                let Some(solve) = state.solve.as_mut() else {
+                    return Vec::new();
+                };
+                if !solve.pending_draft_save.as_ref().is_some_and(|pending| {
+                    (pending.0, pending.1, pending.2.as_str())
+                        == (operation, revision, source.as_str())
+                }) {
+                    return Vec::new();
+                }
+                solve.pending_draft_save = None;
+                match result {
+                    Err(error) => {
+                        state.status = "Draft save failed · still in Solve".into();
+                        state.error = Some(format!(
+                            "Draft was not saved: {error}. The editor remains open and dirty; retry Space-b."
+                        ));
+                        return Vec::new();
+                    }
+                    Ok(()) => {
+                        solve.editor.mark_saved(revision, &source);
+                        if solve.editor.revision == revision && solve.editor.text() == source {
+                            return enter_problem_list(state, false);
+                        }
+                        state.status = "Older draft saved · newer edits remain in Solve".into();
+                        state.error = Some(
+                            "The source changed while the draft was saving. Newer edits remain open and dirty; retry Space-b."
+                                .into(),
+                        );
+                        return Vec::new();
+                    }
+                }
             }
             Event::RunFinished(operation, revision, intent, saved_source, result) => {
                 let Some(solve) = state.solve.as_mut() else {
@@ -1018,6 +1096,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             | Action::InterviewDisclosure(_)
             | Action::Hint
             | Action::ResetInterview
+            | Action::ToggleCollapse
             | Action::Editor(_),
         ) => {}
         Event::SolveOpened(operation, result) => {
@@ -1052,7 +1131,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         | Event::NeovimView(_)
         | Event::NeovimWarning(_)
         | Event::NeovimFailed(_) => {}
-        Event::RunFinished(_, _, _, _, _) => {}
+        Event::RunFinished(_, _, _, _, _) | Event::DraftSaved(_, _, _, _) => {}
         Event::Loaded(operation, result) => {
             if state.active_operation != Some(operation) {
                 return Vec::new();
@@ -1226,12 +1305,14 @@ mod tests {
             editor_view: None,
             editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
+            accessory_panes: crate::app::model::AccessoryPaneState::default(),
             output: String::new(),
             output_scroll: 0,
             problem_scroll: 0,
             running: None,
             cancellation: None,
             pending_save: None,
+            pending_draft_save: None,
             stale: false,
             latest_run_revision: None,
             quit_after_save: None,
@@ -1240,6 +1321,206 @@ mod tests {
             submitted_source: None,
         });
         state
+    }
+
+    #[test]
+    fn accessory_panes_collapse_independently_and_interview_focus_expands() {
+        let mut state = solve_state();
+        state.codex.status = CodexStatus::Thinking;
+        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        state.codex.composer_focused = true;
+        state
+            .codex
+            .push_message("Interviewer".into(), "preserved".into());
+
+        for pane in [SolvePane::Problem, SolvePane::Output, SolvePane::Interview] {
+            state.solve.as_mut().unwrap().pane = pane;
+            reduce(&mut state, Event::Command(Action::ToggleCollapse));
+        }
+        let solve = state.solve.as_ref().unwrap();
+        assert!(!solve.accessory_panes.problem_expanded);
+        assert!(!solve.accessory_panes.output_expanded);
+        assert!(!solve.accessory_panes.interview_expanded);
+        assert!(!state.codex.composer_focused);
+        assert_eq!(
+            state.codex.active,
+            Some((OperationId(90), 0, CodexMode::Interviewer))
+        );
+        assert_eq!(state.codex.messages.last().unwrap().1, "preserved");
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Editor);
+        assert!(
+            !state
+                .solve
+                .as_ref()
+                .unwrap()
+                .accessory_panes
+                .interview_expanded
+        );
+        reduce(&mut state, Event::Command(Action::InterviewFocus));
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Interview);
+        assert!(
+            state
+                .solve
+                .as_ref()
+                .unwrap()
+                .accessory_panes
+                .interview_expanded
+        );
+        assert_eq!(
+            state.codex.active,
+            Some((OperationId(90), 0, CodexMode::Interviewer))
+        );
+
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        reduce(&mut state, Event::Command(Action::ToggleCollapse));
+        assert_eq!(state.status, "Editor cannot be collapsed");
+    }
+
+    #[test]
+    fn dirty_back_drains_before_draft_save_and_success_enters_scoped_list() {
+        let mut state = solve_state();
+        reduce(
+            &mut state,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "newest draft\n".into(),
+                mode: "n".into(),
+                changedtick: 8,
+            }),
+        );
+        let running = reduce(&mut state, Event::Command(Action::SaveTest));
+        assert!(matches!(running.as_slice(), [Effect::SaveRun { .. }]));
+
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        let [
+            Effect::SaveDraft {
+                operation,
+                revision,
+                source,
+                ..
+            },
+            Effect::LeaveSolve,
+        ] = effects.as_slice()
+        else {
+            panic!("runner must drain before the LIFO draft-save effect")
+        };
+        assert_eq!(*revision, 1);
+        assert_eq!(source, "newest draft\n");
+        assert!(state.solve.as_ref().unwrap().running.is_none());
+        assert!(state.solve.as_ref().unwrap().pending_save.is_none());
+        assert_eq!(state.screen, Screen::Solve);
+
+        let completion = reduce(
+            &mut state,
+            Event::DraftSaved(*operation, *revision, source.clone(), Ok(())),
+        );
+        assert_eq!(state.screen, Screen::ProblemList);
+        assert!(state.solve.is_none());
+        assert!(
+            completion
+                .iter()
+                .any(|effect| matches!(effect, Effect::Load {
+            scope: LoadScope::ProblemSet(slug),
+            ..
+        } if slug == "a"))
+        );
+        assert!(
+            completion
+                .iter()
+                .any(|effect| matches!(effect, Effect::ResetCodex))
+        );
+        assert!(
+            completion
+                .iter()
+                .any(|effect| matches!(effect, Effect::StopNeovim))
+        );
+    }
+
+    #[test]
+    fn draft_save_failure_or_newer_edit_stays_dirty_in_solve() {
+        let mut failed = solve_state();
+        reduce(
+            &mut failed,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "failed draft".into(),
+                mode: "n".into(),
+                changedtick: 2,
+            }),
+        );
+        let save = reduce(&mut failed, Event::Command(Action::Back));
+        let Effect::SaveDraft {
+            operation,
+            revision,
+            source,
+            ..
+        } = save[0].clone()
+        else {
+            panic!("expected draft save")
+        };
+        assert!(
+            reduce(
+                &mut failed,
+                Event::DraftSaved(operation, revision, source, Err("read-only target".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(failed.screen, Screen::Solve);
+        assert!(failed.solve.as_ref().unwrap().editor.dirty());
+        assert!(failed.error.as_deref().unwrap().contains("retry Space-b"));
+
+        let mut newer = solve_state();
+        reduce(
+            &mut newer,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "captured draft".into(),
+                mode: "n".into(),
+                changedtick: 3,
+            }),
+        );
+        let save = reduce(&mut newer, Event::Command(Action::Back));
+        let Effect::SaveDraft {
+            operation,
+            revision,
+            source,
+            ..
+        } = save[0].clone()
+        else {
+            panic!("expected draft save")
+        };
+        reduce(
+            &mut newer,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "newer edit".into(),
+                mode: "n".into(),
+                changedtick: 4,
+            }),
+        );
+        assert!(
+            reduce(
+                &mut newer,
+                Event::DraftSaved(operation, revision, source, Ok(()))
+            )
+            .is_empty()
+        );
+        assert_eq!(newer.screen, Screen::Solve);
+        let solve = newer.solve.as_ref().unwrap();
+        assert!(solve.editor.dirty());
+        assert_eq!(solve.editor.text(), "newer edit");
+        assert!(newer.error.as_deref().unwrap().contains("Newer edits"));
+    }
+
+    #[test]
+    fn clean_back_enters_selected_set_problem_list_directly() {
+        let mut state = solve_state();
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(state.screen, Screen::ProblemList);
+        assert!(state.solve.is_none());
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Load {
+            scope: LoadScope::ProblemSet(slug),
+            ..
+        } if slug == "a")));
+        assert!(matches!(effects.last(), Some(Effect::LeaveSolve)));
     }
 
     #[test]
@@ -1511,7 +1792,7 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::LeaveSolve))
         );
         assert!(state.solve.is_none());
-        assert_eq!(state.screen, Screen::ProblemDetail);
+        assert_eq!(state.screen, Screen::ProblemList);
     }
 
     #[test]
