@@ -1,6 +1,6 @@
 # Rust control plane
 
-`cli/` is a standalone Rust crate containing the catalog/database API, bounded local runner, terminal browser and solve editor, and optional Codex app-server client. The repository launchers set the project root and invoke its two binaries:
+`cli/` is a standalone Rust crate containing the catalog/database API, bounded local runner, terminal browser and solve editor, and backend-neutral interviewer boundary with Pi RPC and Codex app-server transports. The repository launchers set the project root and invoke its two binaries:
 
 ```console
 ./practice --help
@@ -32,7 +32,7 @@ cargo test --manifest-path cli/Cargo.toml --locked -- --test-threads=1
 
 `--db` is a global `practice` flag and an `interview` flag. Resolution is `--db` > `PRACTICE_DATABASE_URL` > `PRACTICE_DB_PATH` > legacy `BLIND75_DATABASE_URL`/`BLIND75_DB_PATH` > `.turso/progress.db`. On first open the CLI creates the parent directory and database, migrates a supported older schema, and reconciles `catalog/problems.json` plus `problem_sets/*.json`.
 
-`./interview --set ID --language ID --neovim PATH --no-codex` selects an initial set, enabled language, required clean Neovim executable, and disables all Codex probing/spawning. Without `--set`, the TUI starts at the set menu. Without `--language`, it selects Python when enabled and otherwise the first enabled language. Neovim resolves from `--neovim`, `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`, then `PATH`; a compatible trusted executable is required to solve. `--no-codex` overrides the default available Codex integration; local solve does not depend on it.
+`./interview --set ID --language ID --neovim PATH --interviewer pi|codex|none` selects an initial set, enabled language, required clean Neovim executable, and one interviewer transport. Interviewer precedence is explicit CLI, legacy `--no-codex` as `none`, `INTERVIEW_TUTOR_INTERVIEWER`, then default `pi`; selected invalid/empty values and CLI conflicts fail. There is no backend fallback. Neovim resolves from `--neovim`, `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`, then `PATH`. Pi and Codex resolve from their `INTERVIEW_TUTOR_*_EXECUTABLE` variables then `PATH`. `none` probes and spawns neither interviewer; local solve does not depend on an interviewer.
 
 ## Solve behavior
 
@@ -47,6 +47,8 @@ The host accepts at most 1 MiB and 100,000 logical lines. An oversized native op
 - `source.rs` and `editor.rs`: anchored atomic I/O and bounded Unicode-grapheme editing/highlighting.
 - `runner.rs` and `signals.rs`: shell-free execution, process groups, bounded output/events, cancellation, and signal finalization.
 - `app/` and `tui/`: pure effects/reducer state plus the terminal runtime and worker channels.
-- `codex/`: disclosure payloads, exact-version app-server protocol, ephemeral sessions, and memory-only transcript.
+- `interviewer/`: backend selection, typed errors, shared prompt/envelope validation, hint accounting, and bounded memory-only transcript.
+- `pi/`: pinned Pi 0.84.2 RPC transport with fresh per-turn processes and strict JSONL validation.
+- `codex/`: exact-version Codex app-server compatibility transport.
 
 `runner::execute` is synchronous so the CLI can call it directly and the TUI can place it on one worker thread. Defaults are one direct child, a 30-second wall timeout, 250-ms TERM grace, 256-KiB rendered output, 8-KiB reads, and 64 queued events. Event delivery is nonblocking; the bounded final `ExecutionResult` is authoritative. The TUI reuses the same execution plan and recording APIs rather than parsing CLI output. See [architecture](../docs/architecture.md) and [testing](../docs/testing.md).

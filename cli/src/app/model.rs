@@ -1,9 +1,9 @@
 use super::effects::RunIntent;
-use crate::codex::prompt::Mode as CodexMode;
 use crate::database::{
     Difficulty, EnabledLanguage, MAX_STATEMENT_LENGTH, ProblemImplementation, ProgressSummary,
 };
 use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES};
+use crate::interviewer::Mode as InterviewerMode;
 use crate::runner::{CancellationToken, ExecutionPlan};
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
 pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CodexStatus {
+pub enum InterviewerStatus {
     Disabled,
     Offline,
     Disclosure,
@@ -28,7 +28,7 @@ pub enum CodexStatus {
     ProtocolError,
 }
 
-impl CodexStatus {
+impl InterviewerStatus {
     pub fn label(self) -> &'static str {
         match self {
             Self::Disabled => "Disabled",
@@ -47,9 +47,10 @@ impl CodexStatus {
 }
 
 #[derive(Clone)]
-pub struct CodexUi {
+pub struct InterviewerUi {
+    pub backend: crate::interviewer::Backend,
     pub enabled: bool,
-    pub status: CodexStatus,
+    pub status: InterviewerStatus,
     pub disclosure_accepted: bool,
     pub composer_focused: bool,
     pub composer: String,
@@ -57,18 +58,29 @@ pub struct CodexUi {
     /// Number of wrapped transcript rows to retain below the visible viewport.
     pub scroll: u16,
     pub connecting: Option<OperationId>,
-    pub active: Option<(OperationId, u64, CodexMode)>,
+    pub active: Option<(OperationId, u64, InterviewerMode)>,
     pub hint_revision: Option<u64>,
     pub hint_count: u8,
     pub submission_recorded: bool,
     pub pending_submission_review: Option<RecordedSubmissionReview>,
 }
 
-impl Default for CodexUi {
+impl Default for InterviewerUi {
     fn default() -> Self {
+        Self::new(crate::interviewer::Backend::Pi)
+    }
+}
+
+impl InterviewerUi {
+    pub fn new(backend: crate::interviewer::Backend) -> Self {
         Self {
-            enabled: true,
-            status: CodexStatus::Offline,
+            backend,
+            enabled: backend.enabled(),
+            status: if backend.enabled() {
+                InterviewerStatus::Offline
+            } else {
+                InterviewerStatus::Disabled
+            },
             disclosure_accepted: false,
             composer_focused: false,
             composer: String::new(),
@@ -82,9 +94,7 @@ impl Default for CodexUi {
             pending_submission_review: None,
         }
     }
-}
 
-impl CodexUi {
     pub fn push_message(&mut self, label: String, message: String) {
         self.messages.push((label, message));
         while self.messages.len() > 128
@@ -113,9 +123,9 @@ impl CodexUi {
         self.pending_submission_review = None;
         self.composer_focused = false;
         self.status = if self.enabled {
-            CodexStatus::Offline
+            InterviewerStatus::Offline
         } else {
-            CodexStatus::Disabled
+            InterviewerStatus::Disabled
         };
     }
 
@@ -123,7 +133,7 @@ impl CodexUi {
         self.clear_session();
         self.disclosure_accepted = false;
         self.enabled = false;
-        self.status = CodexStatus::Disabled;
+        self.status = InterviewerStatus::Disabled;
     }
 }
 
@@ -395,12 +405,20 @@ pub struct AppState {
     pub error: Option<String>,
     pub show_help: bool,
     pub leader_pending: bool,
-    pub codex: CodexUi,
+    pub interviewer: InterviewerUi,
     pub quit: bool,
 }
 
 impl AppState {
     pub fn new(languages: Vec<EnabledLanguage>, language_index: usize) -> Self {
+        Self::new_with_interviewer(languages, language_index, crate::interviewer::Backend::Pi)
+    }
+
+    pub fn new_with_interviewer(
+        languages: Vec<EnabledLanguage>,
+        language_index: usize,
+        interviewer_backend: crate::interviewer::Backend,
+    ) -> Self {
         assert!(languages.len() <= MAX_ROWS);
         assert!(languages.is_empty() || language_index < languages.len());
         Self {
@@ -422,7 +440,7 @@ impl AppState {
             error: None,
             show_help: false,
             leader_pending: false,
-            codex: CodexUi::default(),
+            interviewer: InterviewerUi::new(interviewer_backend),
             quit: false,
         }
     }
@@ -433,8 +451,8 @@ impl AppState {
             .map(|item| item.slug.as_str())
     }
 
-    pub fn disable_codex(&mut self) {
-        self.codex.disable();
+    pub fn disable_interviewer(&mut self) {
+        self.interviewer.disable();
     }
 }
 
@@ -445,26 +463,26 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn disabling_codex_clears_session_state_and_is_sticky_across_solve_sessions() {
+    fn disabling_interviewer_clears_session_state_and_is_sticky_across_solve_sessions() {
         let mut state = AppState::new(Vec::new(), 0);
-        state.codex.status = CodexStatus::Ready;
-        state.codex.disclosure_accepted = true;
-        state.codex.composer_focused = true;
-        state.codex.composer = "private question".into();
+        state.interviewer.status = InterviewerStatus::Ready;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.composer_focused = true;
+        state.interviewer.composer = "private question".into();
         state
-            .codex
+            .interviewer
             .push_message("Interviewer".into(), "private response".into());
 
-        state.disable_codex();
-        assert!(!state.codex.enabled);
-        assert_eq!(state.codex.status, CodexStatus::Disabled);
-        assert!(!state.codex.disclosure_accepted);
-        assert!(!state.codex.composer_focused);
-        assert!(state.codex.composer.is_empty());
-        assert!(state.codex.messages.is_empty());
+        state.disable_interviewer();
+        assert!(!state.interviewer.enabled);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Disabled);
+        assert!(!state.interviewer.disclosure_accepted);
+        assert!(!state.interviewer.composer_focused);
+        assert!(state.interviewer.composer.is_empty());
+        assert!(state.interviewer.messages.is_empty());
 
-        state.codex.clear_session();
-        assert_eq!(state.codex.status, CodexStatus::Disabled);
+        state.interviewer.clear_session();
+        assert_eq!(state.interviewer.status, InterviewerStatus::Disabled);
     }
 
     #[test]

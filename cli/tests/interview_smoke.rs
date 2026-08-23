@@ -12,6 +12,8 @@ fn binary_help_documents_startup_flags() {
     assert!(stdout.contains("--db"));
     assert!(stdout.contains("--set"));
     assert!(stdout.contains("--language"));
+    assert!(stdout.contains("--interviewer <BACKEND>"));
+    assert!(stdout.contains("[possible values: pi, codex, none]"));
     assert!(stdout.contains("--no-codex"));
 }
 

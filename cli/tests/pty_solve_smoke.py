@@ -184,6 +184,7 @@ def main() -> int:
     practice_binary = Path(sys.argv[2]).resolve()
     repository_root = Path(sys.argv[3]).resolve()
     fake_codex = repository_root / "cli" / "tests" / "fixtures" / "fake_codex_app_server.py"
+    fake_pi = repository_root / "cli" / "tests" / "fixtures" / "fake_pi_rpc.py"
     with tempfile.TemporaryDirectory(prefix="interview-pty-") as temporary:
         root = Path(temporary)
         shutil.copytree(repository_root / "catalog", root / "catalog")
@@ -205,11 +206,41 @@ def main() -> int:
         env["PRACTICE_ROOT"] = str(root)
         env["CODEX_HOME"] = str(codex_home)
         env["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(fake_codex)
+        env["INTERVIEW_TUTOR_INTERVIEWER"] = "codex"
         base = [str(practice_binary), "--db", str(database)]
         run_checked(base + ["problems", "add", "smoke-problem", "--title", "Smoke Problem", "--difficulty", "Easy", "--topic", "Smoke", "--statement", "Edit and run."], env)
         run_checked(base + ["problems", "adapter", "smoke-problem", "python", "python/smoke.py"], env)
         run_checked(base + ["sets", "create", "smoke-set", "--name", "Smoke Set"], env)
         run_checked(base + ["sets", "add", "smoke-set", "smoke-problem"], env)
+
+        pi_home = root / "pi-home"
+        pi_home.mkdir(mode=0o700)
+        (pi_home / "fake-mode").write_text("normal")
+        pi_env = env.copy()
+        pi_env.pop("INTERVIEW_TUTOR_INTERVIEWER")
+        pi_env["PI_CODING_AGENT_DIR"] = str(pi_home)
+        pi_env["INTERVIEW_TUTOR_PI_EXECUTABLE"] = str(fake_pi)
+        master, process, output, screen = launch(interview_binary, database, pi_env)
+        try:
+            open_solve(master, process, output, screen, deadline)
+            os.write(master, b"\t\t\ti")
+            wait_for(master, process, output, screen, "Privacy disclosure", deadline)
+            os.write(master, b"y")
+            wait_for(master, process, output, screen, "Pi: ready", deadline)
+            os.write(master, b"Why?\r")
+            wait_for(master, process, output, screen, "What invariant holds?", deadline)
+            os.write(master, b"\x11")
+            process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            assert process.returncode == 0, process.returncode
+        finally:
+            stop_process(master, process)
+        pi_records = [
+            json.loads(line)
+            for line in (pi_home / "fake-capture.jsonl").read_text().splitlines()
+        ]
+        pi_processes = [record for record in pi_records if record.get("kind") == "process"]
+        assert len(pi_processes) == 1, pi_processes
+        assert all(not Path(record["cwd"]).exists() for record in pi_processes)
 
         master, process, output, screen = launch(interview_binary, database, env)
         try:
@@ -310,8 +341,8 @@ def main() -> int:
             stop_process(master, process)
 
         assert solution.read_text() == recorded_source
-        assert time.monotonic() - started <= 20
-        print("fake_turns=2 attempts=1 recorded_revision=0 transcript_after_relaunch=0")
+        assert time.monotonic() - started <= 24
+        print("default_pi_turns=1 explicit_codex_turns=2 attempts=1 recorded_revision=0 transcript_after_relaunch=0")
     return 0
 
 

@@ -3,35 +3,155 @@ pub mod prompt;
 pub mod protocol;
 pub mod session;
 
+use crate::interviewer::{Backend, InterviewerError, Mode, Transport};
 use crate::runner::CancellationToken;
 use process::CodexProcess;
-use prompt::Mode;
-use session::{SessionTranscript, Speaker};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 
-pub struct InterviewRequest<'a> {
-    pub mode: Mode,
-    pub statement: &'a str,
-    pub source: &'a str,
-    pub latest_output: &'a str,
-    pub question: &'a str,
-    pub source_revision: u64,
-    pub solved: bool,
-}
+pub use crate::interviewer::InterviewRequest;
 
-pub struct CodexSession {
+pub struct CodexTransport {
     executable: PathBuf,
     control_pid: Arc<AtomicI32>,
     process: Option<CodexProcess>,
     interviewer_thread: String,
     hinter_thread: String,
     restart_remaining: bool,
-    transcript: SessionTranscript,
-    hint_revision: Option<u64>,
-    hint_count: u8,
 }
+
+impl CodexTransport {
+    pub fn connect(
+        control_pid: Arc<AtomicI32>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, InterviewerError> {
+        let executable = process::configured_executable()
+            .map_err(|error| InterviewerError::configuration(Backend::Codex, error))?;
+        Self::connect_executable(executable, control_pid, cancellation)
+    }
+
+    fn connect_executable(
+        executable: PathBuf,
+        control_pid: Arc<AtomicI32>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, InterviewerError> {
+        let (process, interviewer_thread, hinter_thread) =
+            establish(&executable, Arc::clone(&control_pid), cancellation)?;
+        Ok(Self {
+            executable,
+            control_pid,
+            process: Some(process),
+            interviewer_thread,
+            hinter_thread,
+            restart_remaining: true,
+        })
+    }
+
+    fn ensure_connected(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), InterviewerError> {
+        if self.process.as_ref().is_some_and(CodexProcess::is_usable) {
+            return Ok(());
+        }
+        if let Some(mut process) = self.process.take()
+            && let Err(error) = process.shutdown()
+        {
+            return Err(InterviewerError::transport(
+                Backend::Codex,
+                format!("cannot restart Codex session; cleanup failed: {error}"),
+            ));
+        }
+        if !self.restart_remaining {
+            return Err(InterviewerError::transport(
+                Backend::Codex,
+                "Codex session restart limit reached",
+            ));
+        }
+        self.restart_remaining = false;
+        let (process, interviewer_thread, hinter_thread) = establish(
+            &self.executable,
+            Arc::clone(&self.control_pid),
+            cancellation,
+        )?;
+        self.process = Some(process);
+        self.interviewer_thread = interviewer_thread;
+        self.hinter_thread = hinter_thread;
+        Ok(())
+    }
+
+    fn invalidate_after_turn_failure(&mut self, primary: String) -> InterviewerError {
+        self.interviewer_thread.clear();
+        self.hinter_thread.clear();
+        let cleanup = self.process.as_mut().map_or(Ok(()), CodexProcess::shutdown);
+        let message = match cleanup {
+            Ok(()) => primary,
+            Err(error) => format!("{primary}; cleanup failed: {error}"),
+        };
+        InterviewerError::protocol(Backend::Codex, message)
+    }
+}
+
+impl Transport for CodexTransport {
+    fn backend(&self) -> Backend {
+        Backend::Codex
+    }
+
+    fn prepare_next_operation(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), InterviewerError> {
+        self.ensure_connected(cancellation)
+    }
+
+    fn raw_turn(
+        &mut self,
+        mode: Mode,
+        input: String,
+        output_schema: Value,
+        _correction: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<String, InterviewerError> {
+        self.ensure_connected(cancellation)?;
+        let thread = if matches!(mode, Mode::Hint(_)) {
+            self.hinter_thread.clone()
+        } else {
+            self.interviewer_thread.clone()
+        };
+        match self.process.as_mut().expect("connection established").turn(
+            &thread,
+            input,
+            output_schema,
+            cancellation,
+        ) {
+            Ok(raw) => Ok(raw),
+            Err(error) => Err(self.invalidate_after_turn_failure(error)),
+        }
+    }
+
+    fn finish_operation(&mut self) -> Result<(), InterviewerError> {
+        Ok(())
+    }
+
+    fn invalidate_operation(&mut self) -> Result<(), InterviewerError> {
+        self.interviewer_thread.clear();
+        self.hinter_thread.clear();
+        self.process
+            .as_mut()
+            .map_or(Ok(()), CodexProcess::shutdown)
+            .map_err(|error| InterviewerError::transport(Backend::Codex, error))
+    }
+
+    fn requires_restart(&self) -> bool {
+        self.process
+            .as_ref()
+            .is_none_or(|process| !process.is_usable())
+    }
+}
+
+pub struct CodexSession(crate::interviewer::InterviewerSession);
 
 impl CodexSession {
     pub fn connect() -> Result<Self, String> {
@@ -46,45 +166,40 @@ impl CodexSession {
         control_pid: Arc<AtomicI32>,
         cancellation: &CancellationToken,
     ) -> Result<Self, String> {
-        let executable = process::configured_executable()?;
-        Self::connect_executable(executable, control_pid, cancellation)
+        let transport = CodexTransport::connect(control_pid, cancellation).map_err(string_error)?;
+        Ok(Self(
+            crate::interviewer::InterviewerSession::from_transport(Box::new(transport)),
+        ))
     }
 
+    #[cfg(test)]
     fn connect_executable(
         executable: PathBuf,
         control_pid: Arc<AtomicI32>,
         cancellation: &CancellationToken,
     ) -> Result<Self, String> {
-        let (process, interviewer_thread, hinter_thread) =
-            establish(&executable, Arc::clone(&control_pid), cancellation)?;
-        Ok(Self {
-            executable,
-            control_pid,
-            process: Some(process),
-            interviewer_thread,
-            hinter_thread,
-            restart_remaining: true,
-            transcript: SessionTranscript::default(),
-            hint_revision: None,
-            hint_count: 0,
-        })
+        let transport = CodexTransport::connect_executable(executable, control_pid, cancellation)
+            .map_err(string_error)?;
+        Ok(Self(
+            crate::interviewer::InterviewerSession::from_transport(Box::new(transport)),
+        ))
     }
 
-    pub(crate) fn prepare_next_operation(
+    pub fn prepare_next_operation(
         &mut self,
         cancellation: &CancellationToken,
     ) -> Result<(), String> {
-        self.ensure_connected(cancellation)
+        self.0
+            .prepare_next_operation(cancellation)
+            .map_err(string_error)
     }
 
-    pub(crate) fn requires_restart(&self) -> bool {
-        self.process
-            .as_ref()
-            .is_none_or(|process| !process.is_usable())
+    pub fn requires_restart(&self) -> bool {
+        self.0.requires_restart()
     }
 
     pub fn ask(&mut self, request: InterviewRequest<'_>) -> Result<String, String> {
-        self.ask_with_cancellation(request, &CancellationToken::new())
+        self.0.ask(request).map_err(string_error)
     }
 
     pub fn ask_with_cancellation(
@@ -92,220 +207,84 @@ impl CodexSession {
         request: InterviewRequest<'_>,
         cancellation: &CancellationToken,
     ) -> Result<String, String> {
-        self.ask_internal(request, cancellation, true)
+        self.0
+            .ask_with_cancellation(request, cancellation)
+            .map_err(string_error)
     }
 
-    pub(crate) fn ask_deferred_with_cancellation(
+    pub fn ask_deferred_with_cancellation(
         &mut self,
         request: InterviewRequest<'_>,
         cancellation: &CancellationToken,
     ) -> Result<String, String> {
-        self.ask_internal(request, cancellation, false)
+        self.0
+            .ask_deferred_with_cancellation(request, cancellation)
+            .map_err(string_error)
     }
 
-    fn ask_internal(
-        &mut self,
-        request: InterviewRequest<'_>,
-        cancellation: &CancellationToken,
-        record_response: bool,
-    ) -> Result<String, String> {
-        self.ensure_connected(cancellation)?;
-        if request.question.len() > session::MAX_USER_BYTES {
-            return Err("question exceeds 16 KiB".into());
-        }
-        let mode = request.mode;
-        if let Mode::Hint(level) = mode {
-            if !(1..=3).contains(&level) {
-                return Err("hint level must be 1 through 3".into());
-            }
-            if self.hint_revision != Some(request.source_revision) {
-                self.hint_revision = Some(request.source_revision);
-                self.hint_count = 0;
-            }
-            if self.hint_count >= 3 {
-                return Err("maximum three hints reached for this revision".into());
-            }
-        }
-        let transcript = if matches!(mode, Mode::Hint(_)) {
-            String::new()
-        } else {
-            self.transcript
-                .entries()
-                .map(|entry| {
-                    let label = match entry.speaker {
-                        Speaker::User => "user",
-                        Speaker::Interviewer => "interviewer",
-                        Speaker::Hinter => "hinter",
-                        Speaker::SubmissionReview => "review",
-                    };
-                    format!("{label}: {}", entry.text)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let payload = prompt::user_payload(
-            request.statement,
-            request.source,
-            request.latest_output,
-            &transcript,
-            request.question,
-        );
-        let input = format!(
-            "{}\nINPUT_JSON:{}",
-            prompt::system_contract(mode, request.solved),
-            serde_json::to_string(&payload).map_err(|_| "cannot encode prompt")?
-        );
-        let thread = if matches!(mode, Mode::Hint(_)) {
-            self.hinter_thread.clone()
-        } else {
-            self.interviewer_thread.clone()
-        };
-        let raw = match self.process.as_mut().expect("connection established").turn(
-            &thread,
-            input,
-            prompt::output_schema(mode),
-            cancellation,
-        ) {
-            Ok(raw) => raw,
-            Err(error) => return Err(self.invalidate_after_turn_failure(error)),
-        };
-        let response = match prompt::parse_response(mode, &raw) {
-            Ok(response) => response,
-            Err(_) => {
-                let correction = "Your prior response did not match the required JSON envelope. Return only one corrected JSON object, with no markdown or commentary.".to_string();
-                let raw = match self.process.as_mut().expect("connection established").turn(
-                    &thread,
-                    correction,
-                    prompt::output_schema(mode),
-                    cancellation,
-                ) {
-                    Ok(raw) => raw,
-                    Err(error) => return Err(self.invalidate_after_turn_failure(error)),
-                };
-                match prompt::parse_response(mode, &raw) {
-                    Ok(response) => response,
-                    Err(_) => {
-                        return Err(self.invalidate_after_turn_failure(
-                            "Codex returned malformed structured output twice".into(),
-                        ));
-                    }
-                }
-            }
-        };
-        if record_response {
-            self.commit_response(
-                mode,
-                request.source_revision,
-                request.question,
-                response.clone(),
-            );
-        }
-        Ok(response)
-    }
-
-    pub(crate) fn commit_response(
+    pub fn commit_response(
         &mut self,
         mode: Mode,
         source_revision: u64,
         question: &str,
         response: String,
     ) {
-        match mode {
-            Mode::Hint(_) => {
-                if self.hint_revision != Some(source_revision) {
-                    self.hint_revision = Some(source_revision);
-                    self.hint_count = 0;
-                }
-                self.hint_count = self.hint_count.saturating_add(1);
-                self.transcript
-                    .push(Speaker::Hinter, response)
-                    .expect("validated hinter response");
-            }
-            Mode::Interviewer => {
-                self.transcript
-                    .push(Speaker::User, question.to_string())
-                    .expect("validated interviewer question");
-                self.transcript
-                    .push(Speaker::Interviewer, response)
-                    .expect("validated interviewer response");
-            }
-            Mode::SubmissionReview => self
-                .transcript
-                .push(Speaker::SubmissionReview, response)
-                .expect("validated submission review"),
-        }
-    }
-
-    fn ensure_connected(&mut self, cancellation: &CancellationToken) -> Result<(), String> {
-        if self.process.as_ref().is_some_and(CodexProcess::is_usable) {
-            return Ok(());
-        }
-        if let Some(mut process) = self.process.take()
-            && let Err(error) = process.shutdown()
-        {
-            return Err(format!(
-                "cannot restart Codex session; cleanup failed: {error}"
-            ));
-        }
-        if !self.restart_remaining {
-            return Err("Codex session restart limit reached".into());
-        }
-        self.restart_remaining = false;
-        let (process, interviewer_thread, hinter_thread) = establish(
-            &self.executable,
-            Arc::clone(&self.control_pid),
-            cancellation,
-        )?;
-        self.process = Some(process);
-        self.interviewer_thread = interviewer_thread;
-        self.hinter_thread = hinter_thread;
-        Ok(())
-    }
-
-    fn invalidate_after_turn_failure(&mut self, primary: String) -> String {
-        self.interviewer_thread.clear();
-        self.hinter_thread.clear();
-        let cleanup = self
-            .process
-            .as_mut()
-            .map_or(Ok(()), crate::codex::process::CodexProcess::shutdown);
-        match cleanup {
-            Ok(()) => primary,
-            Err(error) => format!("{primary}; cleanup failed: {error}"),
-        }
+        self.0
+            .commit_response(mode, source_revision, question, response);
     }
 
     pub fn clear(&mut self) {
-        self.transcript.clear();
-        self.hint_count = 0;
-        self.hint_revision = None;
+        self.0.clear();
     }
+}
+
+fn string_error(error: InterviewerError) -> String {
+    error.to_string()
 }
 
 fn establish(
     executable: &Path,
     control_pid: Arc<AtomicI32>,
     cancellation: &CancellationToken,
-) -> Result<(CodexProcess, String, String), String> {
+) -> Result<(CodexProcess, String, String), InterviewerError> {
     let mut process =
-        CodexProcess::start_executable(executable.to_path_buf(), control_pid, cancellation)?;
+        CodexProcess::start_executable(executable.to_path_buf(), control_pid, cancellation)
+            .map_err(|error| InterviewerError::transport(Backend::Codex, error))?;
     let account_ready = match process.account_ready_with_cancellation(cancellation) {
         Ok(account_ready) => account_ready,
-        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+        Err(primary) => {
+            return Err(InterviewerError::transport(
+                Backend::Codex,
+                shutdown_after_failure(&mut process, primary),
+            ));
+        }
     };
     if !account_ready {
-        return Err(shutdown_after_failure(
-            &mut process,
-            "Codex authentication required; run `codex login`".into(),
+        return Err(InterviewerError::authentication(
+            Backend::Codex,
+            shutdown_after_failure(
+                &mut process,
+                "Codex authentication required; run `codex login`".into(),
+            ),
         ));
     }
     let interviewer_thread = match process.start_thread_with_cancellation(cancellation) {
         Ok(thread) => thread,
-        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+        Err(primary) => {
+            return Err(InterviewerError::transport(
+                Backend::Codex,
+                shutdown_after_failure(&mut process, primary),
+            ));
+        }
     };
     let hinter_thread = match process.start_thread_with_cancellation(cancellation) {
         Ok(thread) => thread,
-        Err(primary) => return Err(shutdown_after_failure(&mut process, primary)),
+        Err(primary) => {
+            return Err(InterviewerError::transport(
+                Backend::Codex,
+                shutdown_after_failure(&mut process, primary),
+            ));
+        }
     };
     Ok((process, interviewer_thread, hinter_thread))
 }

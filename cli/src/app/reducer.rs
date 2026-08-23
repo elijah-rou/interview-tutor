@@ -1,10 +1,10 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
 use super::model::{
-    AppState, CodexStatus, DiscardAction, EditorRuntimeStatus, Focus, MAX_COMPOSER_BYTES,
+    AppState, DiscardAction, EditorRuntimeStatus, Focus, InterviewerStatus, MAX_COMPOSER_BYTES,
     MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
 };
-use crate::codex::prompt::Mode as CodexMode;
 use crate::editor::{EditorCommand, Mode};
+use crate::interviewer::Mode as InterviewerMode;
 
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
     let Some(language_slug) = state.language_slug().map(str::to_string) else {
@@ -71,16 +71,19 @@ fn next_operation(state: &mut AppState) -> OperationId {
     operation
 }
 
-fn start_codex_connect(state: &mut AppState) -> Vec<Effect> {
-    assert!(state.codex.enabled, "disabled Codex must not connect");
+fn start_interviewer_connect(state: &mut AppState) -> Vec<Effect> {
+    assert!(
+        state.interviewer.enabled,
+        "disabled Interviewer must not connect"
+    );
     let operation = next_operation(state);
-    state.codex.connecting = Some(operation);
-    state.codex.status = CodexStatus::Connecting;
+    state.interviewer.connecting = Some(operation);
+    state.interviewer.status = InterviewerStatus::Connecting;
     state.error = None;
-    vec![Effect::ConnectCodex { operation }]
+    vec![Effect::ConnectInterviewer { operation }]
 }
 
-fn codex_output_tail(output: &str) -> String {
+fn interviewer_output_tail(output: &str) -> String {
     output
         .chars()
         .rev()
@@ -92,47 +95,47 @@ fn codex_output_tail(output: &str) -> String {
 }
 
 fn dispatch_pending_submission_review(state: &mut AppState) -> Vec<Effect> {
-    if !state.codex.enabled
-        || !state.codex.disclosure_accepted
+    if !state.interviewer.enabled
+        || !state.interviewer.disclosure_accepted
         || !matches!(
-            state.codex.status,
-            CodexStatus::Ready | CodexStatus::Feedback
+            state.interviewer.status,
+            InterviewerStatus::Ready | InterviewerStatus::Feedback
         )
     {
         return Vec::new();
     }
-    let Some(review) = state.codex.pending_submission_review.take() else {
+    let Some(review) = state.interviewer.pending_submission_review.take() else {
         return Vec::new();
     };
     let operation = next_operation(state);
     let revision = review.revision;
     let solve = state.solve.as_ref().expect("solve exists");
-    let effect = Effect::CodexTurn {
+    let effect = Effect::InterviewerTurn {
         operation,
         revision,
-        mode: CodexMode::SubmissionReview,
+        mode: InterviewerMode::SubmissionReview,
         statement: solve.statement.clone(),
         source: review.source().to_string(),
         output: review.output().to_string(),
         question: String::new(),
         solved: true,
     };
-    state.codex.status = CodexStatus::Thinking;
-    state.codex.active = Some((operation, revision, CodexMode::SubmissionReview));
+    state.interviewer.status = InterviewerStatus::Thinking;
+    state.interviewer.active = Some((operation, revision, InterviewerMode::SubmissionReview));
     state.status = format!("Reviewing recorded revision {revision}…");
     vec![effect]
 }
 
-fn finalize_codex_turn_and_dispatch_review(
+fn finalize_interviewer_turn_and_dispatch_review(
     state: &mut AppState,
     operation: OperationId,
     revision: u64,
-    mode: CodexMode,
+    mode: InterviewerMode,
     accepted: bool,
 ) -> Vec<Effect> {
     let mut effects = dispatch_pending_submission_review(state);
     // Effects execute from the end, so finalization reaches the worker before a queued review.
-    effects.push(Effect::FinalizeCodexTurn {
+    effects.push(Effect::FinalizeInterviewerTurn {
         operation,
         revision,
         mode,
@@ -143,13 +146,13 @@ fn finalize_codex_turn_and_dispatch_review(
 
 fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
     state.solve = None;
-    state.codex.clear_session();
+    state.interviewer.clear_session();
     state.screen = Screen::ProblemList;
     state.focus = Focus::Main;
     state.detail_scroll = 0;
     state.progress_scroll = 0;
     let mut effects = load_effect(state);
-    effects.push(Effect::ResetCodex);
+    effects.push(Effect::ResetInterviewer);
     effects.push(Effect::StopNeovim);
     if drain_runner {
         effects.push(Effect::LeaveSolve);
@@ -179,122 +182,128 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::InterviewFocus => {
             solve.pane = SolvePane::Interview;
             solve.accessory_panes.interview_expanded = true;
-            if !state.codex.enabled {
-                state.codex.status = CodexStatus::Disabled;
-                state.codex.composer_focused = false;
+            if !state.interviewer.enabled {
+                state.interviewer.status = InterviewerStatus::Disabled;
+                state.interviewer.composer_focused = false;
                 return Vec::new();
             }
-            if state.codex.disclosure_accepted {
-                state.codex.composer_focused = true;
+            if state.interviewer.disclosure_accepted {
+                state.interviewer.composer_focused = true;
                 if matches!(
-                    state.codex.status,
-                    CodexStatus::Offline | CodexStatus::Disconnected | CodexStatus::ProtocolError
+                    state.interviewer.status,
+                    InterviewerStatus::Offline
+                        | InterviewerStatus::Disconnected
+                        | InterviewerStatus::ProtocolError
                 ) {
-                    return start_codex_connect(state);
+                    return start_interviewer_connect(state);
                 }
             } else {
-                state.codex.status = CodexStatus::Disclosure;
+                state.interviewer.status = InterviewerStatus::Disclosure;
             }
             Vec::new()
         }
-        Action::InterviewDisclosure(accepted) if state.codex.status == CodexStatus::Disclosure => {
+        Action::InterviewDisclosure(accepted)
+            if state.interviewer.status == InterviewerStatus::Disclosure =>
+        {
             if accepted {
                 solve.accessory_panes.interview_expanded = true;
-                state.codex.disclosure_accepted = true;
-                state.codex.composer_focused = true;
-                start_codex_connect(state)
+                state.interviewer.disclosure_accepted = true;
+                state.interviewer.composer_focused = true;
+                start_interviewer_connect(state)
             } else {
-                state.codex.status = CodexStatus::Declined;
-                state.codex.composer_focused = false;
+                state.interviewer.status = InterviewerStatus::Declined;
+                state.interviewer.composer_focused = false;
                 Vec::new()
             }
         }
-        Action::InterviewChar(character) if state.codex.composer_focused => {
+        Action::InterviewChar(character) if state.interviewer.composer_focused => {
             if state
-                .codex
+                .interviewer
                 .composer
                 .len()
                 .saturating_add(character.len_utf8())
                 <= MAX_COMPOSER_BYTES
             {
-                state.codex.composer.push(character);
+                state.interviewer.composer.push(character);
             }
             Vec::new()
         }
-        Action::InterviewBackspace if state.codex.composer_focused => {
-            state.codex.composer.pop();
+        Action::InterviewBackspace if state.interviewer.composer_focused => {
+            state.interviewer.composer.pop();
             Vec::new()
         }
         Action::InterviewEscape => {
-            state.codex.composer_focused = false;
+            state.interviewer.composer_focused = false;
             Vec::new()
         }
         Action::InterviewSend
-            if state.codex.composer_focused
+            if state.interviewer.composer_focused
                 && matches!(
-                    state.codex.status,
-                    CodexStatus::Ready | CodexStatus::Feedback
+                    state.interviewer.status,
+                    InterviewerStatus::Ready | InterviewerStatus::Feedback
                 ) =>
         {
-            let question = state.codex.composer.trim().to_string();
+            let question = state.interviewer.composer.trim().to_string();
             if question.is_empty() {
                 return Vec::new();
             }
             let operation = next_operation(state);
             let solve = state.solve.as_ref().expect("solve exists");
             let revision = solve.editor.revision;
-            state.codex.composer.clear();
-            state.codex.composer_focused = false;
-            state.codex.push_message("You".into(), question.clone());
-            state.codex.status = CodexStatus::Thinking;
-            state.codex.active = Some((operation, revision, CodexMode::Interviewer));
-            vec![Effect::CodexTurn {
+            state.interviewer.composer.clear();
+            state.interviewer.composer_focused = false;
+            state
+                .interviewer
+                .push_message("You".into(), question.clone());
+            state.interviewer.status = InterviewerStatus::Thinking;
+            state.interviewer.active = Some((operation, revision, InterviewerMode::Interviewer));
+            vec![Effect::InterviewerTurn {
                 operation,
                 revision,
-                mode: CodexMode::Interviewer,
+                mode: InterviewerMode::Interviewer,
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
-                output: codex_output_tail(&solve.output),
+                output: interviewer_output_tail(&solve.output),
                 question,
-                solved: state.codex.submission_recorded,
+                solved: state.interviewer.submission_recorded,
             }]
         }
         Action::Hint
-            if state.codex.disclosure_accepted
+            if state.interviewer.disclosure_accepted
                 && matches!(
-                    state.codex.status,
-                    CodexStatus::Ready | CodexStatus::Feedback
+                    state.interviewer.status,
+                    InterviewerStatus::Ready | InterviewerStatus::Feedback
                 ) =>
         {
             let revision = solve.editor.revision;
-            if state.codex.hint_revision != Some(revision) {
-                state.codex.hint_revision = Some(revision);
-                state.codex.hint_count = 0;
+            if state.interviewer.hint_revision != Some(revision) {
+                state.interviewer.hint_revision = Some(revision);
+                state.interviewer.hint_count = 0;
             }
-            if state.codex.hint_count >= 3 {
+            if state.interviewer.hint_count >= 3 {
                 state.error = Some("maximum three hints reached for this revision".into());
                 return Vec::new();
             }
-            let level = state.codex.hint_count + 1;
+            let level = state.interviewer.hint_count + 1;
             let operation = next_operation(state);
             let solve = state.solve.as_ref().expect("solve exists");
-            state.codex.status = CodexStatus::Thinking;
-            state.codex.active = Some((operation, revision, CodexMode::Hint(level)));
-            vec![Effect::CodexTurn {
+            state.interviewer.status = InterviewerStatus::Thinking;
+            state.interviewer.active = Some((operation, revision, InterviewerMode::Hint(level)));
+            vec![Effect::InterviewerTurn {
                 operation,
                 revision,
-                mode: CodexMode::Hint(level),
+                mode: InterviewerMode::Hint(level),
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
-                output: codex_output_tail(&solve.output),
+                output: interviewer_output_tail(&solve.output),
                 question: String::new(),
                 solved: false,
             }]
         }
         Action::ResetInterview => {
             solve.submitted_source = None;
-            state.codex.clear_session();
-            vec![Effect::ResetCodex]
+            state.interviewer.clear_session();
+            vec![Effect::ResetInterviewer]
         }
         Action::SaveTest | Action::Submit => {
             let intent = if action == Action::Submit {
@@ -343,19 +352,19 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             }]
         }
         Action::Cancel => {
-            let codex_operation = state
-                .codex
+            let interviewer_operation = state
+                .interviewer
                 .active
                 .map(|(operation, _, _)| operation)
-                .or(state.codex.connecting);
+                .or(state.interviewer.connecting);
             let runner_active = solve.running.map(|(operation, _, _)| operation);
-            if let Some(operation) = codex_operation
+            if let Some(operation) = interviewer_operation
                 && (solve.pane == SolvePane::Interview || runner_active.is_none())
             {
-                state.codex.status = CodexStatus::Disconnected;
-                state.codex.connecting = None;
-                state.codex.active = None;
-                vec![Effect::CancelCodex { operation }]
+                state.interviewer.status = InterviewerStatus::Disconnected;
+                state.interviewer.connecting = None;
+                state.interviewer.active = None;
+                vec![Effect::CancelInterviewer { operation }]
             } else if let Some(operation) = runner_active {
                 state.status = "Cancelling…".into();
                 vec![Effect::CancelRun { operation }]
@@ -413,14 +422,14 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     solve.accessory_panes.interview_expanded =
                         !solve.accessory_panes.interview_expanded;
                     if !solve.accessory_panes.interview_expanded {
-                        state.codex.composer_focused = false;
+                        state.interviewer.composer_focused = false;
                     }
                 }
             }
             Vec::new()
         }
         Action::NextFocus | Action::PreviousFocus => {
-            state.codex.composer_focused = false;
+            state.interviewer.composer_focused = false;
             let forward = action == Action::NextFocus;
             solve.pane = match (solve.pane, forward) {
                 (SolvePane::Editor, true) => SolvePane::Problem,
@@ -519,7 +528,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             match solve.pane {
                 SolvePane::Problem => solve.problem_scroll = solve.problem_scroll.saturating_sub(1),
                 SolvePane::Output => solve.output_scroll = solve.output_scroll.saturating_sub(1),
-                SolvePane::Interview => state.codex.scroll = state.codex.scroll.saturating_add(1),
+                SolvePane::Interview => {
+                    state.interviewer.scroll = state.interviewer.scroll.saturating_add(1)
+                }
                 SolvePane::Editor => {}
             }
             Vec::new()
@@ -533,7 +544,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                         .saturating_add(1)
                         .min(solve.output_scroll_max())
                 }
-                SolvePane::Interview => state.codex.scroll = state.codex.scroll.saturating_sub(1),
+                SolvePane::Interview => {
+                    state.interviewer.scroll = state.interviewer.scroll.saturating_sub(1)
+                }
                 SolvePane::Editor => {}
             }
             Vec::new()
@@ -541,9 +554,9 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::Quit
             if !solve.editor.dirty() || solve.discard_confirmation == Some(DiscardAction::Quit) =>
         {
-            state.codex.clear_session();
+            state.interviewer.clear_session();
             state.quit = true;
-            vec![Effect::ResetCodex]
+            vec![Effect::ResetInterviewer]
         }
         _ => Vec::new(),
     }
@@ -582,9 +595,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 return solve_command(state, Action::Quit);
             }
             Event::Command(Action::Quit) => {
-                state.codex.clear_session();
+                state.interviewer.clear_session();
                 state.quit = true;
-                return vec![Effect::ResetCodex];
+                return vec![Effect::ResetInterviewer];
             }
             Event::Command(Action::Back | Action::Help) => {
                 state.show_help = false;
@@ -656,45 +669,50 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.error = Some(error);
                 return Vec::new();
             }
-            Event::CodexConnected(operation, result) => {
-                if state.codex.connecting != Some(operation) {
+            Event::InterviewerConnected(operation, result) => {
+                if state.interviewer.connecting != Some(operation) {
                     return Vec::new();
                 }
-                state.codex.connecting = None;
+                state.interviewer.connecting = None;
                 match result {
                     Ok(()) => {
-                        state.codex.status = CodexStatus::Ready;
+                        state.interviewer.status = InterviewerStatus::Ready;
                         state.error = None;
                         return dispatch_pending_submission_review(state);
                     }
-                    Err(error) if error.contains("authentication required") => {
-                        state.codex.status = CodexStatus::AuthRequired;
-                        state.codex.pending_submission_review = None;
-                        state.error = Some(error);
+                    Err(error) if error.kind() == crate::interviewer::ErrorKind::Authentication => {
+                        state.interviewer.status = InterviewerStatus::AuthRequired;
+                        state.interviewer.pending_submission_review = None;
+                        state.error = Some(error.to_string());
                     }
                     Err(error) => {
-                        state.codex.status = CodexStatus::Disconnected;
-                        state.error = Some(error);
+                        state.interviewer.status = InterviewerStatus::Disconnected;
+                        state.error = Some(error.to_string());
                     }
                 }
                 return Vec::new();
             }
-            Event::CodexFinished(operation, revision, mode, result) => {
-                if state.codex.active != Some((operation, revision, mode)) {
-                    return vec![Effect::FinalizeCodexTurn {
+            Event::InterviewerFinished(operation, revision, mode, result) => {
+                if state.interviewer.active != Some((operation, revision, mode)) {
+                    return vec![Effect::FinalizeInterviewerTurn {
                         operation,
                         revision,
                         mode,
                         accepted: false,
                     }];
                 }
-                state.codex.active = None;
+                state.interviewer.active = None;
                 let message = match result {
                     Ok(message) => message,
                     Err(error) => {
-                        state.codex.status = CodexStatus::ProtocolError;
-                        state.error = Some(error);
-                        return vec![Effect::FinalizeCodexTurn {
+                        state.interviewer.status =
+                            if error.kind() == crate::interviewer::ErrorKind::Authentication {
+                                InterviewerStatus::AuthRequired
+                            } else {
+                                InterviewerStatus::ProtocolError
+                            };
+                        state.error = Some(error.to_string());
+                        return vec![Effect::FinalizeInterviewerTurn {
                             operation,
                             revision,
                             mode,
@@ -703,40 +721,41 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     }
                 };
                 let current_revision = state.solve.as_ref().expect("solve exists").editor.revision;
-                if mode != CodexMode::SubmissionReview && current_revision != revision {
-                    state.codex.status = if state.codex.messages.len() > 1 {
-                        CodexStatus::Feedback
+                if mode != InterviewerMode::SubmissionReview && current_revision != revision {
+                    state.interviewer.status = if state.interviewer.messages.len() > 1 {
+                        InterviewerStatus::Feedback
                     } else {
-                        CodexStatus::Ready
+                        InterviewerStatus::Ready
                     };
                     state.error = Some(
-                        "Codex response ignored because the source changed during the turn".into(),
+                        "Interviewer response ignored because the source changed during the turn"
+                            .into(),
                     );
-                    return finalize_codex_turn_and_dispatch_review(
+                    return finalize_interviewer_turn_and_dispatch_review(
                         state, operation, revision, mode, false,
                     );
                 }
                 let label = match mode {
-                    CodexMode::Interviewer => "Interviewer".to_string(),
-                    CodexMode::Hint(_) => "Hinter".to_string(),
-                    CodexMode::SubmissionReview => {
+                    InterviewerMode::Interviewer => "Interviewer".to_string(),
+                    InterviewerMode::Hint(_) => "Hinter".to_string(),
+                    InterviewerMode::SubmissionReview => {
                         format!("Submission review · recorded revision {revision}")
                     }
                 };
-                if matches!(mode, CodexMode::Hint(_)) {
-                    state.codex.hint_count = state.codex.hint_count.saturating_add(1);
+                if matches!(mode, InterviewerMode::Hint(_)) {
+                    state.interviewer.hint_count = state.interviewer.hint_count.saturating_add(1);
                 }
-                state.codex.push_message(label, message);
-                state.codex.status = CodexStatus::Feedback;
-                return finalize_codex_turn_and_dispatch_review(
+                state.interviewer.push_message(label, message);
+                state.interviewer.status = InterviewerStatus::Feedback;
+                return finalize_interviewer_turn_and_dispatch_review(
                     state, operation, revision, mode, true,
                 );
             }
-            Event::CodexDisconnected(error) => {
-                state.codex.connecting = None;
-                state.codex.active = None;
-                state.codex.composer_focused = false;
-                state.codex.status = CodexStatus::Disconnected;
+            Event::InterviewerDisconnected(error) => {
+                state.interviewer.connecting = None;
+                state.interviewer.active = None;
+                state.interviewer.composer_focused = false;
+                state.interviewer.status = InterviewerStatus::Disconnected;
                 state.error = Some(error);
                 return Vec::new();
             }
@@ -836,31 +855,31 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 if intent == RunIntent::Submit && succeeded {
                     solve.refresh_after_submit = true;
-                    state.codex.submission_recorded = true;
+                    state.interviewer.submission_recorded = true;
                     let source = submitted_source
                         .expect("successful matching submit retains its captured source");
-                    let output = codex_output_tail(&solve.output);
-                    let review_allowed = state.codex.enabled
-                        && state.codex.disclosure_accepted
+                    let output = interviewer_output_tail(&solve.output);
+                    let review_allowed = state.interviewer.enabled
+                        && state.interviewer.disclosure_accepted
                         && matches!(
-                            state.codex.status,
-                            CodexStatus::Offline
-                                | CodexStatus::Connecting
-                                | CodexStatus::Ready
-                                | CodexStatus::Thinking
-                                | CodexStatus::Feedback
-                                | CodexStatus::Disconnected
-                                | CodexStatus::ProtocolError
+                            state.interviewer.status,
+                            InterviewerStatus::Offline
+                                | InterviewerStatus::Connecting
+                                | InterviewerStatus::Ready
+                                | InterviewerStatus::Thinking
+                                | InterviewerStatus::Feedback
+                                | InterviewerStatus::Disconnected
+                                | InterviewerStatus::ProtocolError
                         );
                     let replaced = if review_allowed {
                         let replaced = state
-                            .codex
+                            .interviewer
                             .pending_submission_review
                             .replace(RecordedSubmissionReview::new(revision, source, output))
                             .is_some();
                         if replaced {
                             state
-                                .codex
+                                .interviewer
                                 .pending_submission_review
                                 .as_mut()
                                 .expect("newest review inserted")
@@ -872,7 +891,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     };
                     let mut effects = load_effect(state);
                     effects.extend(dispatch_pending_submission_review(state));
-                    if let Some(review) = state.codex.pending_submission_review.as_ref() {
+                    if let Some(review) = state.interviewer.pending_submission_review.as_ref() {
                         state.status = if replaced {
                             format!(
                                 "Submit recorded · queued review replaced by recorded revision {}",
@@ -884,8 +903,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                                 review.revision
                             )
                         };
-                    } else if let Some((_, review_revision, CodexMode::SubmissionReview)) =
-                        state.codex.active
+                    } else if let Some((_, review_revision, InterviewerMode::SubmissionReview)) =
+                        state.interviewer.active
                     {
                         state.status = format!(
                             "Submit recorded · reviewing recorded revision {review_revision}"
@@ -905,7 +924,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Ok(data) => {
                         state.data = *data;
                         state.status = if let Some(review) =
-                            state.codex.pending_submission_review.as_ref()
+                            state.interviewer.pending_submission_review.as_ref()
                         {
                             if review.replaced_older {
                                 format!(
@@ -918,8 +937,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                                     review.revision
                                 )
                             }
-                        } else if let Some((_, revision, CodexMode::SubmissionReview)) =
-                            state.codex.active
+                        } else if let Some((_, revision, InterviewerMode::SubmissionReview)) =
+                            state.interviewer.active
                         {
                             format!(
                                 "Submit recorded · progress refreshed · reviewing recorded revision {revision}"
@@ -1034,22 +1053,22 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             Screen::Solve => unreachable!("solve events handled above"),
         },
-        Event::CodexFinished(operation, revision, mode, _) => {
-            return vec![Effect::FinalizeCodexTurn {
+        Event::InterviewerFinished(operation, revision, mode, _) => {
+            return vec![Effect::FinalizeInterviewerTurn {
                 operation,
                 revision,
                 mode,
                 accepted: false,
             }];
         }
-        Event::CodexDisconnected(error) => {
-            state.codex.connecting = None;
-            state.codex.active = None;
-            state.codex.composer_focused = false;
-            state.codex.status = CodexStatus::Disconnected;
+        Event::InterviewerDisconnected(error) => {
+            state.interviewer.connecting = None;
+            state.interviewer.active = None;
+            state.interviewer.composer_focused = false;
+            state.interviewer.status = InterviewerStatus::Disconnected;
             state.error = Some(error);
         }
-        Event::CodexConnected(_, _) => {}
+        Event::InterviewerConnected(_, _) => {}
         Event::OpenSet(slug) => {
             state.selected_set_id = Some(slug);
             state.selected_problem_id = None;
@@ -1094,9 +1113,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
         Event::Command(Action::Help) => state.show_help = true,
         Event::Command(Action::Quit) => {
-            state.codex.clear_session();
+            state.interviewer.clear_session();
             state.quit = true;
-            return vec![Effect::ResetCodex];
+            return vec![Effect::ResetInterviewer];
         }
         Event::Command(
             Action::SaveTest
@@ -1341,11 +1360,11 @@ mod tests {
     #[test]
     fn accessory_panes_collapse_independently_and_interview_focus_expands() {
         let mut state = solve_state();
-        state.codex.status = CodexStatus::Thinking;
-        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
-        state.codex.composer_focused = true;
+        state.interviewer.status = InterviewerStatus::Thinking;
+        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
+        state.interviewer.composer_focused = true;
         state
-            .codex
+            .interviewer
             .push_message("Interviewer".into(), "preserved".into());
 
         for pane in [SolvePane::Problem, SolvePane::Output, SolvePane::Interview] {
@@ -1356,12 +1375,12 @@ mod tests {
         assert!(!solve.accessory_panes.problem_expanded);
         assert!(!solve.accessory_panes.output_expanded);
         assert!(!solve.accessory_panes.interview_expanded);
-        assert!(!state.codex.composer_focused);
+        assert!(!state.interviewer.composer_focused);
         assert_eq!(
-            state.codex.active,
-            Some((OperationId(90), 0, CodexMode::Interviewer))
+            state.interviewer.active,
+            Some((OperationId(90), 0, InterviewerMode::Interviewer))
         );
-        assert_eq!(state.codex.messages.last().unwrap().1, "preserved");
+        assert_eq!(state.interviewer.messages.last().unwrap().1, "preserved");
 
         reduce(&mut state, Event::Command(Action::NextFocus));
         assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Editor);
@@ -1384,8 +1403,8 @@ mod tests {
                 .interview_expanded
         );
         assert_eq!(
-            state.codex.active,
-            Some((OperationId(90), 0, CodexMode::Interviewer))
+            state.interviewer.active,
+            Some((OperationId(90), 0, InterviewerMode::Interviewer))
         );
 
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
@@ -1403,7 +1422,7 @@ mod tests {
             .unwrap()
             .accessory_panes
             .interview_expanded = false;
-        state.codex.status = CodexStatus::Disclosure;
+        state.interviewer.status = InterviewerStatus::Disclosure;
 
         let effects = reduce(
             &mut state,
@@ -1418,8 +1437,11 @@ mod tests {
                 .accessory_panes
                 .interview_expanded
         );
-        assert!(state.codex.composer_focused);
-        assert!(matches!(effects.as_slice(), [Effect::ConnectCodex { .. }]));
+        assert!(state.interviewer.composer_focused);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ConnectInterviewer { .. }]
+        ));
     }
 
     #[test]
@@ -1536,7 +1558,7 @@ mod tests {
         assert!(
             completion
                 .iter()
-                .any(|effect| matches!(effect, Effect::ResetCodex))
+                .any(|effect| matches!(effect, Effect::ResetInterviewer))
         );
         assert!(
             completion
@@ -1635,17 +1657,17 @@ mod tests {
     fn pane_focus_changes_close_the_interview_composer() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.composer_focused = true;
+        state.interviewer.composer_focused = true;
 
         reduce(&mut state, Event::Command(Action::NextFocus));
         assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Editor);
-        assert!(!state.codex.composer_focused);
+        assert!(!state.interviewer.composer_focused);
 
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.composer_focused = true;
+        state.interviewer.composer_focused = true;
         reduce(&mut state, Event::Command(Action::PreviousFocus));
         assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Output);
-        assert!(!state.codex.composer_focused);
+        assert!(!state.interviewer.composer_focused);
     }
 
     fn finish_successful_submit(state: &mut AppState, output: &str) -> Vec<Effect> {
@@ -1774,8 +1796,8 @@ mod tests {
     #[test]
     fn submit_record_failure_has_failure_status_and_does_not_reload_or_review() {
         let mut state = solve_state();
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::Ready;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Ready;
         let submit = reduce(&mut state, Event::Command(Action::Submit));
         let Effect::SaveRun {
             operation,
@@ -1804,7 +1826,7 @@ mod tests {
         assert!(!state.solve.as_ref().unwrap().refresh_after_submit);
         assert!(state.active_operation.is_none());
         assert!(state.solve.as_ref().unwrap().submitted_source.is_none());
-        assert_eq!(state.codex.status, CodexStatus::Ready);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Ready);
     }
 
     #[test]
@@ -1971,12 +1993,12 @@ mod tests {
             Some(DiscardAction::Quit)
         );
         state
-            .codex
+            .interviewer
             .push_message("Interviewer".into(), "private".into());
         let quit = reduce(&mut state, Event::Command(Action::Quit));
         assert!(state.quit);
-        assert!(state.codex.messages.is_empty());
-        assert!(matches!(quit.as_slice(), [Effect::ResetCodex]));
+        assert!(state.interviewer.messages.is_empty());
+        assert!(matches!(quit.as_slice(), [Effect::ResetInterviewer]));
     }
 
     #[test]
@@ -2094,24 +2116,24 @@ mod tests {
     }
 
     #[test]
-    fn codex_disclosure_question_hint_stale_response_and_failure_preserve_solve() {
+    fn interviewer_disclosure_question_hint_stale_response_and_failure_preserve_solve() {
         let mut state = solve_state();
         reduce(&mut state, Event::Command(Action::InterviewFocus));
-        assert_eq!(state.codex.status, CodexStatus::Disclosure);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Disclosure);
         let effects = reduce(
             &mut state,
             Event::Command(Action::InterviewDisclosure(true)),
         );
-        let [Effect::ConnectCodex { operation }] = effects.as_slice() else {
+        let [Effect::ConnectInterviewer { operation }] = effects.as_slice() else {
             panic!("expected connect")
         };
-        reduce(&mut state, Event::CodexConnected(*operation, Ok(())));
+        reduce(&mut state, Event::InterviewerConnected(*operation, Ok(())));
         reduce(&mut state, Event::Command(Action::InterviewChar('W')));
         let effects = reduce(&mut state, Event::Command(Action::InterviewSend));
-        let Effect::CodexTurn {
+        let Effect::InterviewerTurn {
             operation,
             revision,
-            mode: CodexMode::Interviewer,
+            mode: InterviewerMode::Interviewer,
             ..
         } = effects[0]
         else {
@@ -2119,74 +2141,80 @@ mod tests {
         };
         let stale = reduce(
             &mut state,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 OperationId(operation.0 + 1),
                 revision,
-                CodexMode::Interviewer,
+                InterviewerMode::Interviewer,
                 Ok("stale".into()),
             ),
         );
         assert!(matches!(
             stale.as_slice(),
-            [Effect::FinalizeCodexTurn {
+            [Effect::FinalizeInterviewerTurn {
                 accepted: false,
                 ..
             }]
         ));
-        assert_eq!(state.codex.messages.len(), 1);
+        assert_eq!(state.interviewer.messages.len(), 1);
         assert!(
             !state
-                .codex
+                .interviewer
                 .messages
                 .iter()
                 .any(|(_, message)| message == "stale")
         );
         let failure = reduce(
             &mut state,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 operation,
                 revision,
-                CodexMode::Interviewer,
-                Err("protocol failed".into()),
+                InterviewerMode::Interviewer,
+                Err(crate::interviewer::InterviewerError::protocol(
+                    crate::interviewer::Backend::Pi,
+                    "protocol failed",
+                )),
             ),
         );
         assert!(matches!(
             failure.as_slice(),
-            [Effect::FinalizeCodexTurn {
+            [Effect::FinalizeInterviewerTurn {
                 accepted: false,
                 ..
             }]
         ));
-        assert_eq!(state.codex.status, CodexStatus::ProtocolError);
+        assert_eq!(state.interviewer.status, InterviewerStatus::ProtocolError);
         assert!(state.solve.is_some());
         state
-            .codex
+            .interviewer
             .messages
             .push(("Interviewer".into(), "secret".into()));
         let reset = reduce(&mut state, Event::Command(Action::ResetInterview));
-        assert!(matches!(reset.as_slice(), [Effect::ResetCodex]));
-        assert!(state.codex.messages.is_empty());
-        assert_eq!(state.codex.status, CodexStatus::Offline);
+        assert!(matches!(reset.as_slice(), [Effect::ResetInterviewer]));
+        assert!(state.interviewer.messages.is_empty());
+        assert_eq!(state.interviewer.status, InterviewerStatus::Offline);
     }
 
     #[test]
-    fn codex_completion_requires_operation_revision_mode_and_current_editor_revision() {
+    fn interviewer_completion_requires_operation_revision_mode_and_current_editor_revision() {
         let mut state = solve_state();
         reduce(&mut state, Event::Command(Action::InterviewFocus));
         let connect = reduce(
             &mut state,
             Event::Command(Action::InterviewDisclosure(true)),
         );
-        let Effect::ConnectCodex {
+        let Effect::ConnectInterviewer {
             operation: connect_operation,
         } = connect[0]
         else {
             panic!("expected connect")
         };
-        reduce(&mut state, Event::CodexConnected(connect_operation, Ok(())));
+        reduce(
+            &mut state,
+            Event::InterviewerConnected(connect_operation, Ok(())),
+        );
         reduce(&mut state, Event::Command(Action::InterviewChar('W')));
         let effects = reduce(&mut state, Event::Command(Action::InterviewSend));
-        let Effect::CodexTurn {
+        let Effect::InterviewerTurn {
             operation,
             revision,
             mode,
@@ -2198,24 +2226,24 @@ mod tests {
 
         let wrong_mode = reduce(
             &mut state,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 operation,
                 revision,
-                CodexMode::Hint(1),
+                InterviewerMode::Hint(1),
                 Ok("wrong mode".into()),
             ),
         );
         assert!(matches!(
             wrong_mode.as_slice(),
-            [Effect::FinalizeCodexTurn {
+            [Effect::FinalizeInterviewerTurn {
                 accepted: false,
                 ..
             }]
         ));
-        assert!(state.codex.active.is_some());
+        assert!(state.interviewer.active.is_some());
         assert!(
             !state
-                .codex
+                .interviewer
                 .messages
                 .iter()
                 .any(|(_, text)| text == "wrong mode")
@@ -2232,12 +2260,12 @@ mod tests {
         );
         reduce(
             &mut state,
-            Event::CodexFinished(operation, revision, mode, Ok("stale response".into())),
+            Event::InterviewerFinished(operation, revision, mode, Ok("stale response".into())),
         );
-        assert!(state.codex.active.is_none());
+        assert!(state.interviewer.active.is_none());
         assert!(
             !state
-                .codex
+                .interviewer
                 .messages
                 .iter()
                 .any(|(_, text)| text == "stale response")
@@ -2248,8 +2276,8 @@ mod tests {
     #[test]
     fn submission_review_dispatch_and_completion_stay_bound_to_recorded_revision_after_edit() {
         let mut state = solve_state();
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::Ready;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Ready;
         let submit = reduce(&mut state, Event::Command(Action::Submit));
         let Effect::SaveRun {
             operation,
@@ -2276,10 +2304,10 @@ mod tests {
         let (review_operation, review_revision, review_source) = effects
             .iter()
             .find_map(|effect| match effect {
-                Effect::CodexTurn {
+                Effect::InterviewerTurn {
                     operation,
                     revision,
-                    mode: CodexMode::SubmissionReview,
+                    mode: InterviewerMode::SubmissionReview,
                     source,
                     ..
                 } => Some((*operation, *revision, source.clone())),
@@ -2300,19 +2328,19 @@ mod tests {
         assert_ne!(review_source, state.solve.as_ref().unwrap().editor.text());
         let completion = reduce(
             &mut state,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 review_operation,
                 review_revision,
-                CodexMode::SubmissionReview,
+                InterviewerMode::SubmissionReview,
                 Ok("recorded result passes".into()),
             ),
         );
         assert!(matches!(
             completion.as_slice(),
-            [Effect::FinalizeCodexTurn { accepted: true, .. }]
+            [Effect::FinalizeInterviewerTurn { accepted: true, .. }]
         ));
         assert_eq!(
-            state.codex.messages.last(),
+            state.interviewer.messages.last(),
             Some(&(
                 format!("Submission review · recorded revision {review_revision}"),
                 "recorded result passes".into()
@@ -2324,18 +2352,18 @@ mod tests {
     #[test]
     fn successful_submit_queues_behind_turn_and_connect_then_dispatches_first() {
         let mut turning = solve_state();
-        turning.codex.disclosure_accepted = true;
-        turning.codex.status = CodexStatus::Thinking;
-        turning.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        turning.interviewer.disclosure_accepted = true;
+        turning.interviewer.status = InterviewerStatus::Thinking;
+        turning.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
         let effects = finish_successful_submit(&mut turning, "TURN-BUSY");
         assert!(
             effects
                 .iter()
-                .all(|effect| !matches!(effect, Effect::CodexTurn { .. }))
+                .all(|effect| !matches!(effect, Effect::InterviewerTurn { .. }))
         );
         assert_eq!(
             turning
-                .codex
+                .interviewer
                 .pending_submission_review
                 .as_ref()
                 .map(|review| review.revision),
@@ -2343,23 +2371,23 @@ mod tests {
         );
         let completion = reduce(
             &mut turning,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 OperationId(90),
                 0,
-                CodexMode::Interviewer,
+                InterviewerMode::Interviewer,
                 Ok("question complete".into()),
             ),
         );
         assert!(matches!(
             completion.as_slice(),
             [
-                Effect::CodexTurn {
-                    mode: CodexMode::SubmissionReview,
+                Effect::InterviewerTurn {
+                    mode: InterviewerMode::SubmissionReview,
                     revision: 0,
                     ..
                 },
-                Effect::FinalizeCodexTurn {
-                    mode: CodexMode::Interviewer,
+                Effect::FinalizeInterviewerTurn {
+                    mode: InterviewerMode::Interviewer,
                     accepted: true,
                     ..
                 }
@@ -2368,31 +2396,31 @@ mod tests {
         assert!(reduce(&mut turning, Event::Command(Action::Hint)).is_empty());
 
         let mut connecting = solve_state();
-        connecting.codex.disclosure_accepted = true;
-        connecting.codex.status = CodexStatus::Connecting;
-        connecting.codex.connecting = Some(OperationId(91));
+        connecting.interviewer.disclosure_accepted = true;
+        connecting.interviewer.status = InterviewerStatus::Connecting;
+        connecting.interviewer.connecting = Some(OperationId(91));
         finish_successful_submit(&mut connecting, "CONNECTING");
         let connected = reduce(
             &mut connecting,
-            Event::CodexConnected(OperationId(91), Ok(())),
+            Event::InterviewerConnected(OperationId(91), Ok(())),
         );
         assert!(matches!(
             connected.as_slice(),
-            [Effect::CodexTurn {
-                mode: CodexMode::SubmissionReview,
+            [Effect::InterviewerTurn {
+                mode: InterviewerMode::SubmissionReview,
                 revision: 0,
                 ..
             }]
         ));
-        assert_eq!(connecting.codex.status, CodexStatus::Thinking);
+        assert_eq!(connecting.interviewer.status, InterviewerStatus::Thinking);
     }
 
     #[test]
     fn newest_queued_submission_replaces_older_and_reset_or_exit_clears_it() {
         let mut state = solve_state();
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::Thinking;
-        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Thinking;
+        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
         finish_successful_submit(&mut state, "FIRST");
         reduce(
             &mut state,
@@ -2411,7 +2439,7 @@ mod tests {
             })
             .expect("progress reload");
         let pending = state
-            .codex
+            .interviewer
             .pending_submission_review
             .as_ref()
             .expect("newest review queued");
@@ -2426,15 +2454,15 @@ mod tests {
         assert!(state.status.contains("queued review replaced"));
 
         reduce(&mut state, Event::Command(Action::ResetInterview));
-        assert!(state.codex.pending_submission_review.is_none());
-        state.codex.pending_submission_review = Some(RecordedSubmissionReview::new(
+        assert!(state.interviewer.pending_submission_review.is_none());
+        state.interviewer.pending_submission_review = Some(RecordedSubmissionReview::new(
             1,
             "private".into(),
             "output".into(),
         ));
         reduce(&mut state, Event::Command(Action::Back));
         reduce(&mut state, Event::Command(Action::Back));
-        assert!(state.codex.pending_submission_review.is_none());
+        assert!(state.interviewer.pending_submission_review.is_none());
         assert!(state.solve.is_none());
     }
 
@@ -2442,36 +2470,39 @@ mod tests {
     fn queued_submission_survives_turn_failure_and_dispatches_after_reconnect() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::Thinking;
-        state.codex.active = Some((OperationId(90), 0, CodexMode::Interviewer));
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Thinking;
+        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
         finish_successful_submit(&mut state, "RECORDED");
         let failed = reduce(
             &mut state,
-            Event::CodexFinished(
+            Event::InterviewerFinished(
                 OperationId(90),
                 0,
-                CodexMode::Interviewer,
-                Err("turn failed".into()),
+                InterviewerMode::Interviewer,
+                Err(crate::interviewer::InterviewerError::protocol(
+                    crate::interviewer::Backend::Pi,
+                    "turn failed",
+                )),
             ),
         );
         assert!(matches!(
             failed.as_slice(),
-            [Effect::FinalizeCodexTurn {
+            [Effect::FinalizeInterviewerTurn {
                 accepted: false,
                 ..
             }]
         ));
-        assert!(state.codex.pending_submission_review.is_some());
+        assert!(state.interviewer.pending_submission_review.is_some());
         let reconnect = reduce(&mut state, Event::Command(Action::InterviewFocus));
-        let Effect::ConnectCodex { operation } = reconnect[0] else {
+        let Effect::ConnectInterviewer { operation } = reconnect[0] else {
             panic!("expected reconnect")
         };
-        let review = reduce(&mut state, Event::CodexConnected(operation, Ok(())));
+        let review = reduce(&mut state, Event::InterviewerConnected(operation, Ok(())));
         assert!(matches!(
             review.as_slice(),
-            [Effect::CodexTurn {
-                mode: CodexMode::SubmissionReview,
+            [Effect::InterviewerTurn {
+                mode: InterviewerMode::SubmissionReview,
                 source,
                 output,
                 ..
@@ -2480,22 +2511,22 @@ mod tests {
     }
 
     #[test]
-    fn terminal_codex_states_never_queue_or_send_submission_review() {
+    fn terminal_interviewer_states_never_queue_or_send_submission_review() {
         for status in [
-            CodexStatus::Disabled,
-            CodexStatus::Declined,
-            CodexStatus::AuthRequired,
+            InterviewerStatus::Disabled,
+            InterviewerStatus::Declined,
+            InterviewerStatus::AuthRequired,
         ] {
             let mut state = solve_state();
-            state.codex.enabled = status != CodexStatus::Disabled;
-            state.codex.disclosure_accepted = true;
-            state.codex.status = status;
+            state.interviewer.enabled = status != InterviewerStatus::Disabled;
+            state.interviewer.disclosure_accepted = true;
+            state.interviewer.status = status;
             let effects = finish_successful_submit(&mut state, "PASS");
-            assert!(state.codex.pending_submission_review.is_none());
+            assert!(state.interviewer.pending_submission_review.is_none());
             assert!(
                 effects
                     .iter()
-                    .all(|effect| !matches!(effect, Effect::CodexTurn { .. }))
+                    .all(|effect| !matches!(effect, Effect::InterviewerTurn { .. }))
             );
         }
     }
@@ -2508,16 +2539,16 @@ mod tests {
             &mut state,
             Event::Command(Action::InterviewDisclosure(true)),
         );
-        let Effect::ConnectCodex { operation } = connect[0] else {
+        let Effect::ConnectInterviewer { operation } = connect[0] else {
             panic!("expected connect")
         };
         reduce(&mut state, Event::Command(Action::ResetInterview));
-        reduce(&mut state, Event::CodexConnected(operation, Ok(())));
-        assert_eq!(state.codex.status, CodexStatus::Offline);
-        assert!(!state.codex.composer_focused);
+        reduce(&mut state, Event::InterviewerConnected(operation, Ok(())));
+        assert_eq!(state.interviewer.status, InterviewerStatus::Offline);
+        assert!(!state.interviewer.composer_focused);
 
         let reconnect = reduce(&mut state, Event::Command(Action::InterviewFocus));
-        let Effect::ConnectCodex {
+        let Effect::ConnectInterviewer {
             operation: reconnect_operation,
         } = reconnect[0]
         else {
@@ -2526,45 +2557,56 @@ mod tests {
         assert_ne!(operation, reconnect_operation);
         reduce(
             &mut state,
-            Event::CodexConnected(operation, Err("stale".into())),
+            Event::InterviewerConnected(
+                operation,
+                Err(crate::interviewer::InterviewerError::protocol(
+                    crate::interviewer::Backend::Pi,
+                    "stale",
+                )),
+            ),
         );
-        assert_eq!(state.codex.status, CodexStatus::Connecting);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Connecting);
         reduce(
             &mut state,
-            Event::CodexConnected(reconnect_operation, Ok(())),
+            Event::InterviewerConnected(reconnect_operation, Ok(())),
         );
-        assert_eq!(state.codex.status, CodexStatus::Ready);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Ready);
     }
 
     #[test]
-    fn codex_protocol_error_can_explicitly_reconnect_without_reset() {
+    fn interviewer_protocol_error_can_explicitly_reconnect_without_reset() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::ProtocolError;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::ProtocolError;
         let effects = reduce(&mut state, Event::Command(Action::InterviewFocus));
-        assert!(matches!(effects.as_slice(), [Effect::ConnectCodex { .. }]));
-        assert_eq!(state.codex.status, CodexStatus::Connecting);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ConnectInterviewer { .. }]
+        ));
+        assert_eq!(state.interviewer.status, InterviewerStatus::Connecting);
     }
 
     #[test]
     fn interview_scroll_is_bounded_and_resets_on_append_and_clear() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.scroll = MAX_SCROLL;
+        state.interviewer.scroll = MAX_SCROLL;
         reduce(&mut state, Event::Command(Action::Up));
-        assert_eq!(state.codex.scroll, MAX_SCROLL);
+        assert_eq!(state.interviewer.scroll, MAX_SCROLL);
         reduce(&mut state, Event::Command(Action::Down));
-        assert_eq!(state.codex.scroll, MAX_SCROLL - 1);
-        state.codex.push_message("Interviewer".into(), "new".into());
-        assert_eq!(state.codex.scroll, 0);
-        state.codex.scroll = 10;
-        state.codex.clear_session();
-        assert_eq!(state.codex.scroll, 0);
+        assert_eq!(state.interviewer.scroll, MAX_SCROLL - 1);
+        state
+            .interviewer
+            .push_message("Interviewer".into(), "new".into());
+        assert_eq!(state.interviewer.scroll, 0);
+        state.interviewer.scroll = 10;
+        state.interviewer.clear_session();
+        assert_eq!(state.interviewer.scroll, 0);
     }
 
     #[test]
-    fn cancel_prefers_focused_codex_then_runner_and_uses_sole_active_operation() {
+    fn cancel_prefers_focused_interviewer_then_runner_and_uses_sole_active_operation() {
         let mut state = solve_state();
         let run = reduce(&mut state, Event::Command(Action::SaveTest));
         let Effect::SaveRun {
@@ -2574,7 +2616,7 @@ mod tests {
         else {
             panic!("expected runner")
         };
-        state.codex.active = Some((OperationId(99), 0, CodexMode::Interviewer));
+        state.interviewer.active = Some((OperationId(99), 0, InterviewerMode::Interviewer));
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
@@ -2583,25 +2625,25 @@ mod tests {
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
-            [Effect::CancelCodex { operation }] if *operation == OperationId(99)
+            [Effect::CancelInterviewer { operation }] if *operation == OperationId(99)
         ));
-        state.codex.active = Some((OperationId(100), 0, CodexMode::Interviewer));
+        state.interviewer.active = Some((OperationId(100), 0, InterviewerMode::Interviewer));
         state.solve.as_mut().unwrap().running = None;
         state.solve.as_mut().unwrap().pane = SolvePane::Problem;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
-            [Effect::CancelCodex { operation }] if *operation == OperationId(100)
+            [Effect::CancelInterviewer { operation }] if *operation == OperationId(100)
         ));
     }
 
     #[test]
     fn hints_are_limited_to_three_per_revision_and_reset_after_edit() {
         let mut state = solve_state();
-        state.codex.disclosure_accepted = true;
-        state.codex.status = CodexStatus::Ready;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Ready;
         for level in 1..=3 {
             let effects = reduce(&mut state, Event::Command(Action::Hint));
-            let Effect::CodexTurn {
+            let Effect::InterviewerTurn {
                 operation,
                 revision,
                 mode,
@@ -2610,14 +2652,19 @@ mod tests {
             else {
                 panic!("expected hint")
             };
-            assert_eq!(mode, CodexMode::Hint(level));
+            assert_eq!(mode, InterviewerMode::Hint(level));
             assert!(matches!(
                 reduce(
                     &mut state,
-                    Event::CodexFinished(operation, revision, mode, Ok(format!("hint-{level}")))
+                    Event::InterviewerFinished(
+                        operation,
+                        revision,
+                        mode,
+                        Ok(format!("hint-{level}"))
+                    )
                 )
                 .as_slice(),
-                [Effect::FinalizeCodexTurn { accepted: true, .. }]
+                [Effect::FinalizeInterviewerTurn { accepted: true, .. }]
             ));
         }
         assert!(reduce(&mut state, Event::Command(Action::Hint)).is_empty());
@@ -2637,36 +2684,36 @@ mod tests {
             &mut state,
             Event::Command(Action::Editor(EditorAction::Insert('x'))),
         );
-        state.codex.status = CodexStatus::Ready;
+        state.interviewer.status = InterviewerStatus::Ready;
         let next = reduce(&mut state, Event::Command(Action::Hint));
         assert!(matches!(
             next.as_slice(),
-            [Effect::CodexTurn {
-                mode: CodexMode::Hint(1),
+            [Effect::InterviewerTurn {
+                mode: InterviewerMode::Hint(1),
                 ..
             }]
         ));
     }
 
     #[test]
-    fn disabled_codex_never_discloses_or_requests_a_worker_effect() {
+    fn disabled_interviewer_never_discloses_or_requests_a_worker_effect() {
         let mut state = solve_state();
-        state.disable_codex();
+        state.disable_interviewer();
 
         assert!(reduce(&mut state, Event::Command(Action::InterviewFocus)).is_empty());
         assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Interview);
-        assert_eq!(state.codex.status, CodexStatus::Disabled);
-        assert!(!state.codex.composer_focused);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Disabled);
+        assert!(!state.interviewer.composer_focused);
         assert!(reduce(&mut state, Event::Command(Action::Hint)).is_empty());
         assert!(
             reduce(&mut state, Event::Command(Action::ResetInterview))
                 .iter()
                 .all(|effect| !matches!(
                     effect,
-                    Effect::ConnectCodex { .. } | Effect::CodexTurn { .. }
+                    Effect::ConnectInterviewer { .. } | Effect::InterviewerTurn { .. }
                 ))
         );
-        assert_eq!(state.codex.status, CodexStatus::Disabled);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Disabled);
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::SaveTest)).as_slice(),
             [Effect::SaveRun {
@@ -2676,7 +2723,7 @@ mod tests {
         ));
 
         let mut submit_state = solve_state();
-        submit_state.disable_codex();
+        submit_state.disable_interviewer();
         assert!(matches!(
             reduce(&mut submit_state, Event::Command(Action::Submit)).as_slice(),
             [Effect::SaveRun {
@@ -2687,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_disclosure_decline_keeps_local_solve_available() {
+    fn interviewer_disclosure_decline_keeps_local_solve_available() {
         let mut state = solve_state();
         reduce(&mut state, Event::Command(Action::InterviewFocus));
         assert!(
@@ -2697,9 +2744,38 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(state.codex.status, CodexStatus::Declined);
+        assert_eq!(state.interviewer.status, InterviewerStatus::Declined);
         let effects = reduce(&mut state, Event::Command(Action::SaveTest));
         assert!(matches!(effects.as_slice(), [Effect::SaveRun { .. }]));
+    }
+
+    #[test]
+    fn typed_authentication_failures_enter_auth_state_without_disabling_local_solve() {
+        let mut state = solve_state();
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Connecting;
+        let operation = OperationId(91);
+        state.interviewer.connecting = Some(operation);
+        let error = crate::interviewer::InterviewerError::authentication(
+            crate::interviewer::Backend::Pi,
+            "fixture authentication required",
+        );
+
+        assert!(
+            reduce(
+                &mut state,
+                Event::InterviewerConnected(operation, Err(error)),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.interviewer.status, InterviewerStatus::AuthRequired);
+        assert!(matches!(
+            reduce(&mut state, Event::Command(Action::SaveTest)).as_slice(),
+            [Effect::SaveRun {
+                intent: RunIntent::Test,
+                ..
+            }]
+        ));
     }
 
     #[test]

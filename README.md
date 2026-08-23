@@ -1,6 +1,6 @@
 # Interview Tutor
 
-Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional Codex interviewer. The 82-problem global catalog ships the Blind 75, Convex, Core, anti-metal, and Depot sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
+Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional backend-neutral interviewer with Pi as the default transport and Codex as an explicit compatibility option. The 82-problem global catalog ships the Blind 75, Convex, Core, anti-metal, and Depot sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
 
 ## Requirements and build
 
@@ -11,7 +11,7 @@ Required on Linux:
 - GNU Make and GNU coreutils (`timeout` and `readlink -f`)
 - a UTF-8, `xterm-256color`-compatible terminal for the TUI
 
-SQLite is bundled into the Rust CLI. Neovim 0.9 through 1.x is required for the embedded interview editor; Turso and Codex are optional.
+SQLite is bundled into the Rust CLI. Neovim 0.9 through 1.x is required for the embedded interview editor; Turso and the Pi/Codex interviewer executables are optional. Pi integration accepts exactly Pi 0.84.2.
 
 ```console
 git clone https://github.com/elijah-rou/interview-tutor.git
@@ -37,7 +37,7 @@ Database precedence is:
 4. legacy `BLIND75_DATABASE_URL` and `BLIND75_DB_PATH`
 5. `.turso/progress.db`
 
-Relative paths are resolved from the repository root; `file:` URLs and `~/` are accepted. TUI startup flags take precedence over defaults: `--set ID` opens that set instead of the set menu, `--language ID` selects an enabled language instead of Python (or the first enabled language), `--neovim PATH` selects the required clean embedded Neovim executable, and `--no-codex` prevents any Codex version probe or process spawn. `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE` is the Neovim environment fallback. The `./run` launcher also accepts `--db`.
+Relative paths are resolved from the repository root; `file:` URLs and `~/` are accepted. TUI startup flags take precedence over defaults: `--set ID` opens that set, `--language ID` selects an enabled language, and `--neovim PATH` selects the required clean embedded Neovim executable. `--interviewer pi|codex|none` selects one interviewer transport. Resolution is CLI, legacy `--no-codex` as `none`, `INTERVIEW_TUTOR_INTERVIEWER`, then default `pi`; conflicts, empty values, and invalid values fail without fallback. `INTERVIEW_TUTOR_PI_EXECUTABLE`, `INTERVIEW_TUTOR_CODEX_EXECUTABLE`, and `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE` select trusted executables. `none` and `--no-codex` probe or spawn neither interviewer. The `./run` launcher also accepts `--db`.
 
 ## Practice flow
 
@@ -84,18 +84,20 @@ Problem metadata is independent of ordered set membership:
 
 `problems` and `sets` also provide list, show, update, move/remove, and guarded delete operations. A custom metadata-only problem is valid but cannot run until a language adapter and local test dispatch exist. Shipped resources are read-only through local CRUD; custom resources remain editable.
 
-## Optional Codex interviewer
+## Optional interviewer
 
-Codex is opt-in after an in-app disclosure. Install a trusted Codex CLI, authenticate it with `codex login`, verify with `codex login status`, and run `./interview`. This stack accepts exactly Codex CLI 0.146.0 and 0.147.0. `INTERVIEW_TUTOR_CODEX_EXECUTABLE` can select another trusted executable path; version compatibility is not executable provenance.
+`./interview` defaults to Pi after an in-app disclosure. Install trusted Pi 0.84.2 and configure its selected model provider. Each accepted application turn uses a fresh no-session RPC process with tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations disabled. Pi reads its own bounded configuration/auth inputs and may contact the selected model provider for the disclosed turn.
 
-Interview Tutor does not read API keys or login tokens. After consent, the configured Codex process sends the disclosed statement, source, bounded latest test output, bounded memory-only transcript, and question to OpenAI. Its read-only tools, MCP servers, and configuration may access other readable local paths; this is not total process isolation. Use a dedicated Codex profile/home with minimal configuration when that boundary is too broad. Local editing, tests, and submission remain available with `--no-codex` or when Codex is declined, unauthenticated, offline, interrupted, or incompatible. See [Codex compatibility and privacy](docs/codex-compatibility.md).
+Codex remains available only through `--interviewer codex` or `INTERVIEW_TUTOR_INTERVIEWER=codex`. Install a trusted Codex CLI and authenticate with `codex login`; versions 0.146.0 and 0.147.0 remain accepted exactly. There is no silent Pi/Codex fallback.
+
+After consent, the selected process receives the statement, source, bounded latest test output, bounded memory-only transcript, and question. Interview Tutor writes no transcript log. Local editing, tests, submission, and navigation remain available in `none` mode or when the selected interviewer is declined, unauthenticated, offline, interrupted, or incompatible. Executable version checks establish compatibility, not provenance. See [interviewer compatibility and privacy](docs/codex-compatibility.md).
 
 ## Repository and contracts
 
 ```text
 catalog/problems.json       shipped global metadata, statements, and adapter paths
 problem_sets/*.json         ordered references to global problem slugs
-cli/                        Rust CLI, TUI, runner, database, and Codex boundary
+cli/                        Rust CLI, TUI, runner, database, and interviewer transports
 python/                     Python starters, adapters, and representative cases
 rust/                       Rust starters, adapters, and representative cases
 .turso/progress.db          local runtime database (created on first use)

@@ -50,29 +50,29 @@ pub enum Effect {
     CancelRun {
         operation: OperationId,
     },
-    ConnectCodex {
+    ConnectInterviewer {
         operation: OperationId,
     },
-    CodexTurn {
+    InterviewerTurn {
         operation: OperationId,
         revision: u64,
-        mode: crate::codex::prompt::Mode,
+        mode: crate::interviewer::Mode,
         statement: String,
         source: String,
         output: String,
         question: String,
         solved: bool,
     },
-    FinalizeCodexTurn {
+    FinalizeInterviewerTurn {
         operation: OperationId,
         revision: u64,
-        mode: crate::codex::prompt::Mode,
+        mode: crate::interviewer::Mode,
         accepted: bool,
     },
-    CancelCodex {
+    CancelInterviewer {
         operation: OperationId,
     },
-    ResetCodex,
+    ResetInterviewer,
     LeaveSolve,
     StopNeovim,
 }
@@ -143,12 +143,15 @@ pub enum Event {
         Result<ExecutionResult, String>,
     ),
     DraftSaved(OperationId, u64, String, Result<(), String>),
-    CodexConnected(OperationId, Result<(), String>),
-    CodexFinished(
+    InterviewerConnected(
+        OperationId,
+        Result<(), crate::interviewer::InterviewerError>,
+    ),
+    InterviewerFinished(
         OperationId,
         u64,
-        crate::codex::prompt::Mode,
-        Result<String, String>,
+        crate::interviewer::Mode,
+        Result<String, crate::interviewer::InterviewerError>,
     ),
-    CodexDisconnected(String),
+    InterviewerDisconnected(String),
 }

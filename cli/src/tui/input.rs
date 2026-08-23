@@ -77,7 +77,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         return Some(Action::NextFocus);
     }
 
-    if pane == crate::app::model::SolvePane::Interview && state.codex.composer_focused {
+    if pane == crate::app::model::SolvePane::Interview && state.interviewer.composer_focused {
         state.leader_pending = false;
         return match key.code {
             KeyCode::Esc => Some(Action::InterviewEscape),
@@ -121,7 +121,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     }
 
     if pane == crate::app::model::SolvePane::Interview
-        && state.codex.status == crate::app::model::CodexStatus::Disclosure
+        && state.interviewer.status == crate::app::model::InterviewerStatus::Disclosure
     {
         return match key.code {
             KeyCode::Enter | KeyCode::Char('y') => Some(Action::InterviewDisclosure(true)),
@@ -365,7 +365,7 @@ mod tests {
     fn tab_and_backtab_precede_interview_disclosure_and_composer() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Disclosure;
         assert_eq!(
             action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
             Some(Action::NextFocus)
@@ -378,8 +378,8 @@ mod tests {
             Some(Action::PreviousFocus)
         );
 
-        state.codex.status = crate::app::model::CodexStatus::Ready;
-        state.codex.composer_focused = true;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Ready;
+        state.interviewer.composer_focused = true;
         assert_eq!(
             action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
             Some(Action::NextFocus)
@@ -446,7 +446,7 @@ mod tests {
                 ),
                 Some(Action::InterviewFocus)
             );
-            state.codex.composer_focused = false;
+            state.interviewer.composer_focused = false;
             assert_eq!(
                 action_for_key(
                     KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -547,8 +547,8 @@ mod tests {
         let mut state = solve_state();
         for pane in [SolvePane::Problem, SolvePane::Output, SolvePane::Interview] {
             state.solve.as_mut().unwrap().pane = pane;
-            state.codex.composer_focused = false;
-            state.codex.status = crate::app::model::CodexStatus::Ready;
+            state.interviewer.composer_focused = false;
+            state.interviewer.status = crate::app::model::InterviewerStatus::Ready;
             for (key, expected) in [
                 ('t', Action::SaveTest),
                 ('s', Action::Submit),
@@ -594,8 +594,8 @@ mod tests {
     fn leader_precedence_respects_composer_and_disclosure() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.status = crate::app::model::CodexStatus::Ready;
-        state.codex.composer_focused = true;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Ready;
+        state.interviewer.composer_focused = true;
         assert_eq!(
             action_for_key(
                 KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -605,8 +605,8 @@ mod tests {
         );
         assert!(!state.leader_pending);
 
-        state.codex.composer_focused = false;
-        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        state.interviewer.composer_focused = false;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Disclosure;
         assert_eq!(
             action_for_key(
                 KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
@@ -622,8 +622,8 @@ mod tests {
             Some(Action::ToggleCollapse)
         );
         assert_eq!(
-            state.codex.status,
-            crate::app::model::CodexStatus::Disclosure
+            state.interviewer.status,
+            crate::app::model::InterviewerStatus::Disclosure
         );
 
         assert_eq!(

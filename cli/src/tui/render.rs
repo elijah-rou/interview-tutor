@@ -89,8 +89,9 @@ fn header(state: &AppState) -> Paragraph<'static> {
     ))];
     if state.solve.is_some() {
         lines.push(Line::from(format!(
-            " Codex: {} · memory only",
-            state.codex.status.label()
+            " {}: {} · memory only",
+            state.interviewer.backend.display_name(),
+            state.interviewer.status.label()
         )));
     }
     Paragraph::new(lines).style(
@@ -132,14 +133,14 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
         SolvePane::Editor => "pane",
     };
     let mut candidates = if solve.pane == SolvePane::Interview
-        && state.codex.status == crate::app::model::CodexStatus::Disclosure
+        && state.interviewer.status == crate::app::model::InterviewerStatus::Disclosure
     {
         vec![
             "y/Enter accept · n/Esc decline · Space t/s/b/c/?".to_string(),
             "y accept · n decline · Space actions/?".to_string(),
             "y accept · n decline".to_string(),
         ]
-    } else if solve.pane == SolvePane::Interview && state.codex.composer_focused {
+    } else if solve.pane == SolvePane::Interview && state.interviewer.composer_focused {
         vec![
             "Type question · Enter send · Esc close · Tab panes".to_string(),
             "Enter send · Esc close · Tab panes".to_string(),
@@ -164,9 +165,9 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             ],
             (SolvePane::Interview, _)
                 if matches!(
-                    state.codex.status,
-                    crate::app::model::CodexStatus::ProtocolError
-                        | crate::app::model::CodexStatus::Disconnected
+                    state.interviewer.status,
+                    crate::app::model::InterviewerStatus::ProtocolError
+                        | crate::app::model::InterviewerStatus::Disconnected
                 ) =>
             {
                 vec![
@@ -190,10 +191,11 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             ],
         }
     };
-    let codex_active = state.codex.active.is_some() || state.codex.connecting.is_some();
+    let interviewer_active =
+        state.interviewer.active.is_some() || state.interviewer.connecting.is_some();
     let runner_active = solve.running.is_some();
-    let cancel = if codex_active && (solve.pane == SolvePane::Interview || !runner_active) {
-        Some("Codex")
+    let cancel = if interviewer_active && (solve.pane == SolvePane::Interview || !runner_active) {
+        Some("Interviewer")
     } else if runner_active {
         Some("runner")
     } else {
@@ -422,42 +424,97 @@ fn solve_output(state: &AppState) -> Paragraph<'static> {
 }
 fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
+    let backend_name = state.interviewer.backend.display_name();
     let mut lines = vec![Line::from(format!(
-        "Codex {} · Transcript memory only · not saved",
-        state.codex.status.label()
+        "{backend_name} {} · Transcript memory only · not saved",
+        state.interviewer.status.label()
     ))];
-    match state.codex.status {
-        crate::app::model::CodexStatus::Disabled => lines.push(Line::from(
-            "Codex is Disabled. Local editor, tests, and submission remain available.",
+    match state.interviewer.status {
+        crate::app::model::InterviewerStatus::Disabled => lines.push(Line::from(
+            "Interviewer is Disabled. Local editor, tests, and submission remain available.",
         )),
-        crate::app::model::CodexStatus::Disclosure => {
+        crate::app::model::InterviewerStatus::Disclosure => {
             lines.push(Line::from("Privacy disclosure"));
-            lines.push(Line::from(
-                "The selected statement, current source, bounded latest test output,",
-            ));
-            lines.push(Line::from(
-                "in-memory transcript, and your question may be sent to OpenAI.",
-            ));
-            lines.push(Line::from("Configured executable is"));
-            lines.push(Line::from("user-selected and trusted."));
-            lines.push(Line::from("Version checks compatibility,"));
-            lines.push(Line::from("not provenance."));
-            lines.push(Line::from(
-                "Codex may read local config, MCP, or sandbox-readable paths.",
-            ));
-            lines.push(Line::from("Dedicated profile/home is safer."));
-            lines.push(Line::from(
-                "Account controls apply. y/Enter accept · n/Esc decline",
-            ));
+            if area.width < 58 && state.interviewer.backend == crate::interviewer::Backend::Pi {
+                lines.push(Line::from(
+                    "Sends selected statement/current source/bounded test output/transcript/question to Pi's selected provider.",
+                ));
+                lines.push(Line::from(
+                    "Reads Pi settings/models/auth and allowlisted provider credential environment.",
+                ));
+                lines.push(Line::from(
+                    "Disables sessions, tools/bash, extensions, skills, templates, themes,",
+                ));
+                lines.push(Line::from(
+                    "context files, approvals, telemetry, updates, and startup network.",
+                ));
+                lines.push(Line::from(
+                    "User-trusted executable; version checks compatibility, not provenance. y accept · n decline",
+                ));
+            } else {
+                lines.push(Line::from(
+                    "The selected statement, current source, bounded latest test output,",
+                ));
+                match state.interviewer.backend {
+                    crate::interviewer::Backend::Pi => {
+                        lines.push(Line::from(
+                        "in-memory transcript, and your question go to Pi's selected model provider.",
+                    ));
+                        lines.push(Line::from(
+                            "Configured executable is user-selected and trusted.",
+                        ));
+                        lines.push(Line::from("Version checks compatibility,"));
+                        lines.push(Line::from("not provenance."));
+                        lines.push(Line::from(
+                        "Pi may read its settings, models, auth file, and allowlisted provider auth environment.",
+                    ));
+                        lines.push(Line::from(
+                        "Sessions, tools/bash, extensions, skills, templates, themes, context files,",
+                    ));
+                        lines.push(Line::from(
+                        "approvals, telemetry, update checks, and startup network operations are disabled.",
+                    ));
+                    }
+                    crate::interviewer::Backend::Codex => {
+                        lines.push(Line::from(
+                            "in-memory transcript, and your question may be sent to OpenAI.",
+                        ));
+                        lines.push(Line::from("Configured executable is"));
+                        lines.push(Line::from("user-selected and trusted."));
+                        lines.push(Line::from("Version checks compatibility,"));
+                        lines.push(Line::from("not provenance."));
+                        lines.push(Line::from(
+                            "Codex may read local config, MCP, or sandbox-readable paths.",
+                        ));
+                        lines.push(Line::from("Dedicated profile/home is safer."));
+                    }
+                    crate::interviewer::Backend::None => {
+                        unreachable!("disabled backend has no disclosure")
+                    }
+                }
+                lines.push(Line::from(
+                    "Provider account controls apply. y/Enter accept · n/Esc decline",
+                ));
+            }
         }
-        crate::app::model::CodexStatus::AuthRequired => lines.push(Line::from(
-            "Authentication required. Exit and run: codex login",
-        )),
-        crate::app::model::CodexStatus::Declined => lines.push(Line::from(
-            "Codex declined. Local editor, tests, and submission remain available.",
-        )),
+        crate::app::model::InterviewerStatus::AuthRequired => {
+            lines.push(Line::from(match state.interviewer.backend {
+                crate::interviewer::Backend::Pi => {
+                    "Authentication required. Configure Pi provider credentials and retry."
+                }
+                crate::interviewer::Backend::Codex => {
+                    "Authentication required. Exit and run: codex login"
+                }
+                crate::interviewer::Backend::None => {
+                    "Authentication is unavailable while interviewer is disabled."
+                }
+            }))
+        }
+        crate::app::model::InterviewerStatus::Declined => lines.push(Line::from(format!(
+            "{backend_name} declined. Local editor, tests, and submission remain available."
+        ))),
         _ => {
-            for (label, message) in &state.codex.messages {
+            for (label, message) in &state.interviewer.messages {
                 lines.push(Line::styled(
                     format!("{label}:"),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -465,14 +522,14 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                 lines.extend(message.lines().map(|line| Line::from(line.to_string())));
             }
             lines.push(Line::from(""));
-            let cursor = if state.codex.composer_focused {
+            let cursor = if state.interviewer.composer_focused {
                 "▌"
             } else {
                 ""
             };
             lines.push(Line::from(format!(
                 "Question: {}{cursor}",
-                state.codex.composer
+                state.interviewer.composer
             )));
             lines.push(Line::from(
                 "i ask · Enter send · Space-h hint · Space-r reset · Ctrl-C cancel",
@@ -493,7 +550,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
         })
         .sum::<usize>();
     let latest_offset = wrapped_rows.saturating_sub(visible_rows);
-    let retained_below = usize::from(state.codex.scroll).min(latest_offset);
+    let retained_below = usize::from(state.interviewer.scroll).min(latest_offset);
     let offset = latest_offset.saturating_sub(retained_below);
     Paragraph::new(lines)
         .block(block(if solve.pane == SolvePane::Interview {
@@ -1079,28 +1136,39 @@ mod tests {
     fn interview_disclosure_and_labels_render_at_supported_sizes() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.disable_codex();
+        state.disable_interviewer();
         let disabled = rendered(&state, 120, 40);
-        assert!(disabled.contains("Codex Disabled"));
+        assert!(disabled.contains("Pi Disabled"));
 
-        state.codex.enabled = true;
-        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        state.interviewer.enabled = true;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Disclosure;
         let disclosure = rendered(&state, 120, 40);
         assert!(disclosure.contains("Privacy disclosure"));
-        assert!(disclosure.contains("Configured executable is"));
-        assert!(disclosure.contains("user-selected and trusted"));
-        assert!(disclosure.contains("not provenance"));
-        assert!(disclosure.contains("Codex may read local"));
-        assert!(disclosure.contains("Dedicated profile/home"));
-        assert!(rendered(&state, 80, 24).contains("Privacy disclosure"));
+        assert!(disclosure.contains("selected provider"));
+        assert!(disclosure.contains("settings"));
+        assert!(disclosure.contains("tools/bash"));
+        assert!(disclosure.contains("provenance"));
+        let compact_disclosure = rendered(&state, 80, 24);
+        assert!(compact_disclosure.contains("Privacy disclosure"));
+        assert!(compact_disclosure.contains("settings"));
+        assert!(compact_disclosure.contains("tools/bash"));
+        assert!(compact_disclosure.contains("provenance"));
+        state.interviewer.backend = crate::interviewer::Backend::Codex;
+        let codex_disclosure = rendered(&state, 120, 40);
+        assert!(codex_disclosure.contains("OpenAI"));
+        assert!(codex_disclosure.contains("MCP"));
+        assert!(codex_disclosure.contains("Dedicated profile/home"));
         assert!(rendered(&state, 59, 19).contains("Terminal too small"));
-        state.codex.status = crate::app::model::CodexStatus::Feedback;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
         state
-            .codex
+            .interviewer
             .messages
             .push(("Interviewer".into(), "Question".into()));
-        state.codex.messages.push(("Hinter".into(), "Hint".into()));
-        state.codex.messages.push((
+        state
+            .interviewer
+            .messages
+            .push(("Hinter".into(), "Hint".into()));
+        state.interviewer.messages.push((
             "Submission review · recorded revision 7".into(),
             "Review".into(),
         ));
@@ -1239,22 +1307,22 @@ mod tests {
     }
 
     #[test]
-    fn solve_header_preserves_exact_codex_state_and_memory_badge_at_supported_widths() {
+    fn solve_header_preserves_exact_interviewer_state_and_memory_badge_at_supported_widths() {
         let mut state = solve_state();
         for status in [
-            crate::app::model::CodexStatus::Disabled,
-            crate::app::model::CodexStatus::Offline,
-            crate::app::model::CodexStatus::AuthRequired,
-            crate::app::model::CodexStatus::Ready,
-            crate::app::model::CodexStatus::Thinking,
-            crate::app::model::CodexStatus::ProtocolError,
+            crate::app::model::InterviewerStatus::Disabled,
+            crate::app::model::InterviewerStatus::Offline,
+            crate::app::model::InterviewerStatus::AuthRequired,
+            crate::app::model::InterviewerStatus::Ready,
+            crate::app::model::InterviewerStatus::Thinking,
+            crate::app::model::InterviewerStatus::ProtocolError,
         ] {
-            state.codex.status = status;
+            state.interviewer.status = status;
             for width in [60_u16, 80, 120] {
                 let row = rendered_row(&state, width, 24, 1);
                 assert_eq!(
                     row,
-                    format!(" Codex: {} · memory only", status.label()),
+                    format!(" Pi: {} · memory only", status.label()),
                     "width {width}"
                 );
             }
@@ -1265,7 +1333,7 @@ mod tests {
     fn interview_scroll_reaches_oldest_and_latest_messages_at_both_layouts() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.status = crate::app::model::CodexStatus::Feedback;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
         for index in 0..48 {
             let message = if index == 0 {
                 "OLDEST-SENTINEL".into()
@@ -1274,14 +1342,16 @@ mod tests {
             } else {
                 format!("message-{index}: {}", "wrapped content ".repeat(3))
             };
-            state.codex.push_message("Interviewer".into(), message);
+            state
+                .interviewer
+                .push_message("Interviewer".into(), message);
         }
         for (width, height) in [(120, 40), (80, 24)] {
-            state.codex.scroll = 0;
+            state.interviewer.scroll = 0;
             let latest = rendered(&state, width, height);
             assert!(latest.contains("LATEST-SENTINEL"), "{width}x{height}");
             assert!(!latest.contains("OLDEST-SENTINEL"), "{width}x{height}");
-            state.codex.scroll = u16::MAX;
+            state.interviewer.scroll = u16::MAX;
             let oldest = rendered(&state, width, height);
             assert!(oldest.contains("OLDEST-SENTINEL"), "{width}x{height}");
             assert!(!oldest.contains("LATEST-SENTINEL"), "{width}x{height}");
@@ -1302,17 +1372,17 @@ mod tests {
         ));
         assert!(rendered_footer(&state, 80).contains("Ctrl-C runner"));
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
-        state.codex.active = Some((
+        state.interviewer.active = Some((
             crate::app::model::OperationId(2),
             0,
-            crate::codex::prompt::Mode::Interviewer,
+            crate::interviewer::Mode::Interviewer,
         ));
-        assert!(rendered_footer(&state, 80).contains("Ctrl-C Codex"));
+        assert!(rendered_footer(&state, 80).contains("Ctrl-C Interviewer"));
         for width in [1_u16, 10, 20, 60, 80, 120] {
             assert!(rendered_footer(&state, width).width() <= usize::from(width));
         }
 
-        state.codex.active = None;
+        state.interviewer.active = None;
         state.solve.as_mut().unwrap().running = None;
         state.show_help = true;
         let help = rendered(&state, 100, 30);

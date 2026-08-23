@@ -30,12 +30,19 @@ def run_case(
     codex_home = temporary / f"codex-{name}"
     codex_home.mkdir(mode=0o700)
     (codex_home / "fake-mode").write_text("normal", encoding="utf-8")
+    pi_home = temporary / f"pi-{name}"
+    pi_home.mkdir(mode=0o700)
+    (pi_home / "fake-mode").write_text("normal", encoding="utf-8")
     environment = os.environ.copy()
     environment.pop("OPENAI_API_KEY", None)
     environment["PRACTICE_ROOT"] = str(repository_root)
     environment["CODEX_HOME"] = str(codex_home)
     environment["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(
         repository_root / "cli" / "tests" / "fixtures" / "fake_codex_app_server.py"
+    )
+    environment["PI_CODING_AGENT_DIR"] = str(pi_home)
+    environment["INTERVIEW_TUTOR_PI_EXECUTABLE"] = str(
+        repository_root / "cli" / "tests" / "fixtures" / "fake_pi_rpc.py"
     )
     if action == "error":
         environment["INTERVIEW_TUTOR_TEST_ERROR_AFTER_ENTER"] = "1"
@@ -83,6 +90,7 @@ def run_case(
         assert termios.tcgetattr(session.slave) == terminal_before, name
         assert not (codex_home / "fake-version-probe").exists(), name
         assert not (codex_home / "fake-capture.jsonl").exists(), name
+        assert not (pi_home / "fake-capture.jsonl").exists(), name
         if action == "quit":
             assert disposition_file.read_text(encoding="utf-8") == (
                 "dispositions=restored mask=restored\n"

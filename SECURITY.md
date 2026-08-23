@@ -2,7 +2,7 @@
 
 ## Supported scope
 
-This project is pre-release. Security fixes target the latest revision on the default branch; older commits, forks, local modifications, third-party language adapters, and third-party Codex executables are not promised backports or support. Reports about documented trust boundaries are welcome, but a configured executable accessing permissions the user granted it is not by itself a containment bypass.
+This project is pre-release. Security fixes target the latest revision on the default branch; older commits, forks, local modifications, third-party language adapters, and third-party Pi/Codex executables are not promised backports or support. Reports about documented trust boundaries are welcome, but a configured executable accessing permissions the user granted it is not by itself a containment bypass.
 
 ## Reporting
 
@@ -12,14 +12,16 @@ Never paste API keys, login tokens, credential files, private solution content, 
 
 ## Credential and executable boundary
 
-Interview Tutor does not accept or read OpenAI API keys, Codex login tokens, or credential files, and it does not call OpenAI HTTP endpoints directly. The configured Codex CLI owns its authentication through `HOME`/`CODEX_HOME`. Use `codex login` and `codex login status`; do not paste credentials into the Interview composer.
+Interview Tutor does not parse, log, or persist provider credentials and does not call model-provider HTTP endpoints directly. The selected Pi or Codex executable owns provider authentication. Never paste credentials into the Interview composer.
 
-The default `codex` from `PATH`, or a path selected through `INTERVIEW_TUTOR_CODEX_EXECUTABLE`, is trusted user-configured code. Interview Tutor checks exact compatible versions, regular-file ownership, writable mode bits, and file identity before spawn. These checks establish compatibility and reduce replacement races; they do not prove provenance or make an untrusted executable safe. Install Codex from a trusted source and prefer a dedicated minimal profile/home.
+The default `pi` from `PATH`, explicit `codex`, or a path selected through `INTERVIEW_TUTOR_PI_EXECUTABLE`/`INTERVIEW_TUTOR_CODEX_EXECUTABLE` is trusted user-configured code. Interview Tutor checks exact compatible versions, regular-file ownership, writable mode bits, and file identity before spawn. These checks establish compatibility and reduce replacement races; they do not prove provenance or make an untrusted executable safe.
 
-The app-server requests read-only/no-network/never-approve operation and rejects tool approval requests. This is not total process isolation. The selected process can still use readable configuration, read-only tools, MCP servers, and other local paths allowed by its sandbox/configuration. Run with `--no-codex` when that boundary is unacceptable.
+Pi runs in a fresh empty mode-0700 cwd for every application turn with no session persistence. Its process environment is cleared and restored from a bounded locale/proxy/certificate/config/provider-auth allowlist. Tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. Pi still reads its selected configuration/auth inputs and contacts the selected model provider for the disclosed prompt. Provider credentials are available to the trusted child where required but are never passed on argv.
+
+Codex compatibility retains its empty cwd, bounded environment, ephemeral threads, read-only/no-network/never-approve request, and rejection of tool approvals. It can still use readable configuration, read-only tools, MCP servers, and local paths allowed by its sandbox/configuration. Neither transport is total process isolation. Use `--interviewer none` or legacy `--no-codex` when that boundary is unacceptable; disabled mode probes and spawns neither backend.
 
 ## Local solution privacy
 
 Local catalog browsing, source editing, runner execution, SQLite progress, and attempts remain on the machine. Files are loaded/saved only at the catalog-planned regular source beneath the canonical project root. A local runner or custom adapter is executable code and should be reviewed before use.
 
-After explicit Codex disclosure consent, the selected statement, current source, bounded latest test output, bounded memory-only transcript, and question are supplied to the configured Codex process and may be sent to OpenAI under the user's account controls. Interview Tutor writes no transcript log and clears transcript state on reset, solve exit, and process exit. See [Codex privacy details](docs/codex-compatibility.md) for the exact outbound and readable-path boundaries.
+After explicit backend-aware disclosure consent, the selected statement, current source, bounded latest test output, bounded memory-only transcript, and question are supplied to the configured process and may be sent to Pi's selected model provider or OpenAI through Codex under the user's account controls. Interview Tutor writes no transcript log and clears transcript state on reset, solve exit, and process exit. See [interviewer privacy details](docs/codex-compatibility.md) for exact transport, outbound, and readable-path boundaries.

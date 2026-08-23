@@ -140,7 +140,7 @@ struct RunnerServices {
     finalize_cancelled: Arc<FinalizeCancelledService>,
 }
 
-enum CodexWorkerCommand {
+enum InterviewerWorkerCommand {
     Connect {
         operation: crate::app::model::OperationId,
         generation: u64,
@@ -150,7 +150,7 @@ enum CodexWorkerCommand {
         operation: crate::app::model::OperationId,
         generation: u64,
         revision: u64,
-        mode: crate::codex::prompt::Mode,
+        mode: crate::interviewer::Mode,
         statement: String,
         source: String,
         output: String,
@@ -167,9 +167,9 @@ enum CodexWorkerCommand {
     Shutdown,
 }
 
-struct CodexTurnRequest {
+struct InterviewerTurnRequest {
     revision: u64,
-    mode: crate::codex::prompt::Mode,
+    mode: crate::interviewer::Mode,
     statement: String,
     source: String,
     output: String,
@@ -177,53 +177,63 @@ struct CodexTurnRequest {
     solved: bool,
 }
 
-trait CodexWorkerBackend: Send {
+trait InterviewerWorkerBackend: Send {
+    fn backend(&self) -> crate::interviewer::Backend;
+
     fn connect(
         &mut self,
         control_pid: Arc<std::sync::atomic::AtomicI32>,
         cancellation: &CancellationToken,
-    ) -> Result<(), String>;
+    ) -> Result<(), crate::interviewer::InterviewerError>;
     fn turn(
         &mut self,
-        request: &CodexTurnRequest,
+        request: &InterviewerTurnRequest,
         cancellation: &CancellationToken,
-    ) -> Result<String, String>;
-    fn commit(&mut self, pending: PendingCodexResponse);
+    ) -> Result<String, crate::interviewer::InterviewerError>;
+    fn commit(&mut self, pending: PendingInterviewerResponse);
     fn reset(&mut self);
 }
 
-#[derive(Default)]
-struct SessionCodexBackend {
-    session: Option<crate::codex::CodexSession>,
+struct SessionInterviewerBackend {
+    backend: crate::interviewer::Backend,
+    session: Option<crate::interviewer::InterviewerSession>,
 }
 
-impl CodexWorkerBackend for SessionCodexBackend {
+impl InterviewerWorkerBackend for SessionInterviewerBackend {
+    fn backend(&self) -> crate::interviewer::Backend {
+        self.backend
+    }
+
     fn connect(
         &mut self,
         control_pid: Arc<std::sync::atomic::AtomicI32>,
         cancellation: &CancellationToken,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::interviewer::InterviewerError> {
         if let Some(session) = self.session.as_mut() {
             session.prepare_next_operation(cancellation)
         } else {
-            self.session = Some(
-                crate::codex::CodexSession::connect_with_control_and_cancellation(
-                    control_pid,
-                    cancellation,
-                )?,
-            );
+            self.session = Some(crate::interviewer::InterviewerSession::connect(
+                self.backend,
+                control_pid,
+                cancellation,
+            )?);
             Ok(())
         }
     }
 
     fn turn(
         &mut self,
-        request: &CodexTurnRequest,
+        request: &InterviewerTurnRequest,
         cancellation: &CancellationToken,
-    ) -> Result<String, String> {
-        let session = self.session.as_mut().ok_or("Codex is not connected")?;
+    ) -> Result<String, crate::interviewer::InterviewerError> {
+        let session = self.session.as_mut().ok_or_else(|| {
+            crate::interviewer::InterviewerError::transport(
+                self.backend,
+                "Interviewer is not connected",
+            )
+        })?;
         session.ask_deferred_with_cancellation(
-            crate::codex::InterviewRequest {
+            crate::interviewer::InterviewRequest {
                 mode: request.mode,
                 statement: &request.statement,
                 source: &request.source,
@@ -236,7 +246,7 @@ impl CodexWorkerBackend for SessionCodexBackend {
         )
     }
 
-    fn commit(&mut self, pending: PendingCodexResponse) {
+    fn commit(&mut self, pending: PendingInterviewerResponse) {
         self.session
             .as_mut()
             .expect("successful turn requires session")
@@ -252,7 +262,7 @@ impl CodexWorkerBackend for SessionCodexBackend {
         if self
             .session
             .as_ref()
-            .is_some_and(crate::codex::CodexSession::requires_restart)
+            .is_some_and(crate::interviewer::InterviewerSession::requires_restart)
         {
             self.session.as_mut().expect("session checked").clear();
         } else {
@@ -261,60 +271,84 @@ impl CodexWorkerBackend for SessionCodexBackend {
     }
 }
 
-struct PendingCodexResponse {
+struct PendingInterviewerResponse {
     operation: crate::app::model::OperationId,
     revision: u64,
-    mode: crate::codex::prompt::Mode,
+    mode: crate::interviewer::Mode,
     question: String,
     response: String,
 }
 
 #[derive(Clone, Copy)]
-struct CodexTurnFinalization {
+struct InterviewerTurnFinalization {
     operation: crate::app::model::OperationId,
     revision: u64,
-    mode: crate::codex::prompt::Mode,
+    mode: crate::interviewer::Mode,
     accepted: bool,
 }
 
-type CodexBackendFactory = dyn Fn() -> Box<dyn CodexWorkerBackend> + Send + Sync;
+type InterviewerBackendFactory = dyn Fn() -> Box<dyn InterviewerWorkerBackend> + Send + Sync;
 
-fn catch_codex_worker_panic<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
-        .unwrap_or_else(|_| Err("Codex worker panicked".into()))
+fn catch_interviewer_worker_panic<T>(
+    backend: crate::interviewer::Backend,
+    operation: impl FnOnce() -> Result<T, crate::interviewer::InterviewerError>,
+) -> Result<T, crate::interviewer::InterviewerError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).unwrap_or_else(|_| {
+        Err(crate::interviewer::InterviewerError::transport(
+            backend,
+            "Interviewer worker panicked",
+        ))
+    })
 }
 
-struct CodexWorker {
+struct InterviewerWorker {
     enabled: bool,
-    sender: Option<SyncSender<CodexWorkerCommand>>,
+    sender: Option<SyncSender<InterviewerWorkerCommand>>,
     events: Option<Receiver<Event>>,
     join: Option<JoinHandle<()>>,
     control_pid: Arc<std::sync::atomic::AtomicI32>,
     active_cancellation:
         Arc<std::sync::Mutex<Option<(crate::app::model::OperationId, CancellationToken)>>>,
-    pending_response: Arc<std::sync::Mutex<Option<PendingCodexResponse>>>,
-    finalization: Arc<std::sync::Mutex<Option<CodexTurnFinalization>>>,
+    pending_response: Arc<std::sync::Mutex<Option<PendingInterviewerResponse>>>,
+    finalization: Arc<std::sync::Mutex<Option<InterviewerTurnFinalization>>>,
     cancelled_operation: Arc<std::sync::Mutex<Option<crate::app::model::OperationId>>>,
     reset_generation: Arc<std::sync::atomic::AtomicU64>,
-    backend_factory: Arc<CodexBackendFactory>,
+    backend_factory: Arc<InterviewerBackendFactory>,
     #[cfg(test)]
     queued_event_operation: Arc<std::sync::atomic::AtomicU64>,
 }
-impl CodexWorker {
-    fn start() -> Self {
-        Self::new(Arc::new(|| Box::new(SessionCodexBackend::default())), true)
+impl InterviewerWorker {
+    fn start(backend: crate::interviewer::Backend) -> Self {
+        assert!(backend.enabled());
+        Self::new(
+            Arc::new(move || {
+                Box::new(SessionInterviewerBackend {
+                    backend,
+                    session: None,
+                })
+            }),
+            true,
+        )
     }
 
     fn disabled() -> Self {
-        Self::new(Arc::new(|| Box::new(SessionCodexBackend::default())), false)
+        Self::new(
+            Arc::new(|| {
+                Box::new(SessionInterviewerBackend {
+                    backend: crate::interviewer::Backend::Pi,
+                    session: None,
+                })
+            }),
+            false,
+        )
     }
 
     #[cfg(test)]
-    fn start_with_backend(backend_factory: Arc<CodexBackendFactory>) -> Self {
+    fn start_with_backend(backend_factory: Arc<InterviewerBackendFactory>) -> Self {
         Self::new(backend_factory, true)
     }
 
-    fn new(backend_factory: Arc<CodexBackendFactory>, enabled: bool) -> Self {
+    fn new(backend_factory: Arc<InterviewerBackendFactory>, enabled: bool) -> Self {
         let mut worker = Self {
             enabled,
             sender: None,
@@ -337,7 +371,7 @@ impl CodexWorker {
     }
 
     fn spawn(&mut self) {
-        assert!(self.enabled, "disabled Codex worker must not spawn");
+        assert!(self.enabled, "disabled Interviewer worker must not spawn");
         assert!(self.join.is_none());
         assert!(self.sender.is_none());
         assert!(self.events.is_none());
@@ -360,19 +394,21 @@ impl CodexWorker {
                 if generation != observed_generation {
                     *thread_pending_response
                         .lock()
-                        .expect("Codex pending response lock") = None;
-                    *thread_finalization.lock().expect("Codex finalization lock") = None;
+                        .expect("Interviewer pending response lock") = None;
+                    *thread_finalization
+                        .lock()
+                        .expect("Interviewer finalization lock") = None;
                     backend.reset();
                     observed_generation = generation;
                 }
                 let cancelled = thread_cancelled_operation
                     .lock()
-                    .expect("Codex cancelled operation lock")
+                    .expect("Interviewer cancelled operation lock")
                     .take();
                 if let Some(cancelled) = cancelled {
                     let mut pending = thread_pending_response
                         .lock()
-                        .expect("Codex pending response lock");
+                        .expect("Interviewer pending response lock");
                     if pending
                         .as_ref()
                         .is_some_and(|response| response.operation == cancelled)
@@ -382,13 +418,13 @@ impl CodexWorker {
                 }
                 let finalization = thread_finalization
                     .lock()
-                    .expect("Codex finalization lock")
+                    .expect("Interviewer finalization lock")
                     .take();
                 if let Some(finalization) = finalization {
                     let pending = {
                         let mut pending = thread_pending_response
                             .lock()
-                            .expect("Codex pending response lock");
+                            .expect("Interviewer pending response lock");
                         if pending.as_ref().is_some_and(|response| {
                             (response.operation, response.revision, response.mode)
                                 == (
@@ -409,19 +445,26 @@ impl CodexWorker {
                     }
                 }
                 match command {
-                    CodexWorkerCommand::Connect {
+                    InterviewerWorkerCommand::Connect {
                         operation,
                         generation,
                         cancellation,
                     } => {
                         let result = if generation == observed_generation {
                             let control_pid = Arc::clone(&thread_control_pid);
-                            catch_codex_worker_panic(|| backend.connect(control_pid, &cancellation))
+                            let backend_kind = backend.backend();
+                            catch_interviewer_worker_panic(backend_kind, || {
+                                backend.connect(control_pid, &cancellation)
+                            })
                         } else {
-                            Err("Codex connection discarded after reset".into())
+                            Err(crate::interviewer::InterviewerError::cancelled(
+                                backend.backend(),
+                                "Interviewer connection discarded after reset",
+                            ))
                         };
-                        let mut active =
-                            thread_cancellation.lock().expect("Codex cancellation lock");
+                        let mut active = thread_cancellation
+                            .lock()
+                            .expect("Interviewer cancellation lock");
                         if active
                             .as_ref()
                             .is_some_and(|(active_operation, _)| *active_operation == operation)
@@ -429,7 +472,7 @@ impl CodexWorker {
                             *active = None;
                         }
                         drop(active);
-                        let event = Event::CodexConnected(operation, result);
+                        let event = Event::InterviewerConnected(operation, result);
                         if event_sender.send(event).is_err() {
                             break;
                         }
@@ -437,7 +480,7 @@ impl CodexWorker {
                         thread_queued_event_operation
                             .store(operation.0, std::sync::atomic::Ordering::Release);
                     }
-                    CodexWorkerCommand::Turn {
+                    InterviewerWorkerCommand::Turn {
                         operation,
                         generation,
                         revision,
@@ -453,8 +496,8 @@ impl CodexWorker {
                         // polling race. It must never block or contaminate a newer turn.
                         *thread_pending_response
                             .lock()
-                            .expect("Codex pending response lock") = None;
-                        let request = CodexTurnRequest {
+                            .expect("Interviewer pending response lock") = None;
+                        let request = InterviewerTurnRequest {
                             revision,
                             mode,
                             statement,
@@ -464,12 +507,19 @@ impl CodexWorker {
                             solved,
                         };
                         let mut result = if generation == observed_generation {
-                            catch_codex_worker_panic(|| backend.turn(&request, &cancellation))
+                            let backend_kind = backend.backend();
+                            catch_interviewer_worker_panic(backend_kind, || {
+                                backend.turn(&request, &cancellation)
+                            })
                         } else {
-                            Err("Codex turn discarded after reset".into())
+                            Err(crate::interviewer::InterviewerError::cancelled(
+                                backend.backend(),
+                                "Interviewer turn discarded after reset",
+                            ))
                         };
-                        let mut active =
-                            thread_cancellation.lock().expect("Codex cancellation lock");
+                        let mut active = thread_cancellation
+                            .lock()
+                            .expect("Interviewer cancellation lock");
                         if active
                             .as_ref()
                             .is_some_and(|(active_operation, _)| *active_operation == operation)
@@ -480,22 +530,25 @@ impl CodexWorker {
 
                         let mut pending = thread_pending_response
                             .lock()
-                            .expect("Codex pending response lock");
+                            .expect("Interviewer pending response lock");
                         let current_generation =
                             thread_reset_generation.load(std::sync::atomic::Ordering::Acquire);
                         let cancelled = thread_cancelled_operation
                             .lock()
-                            .expect("Codex cancelled operation lock")
+                            .expect("Interviewer cancelled operation lock")
                             .as_ref()
                             == Some(&operation);
                         if current_generation != generation || cancelled {
-                            result = Err(if cancelled {
-                                "Codex operation cancelled".into()
-                            } else {
-                                "Codex turn discarded after reset".into()
-                            });
+                            result = Err(crate::interviewer::InterviewerError::cancelled(
+                                backend.backend(),
+                                if cancelled {
+                                    "Interviewer operation cancelled"
+                                } else {
+                                    "Interviewer turn discarded after reset"
+                                },
+                            ));
                         } else if let Ok(response) = result.as_ref() {
-                            *pending = Some(PendingCodexResponse {
+                            *pending = Some(PendingInterviewerResponse {
                                 operation,
                                 revision,
                                 mode,
@@ -505,7 +558,9 @@ impl CodexWorker {
                         }
                         drop(pending);
                         if event_sender
-                            .send(Event::CodexFinished(operation, revision, mode, result))
+                            .send(Event::InterviewerFinished(
+                                operation, revision, mode, result,
+                            ))
                             .is_err()
                         {
                             break;
@@ -514,16 +569,16 @@ impl CodexWorker {
                         thread_queued_event_operation
                             .store(operation.0, std::sync::atomic::Ordering::Release);
                     }
-                    CodexWorkerCommand::Reset => {
+                    InterviewerWorkerCommand::Reset => {
                         *thread_pending_response
                             .lock()
-                            .expect("Codex pending response lock") = None;
+                            .expect("Interviewer pending response lock") = None;
                         backend.reset();
                     }
-                    CodexWorkerCommand::Cancel { .. } => {}
+                    InterviewerWorkerCommand::Cancel { .. } => {}
                     #[cfg(test)]
-                    CodexWorkerCommand::Panic => panic!("injected Codex worker panic"),
-                    CodexWorkerCommand::Shutdown => break,
+                    InterviewerWorkerCommand::Panic => panic!("injected Interviewer worker panic"),
+                    InterviewerWorkerCommand::Shutdown => break,
                 }
             }
         });
@@ -552,18 +607,21 @@ impl CodexWorker {
             *self
                 .active_cancellation
                 .lock()
-                .expect("Codex cancellation lock") = None;
+                .expect("Interviewer cancellation lock") = None;
             *self
                 .pending_response
                 .lock()
-                .expect("Codex pending response lock") = None;
-            *self.finalization.lock().expect("Codex finalization lock") = None;
+                .expect("Interviewer pending response lock") = None;
+            *self
+                .finalization
+                .lock()
+                .expect("Interviewer finalization lock") = None;
             let panicked = self.join.take().is_some_and(|join| join.join().is_err());
             self.kill_control_process();
-            result.push(Event::CodexDisconnected(if panicked {
-                "Codex worker panicked and disconnected".into()
+            result.push(Event::InterviewerDisconnected(if panicked {
+                "Interviewer worker panicked and disconnected".into()
             } else {
-                "Codex worker disconnected".into()
+                "Interviewer worker disconnected".into()
             }));
         }
         result
@@ -574,36 +632,36 @@ impl CodexWorker {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn send(&mut self, command: CodexWorkerCommand) -> Result<(), String> {
+    fn send(&mut self, command: InterviewerWorkerCommand) -> Result<(), String> {
         if !self.enabled {
-            return Err("Codex is disabled".into());
+            return Err("Interviewer is disabled".into());
         }
-        if self.join.is_none() && matches!(&command, CodexWorkerCommand::Connect { .. }) {
+        if self.join.is_none() && matches!(&command, InterviewerWorkerCommand::Connect { .. }) {
             self.spawn();
         }
         if self.sender.is_none() {
-            return Err("Codex worker is stopped".into());
+            return Err("Interviewer worker is stopped".into());
         }
         let replacement = match &command {
-            CodexWorkerCommand::Connect {
+            InterviewerWorkerCommand::Connect {
                 operation,
                 cancellation,
                 ..
             }
-            | CodexWorkerCommand::Turn {
+            | InterviewerWorkerCommand::Turn {
                 operation,
                 cancellation,
                 ..
             } => Some((*operation, cancellation.clone())),
-            CodexWorkerCommand::Cancel { operation } => {
+            InterviewerWorkerCommand::Cancel { operation } => {
                 *self
                     .cancelled_operation
                     .lock()
-                    .expect("Codex cancelled operation lock") = Some(*operation);
+                    .expect("Interviewer cancelled operation lock") = Some(*operation);
                 let mut pending = self
                     .pending_response
                     .lock()
-                    .expect("Codex pending response lock");
+                    .expect("Interviewer pending response lock");
                 if pending
                     .as_ref()
                     .is_some_and(|response| response.operation == *operation)
@@ -614,7 +672,7 @@ impl CodexWorker {
                 if let Some((active_operation, cancellation)) = self
                     .active_cancellation
                     .lock()
-                    .expect("Codex cancellation lock")
+                    .expect("Interviewer cancellation lock")
                     .as_ref()
                     && active_operation == operation
                 {
@@ -622,11 +680,11 @@ impl CodexWorker {
                 }
                 None
             }
-            CodexWorkerCommand::Reset => {
+            InterviewerWorkerCommand::Reset => {
                 if let Some((_, cancellation)) = self
                     .active_cancellation
                     .lock()
-                    .expect("Codex cancellation lock")
+                    .expect("Interviewer cancellation lock")
                     .as_ref()
                 {
                     cancellation.cancel();
@@ -634,14 +692,14 @@ impl CodexWorker {
                 None
             }
             #[cfg(test)]
-            CodexWorkerCommand::Panic => None,
-            CodexWorkerCommand::Shutdown => None,
+            InterviewerWorkerCommand::Panic => None,
+            InterviewerWorkerCommand::Shutdown => None,
         };
         let previous = replacement.as_ref().map(|replacement| {
             let mut active = self
                 .active_cancellation
                 .lock()
-                .expect("Codex cancellation lock");
+                .expect("Interviewer cancellation lock");
             let previous = active.take();
             *active = Some(replacement.clone());
             previous
@@ -652,7 +710,7 @@ impl CodexWorker {
                 let mut active = self
                     .active_cancellation
                     .lock()
-                    .expect("Codex cancellation lock");
+                    .expect("Interviewer cancellation lock");
                 let replacement_flag = replacement.signal_flag();
                 if active.as_ref().is_some_and(|(_, current)| {
                     Arc::ptr_eq(&current.signal_flag(), &replacement_flag)
@@ -660,7 +718,7 @@ impl CodexWorker {
                     *active = previous;
                 }
             }
-            return Err(format!("Codex worker is busy or stopped: {error}"));
+            return Err(format!("Interviewer worker is busy or stopped: {error}"));
         }
         Ok(())
     }
@@ -669,14 +727,14 @@ impl CodexWorker {
         &self,
         operation: crate::app::model::OperationId,
         revision: u64,
-        mode: crate::codex::prompt::Mode,
+        mode: crate::interviewer::Mode,
         accepted: bool,
     ) -> Result<(), String> {
         if !accepted {
             let mut pending = self
                 .pending_response
                 .lock()
-                .expect("Codex pending response lock");
+                .expect("Interviewer pending response lock");
             if pending.as_ref().is_some_and(|response| {
                 (response.operation, response.revision, response.mode)
                     == (operation, revision, mode)
@@ -686,13 +744,16 @@ impl CodexWorker {
             return Ok(());
         }
         if self.join.is_none() {
-            return Err("Codex worker stopped before finalizing the turn".into());
+            return Err("Interviewer worker stopped before finalizing the turn".into());
         }
-        let mut finalization = self.finalization.lock().expect("Codex finalization lock");
+        let mut finalization = self
+            .finalization
+            .lock()
+            .expect("Interviewer finalization lock");
         if finalization.is_some() {
-            return Err("Codex worker has an unconsumed turn finalization".into());
+            return Err("Interviewer worker has an unconsumed turn finalization".into());
         }
-        *finalization = Some(CodexTurnFinalization {
+        *finalization = Some(InterviewerTurnFinalization {
             operation,
             revision,
             mode,
@@ -705,11 +766,11 @@ impl CodexWorker {
         let previous = self
             .reset_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        assert_ne!(previous, u64::MAX, "Codex reset generation exhausted");
+        assert_ne!(previous, u64::MAX, "Interviewer reset generation exhausted");
         if let Some((_, cancellation)) = self
             .active_cancellation
             .lock()
-            .expect("Codex cancellation lock")
+            .expect("Interviewer cancellation lock")
             .as_ref()
         {
             cancellation.cancel();
@@ -717,14 +778,17 @@ impl CodexWorker {
         *self
             .pending_response
             .lock()
-            .expect("Codex pending response lock") = None;
-        *self.finalization.lock().expect("Codex finalization lock") = None;
+            .expect("Interviewer pending response lock") = None;
+        *self
+            .finalization
+            .lock()
+            .expect("Interviewer finalization lock") = None;
         *self
             .cancelled_operation
             .lock()
-            .expect("Codex cancelled operation lock") = None;
+            .expect("Interviewer cancelled operation lock") = None;
         if let Some(sender) = self.sender.as_ref() {
-            let _ = sender.try_send(CodexWorkerCommand::Reset);
+            let _ = sender.try_send(InterviewerWorkerCommand::Reset);
         }
     }
 
@@ -742,7 +806,7 @@ impl CodexWorker {
     fn shutdown(mut self) {
         self.reset();
         if let Some(sender) = self.sender.take() {
-            let _ = sender.try_send(CodexWorkerCommand::Shutdown);
+            let _ = sender.try_send(InterviewerWorkerCommand::Shutdown);
             drop(sender);
         }
         self.kill_control_process();
@@ -998,7 +1062,7 @@ impl RunnerWorker {
 
 struct RuntimeWorkers {
     runner: Option<RunnerWorker>,
-    codex: Option<CodexWorker>,
+    interviewer: Option<InterviewerWorker>,
     neovim: Option<crate::neovim::Worker>,
 }
 
@@ -1006,19 +1070,19 @@ impl RuntimeWorkers {
     fn start(
         root: PathBuf,
         database_path: PathBuf,
-        codex_enabled: bool,
+        interviewer_backend: crate::interviewer::Backend,
         signal_state: SignalState,
         neovim_executable: PathBuf,
     ) -> Self {
         let mut workers = Self {
             runner: Some(RunnerWorker::start(root, database_path, signal_state)),
-            codex: None,
+            interviewer: None,
             neovim: Some(crate::neovim::Worker::start(neovim_executable)),
         };
-        workers.codex = Some(if codex_enabled {
-            CodexWorker::start()
+        workers.interviewer = Some(if interviewer_backend.enabled() {
+            InterviewerWorker::start(interviewer_backend)
         } else {
-            CodexWorker::disabled()
+            InterviewerWorker::disabled()
         });
         workers
     }
@@ -1027,12 +1091,14 @@ impl RuntimeWorkers {
         &mut self,
     ) -> (
         &mut RunnerWorker,
-        &mut CodexWorker,
+        &mut InterviewerWorker,
         &mut crate::neovim::Worker,
     ) {
         (
             self.runner.as_mut().expect("runtime runner exists"),
-            self.codex.as_mut().expect("runtime Codex worker exists"),
+            self.interviewer
+                .as_mut()
+                .expect("runtime Interviewer worker exists"),
             self.neovim.as_mut().expect("runtime Neovim worker exists"),
         )
     }
@@ -1041,7 +1107,7 @@ impl RuntimeWorkers {
         if let Some(worker) = self.runner.take() {
             worker.shutdown();
         }
-        if let Some(worker) = self.codex.take() {
+        if let Some(worker) = self.interviewer.take() {
             worker.shutdown();
         }
         if let Some(worker) = self.neovim.take() {
@@ -1061,7 +1127,7 @@ fn apply_effects(
     repository: &Repository,
     root: &Path,
     worker: &mut RunnerWorker,
-    codex_worker: &mut CodexWorker,
+    interviewer_worker: &mut InterviewerWorker,
     neovim_worker: &mut crate::neovim::Worker,
     mut effects: Vec<Effect>,
 ) {
@@ -1179,16 +1245,25 @@ fn apply_effects(
                 ));
             }
             Effect::CancelRun { operation } => worker.cancel(operation),
-            Effect::ConnectCodex { operation } => {
-                if let Err(error) = codex_worker.send(CodexWorkerCommand::Connect {
+            Effect::ConnectInterviewer { operation } => {
+                if let Err(error) = interviewer_worker.send(InterviewerWorkerCommand::Connect {
                     operation,
-                    generation: codex_worker.generation(),
+                    generation: interviewer_worker.generation(),
                     cancellation: CancellationToken::new(),
                 }) {
-                    effects.extend(reduce(state, Event::CodexConnected(operation, Err(error))));
+                    effects.extend(reduce(
+                        state,
+                        Event::InterviewerConnected(
+                            operation,
+                            Err(crate::interviewer::InterviewerError::transport(
+                                state.interviewer.backend,
+                                error,
+                            )),
+                        ),
+                    ));
                 }
             }
-            Effect::CodexTurn {
+            Effect::InterviewerTurn {
                 operation,
                 revision,
                 mode,
@@ -1198,9 +1273,9 @@ fn apply_effects(
                 question,
                 solved,
             } => {
-                if let Err(error) = codex_worker.send(CodexWorkerCommand::Turn {
+                if let Err(error) = interviewer_worker.send(InterviewerWorkerCommand::Turn {
                     operation,
-                    generation: codex_worker.generation(),
+                    generation: interviewer_worker.generation(),
                     revision,
                     mode,
                     statement,
@@ -1212,26 +1287,35 @@ fn apply_effects(
                 }) {
                     effects.extend(reduce(
                         state,
-                        Event::CodexFinished(operation, revision, mode, Err(error)),
+                        Event::InterviewerFinished(
+                            operation,
+                            revision,
+                            mode,
+                            Err(crate::interviewer::InterviewerError::transport(
+                                state.interviewer.backend,
+                                error,
+                            )),
+                        ),
                     ));
                 }
             }
-            Effect::FinalizeCodexTurn {
+            Effect::FinalizeInterviewerTurn {
                 operation,
                 revision,
                 mode,
                 accepted,
             } => {
-                if let Err(error) = codex_worker.finalize_turn(operation, revision, mode, accepted)
+                if let Err(error) =
+                    interviewer_worker.finalize_turn(operation, revision, mode, accepted)
                 {
-                    state.codex.status = crate::app::model::CodexStatus::ProtocolError;
+                    state.interviewer.status = crate::app::model::InterviewerStatus::ProtocolError;
                     state.error = Some(error);
                 }
             }
-            Effect::CancelCodex { operation } => {
-                let _ = codex_worker.send(CodexWorkerCommand::Cancel { operation });
+            Effect::CancelInterviewer { operation } => {
+                let _ = interviewer_worker.send(InterviewerWorkerCommand::Cancel { operation });
             }
-            Effect::ResetCodex => codex_worker.reset(),
+            Effect::ResetInterviewer => interviewer_worker.reset(),
             Effect::LeaveSolve => worker.leave(),
             Effect::StopNeovim => {
                 if let Err(error) = neovim_worker.stop_session() {
@@ -1357,13 +1441,13 @@ fn apply_event(
     event: Event,
 ) {
     let effects = reduce(state, event);
-    let (runner_worker, codex_worker, neovim_worker) = workers.parts();
+    let (runner_worker, interviewer_worker, neovim_worker) = workers.parts();
     apply_effects(
         state,
         repository,
         root,
         runner_worker,
-        codex_worker,
+        interviewer_worker,
         neovim_worker,
         effects,
     );
@@ -1385,19 +1469,19 @@ pub fn run(
     let mut workers = RuntimeWorkers::start(
         root.clone(),
         database_path,
-        state.codex.enabled,
+        state.interviewer.backend,
         signal_state.clone(),
         neovim_executable,
     );
     let initial = requested_set.map_or(Event::Command(crate::app::Action::Reload), Event::OpenSet);
     let effects = reduce(&mut state, initial);
-    let (runner_worker, codex_worker, neovim_worker) = workers.parts();
+    let (runner_worker, interviewer_worker, neovim_worker) = workers.parts();
     apply_effects(
         &mut state,
         &repository,
         &root,
         runner_worker,
-        codex_worker,
+        interviewer_worker,
         neovim_worker,
         effects,
     );
@@ -1427,18 +1511,18 @@ pub fn run(
         let mut last_neovim_grid_size = None;
         while !state.quit {
             if let Some(signal) = signal_state.received() {
-                let (runner_worker, codex_worker, _) = workers.parts();
+                let (runner_worker, interviewer_worker, _) = workers.parts();
                 runner_worker.interrupt_active(128 + signal);
-                codex_worker.reset();
+                interviewer_worker.reset();
                 state.quit = true;
                 continue;
             }
             let events = {
-                let (runner_worker, codex_worker, _) = workers.parts();
+                let (runner_worker, interviewer_worker, _) = workers.parts();
                 runner_worker
                     .poll()
                     .into_iter()
-                    .chain(codex_worker.poll())
+                    .chain(interviewer_worker.poll())
                     .collect::<Vec<_>>()
             };
             for event in events {
@@ -1761,7 +1845,7 @@ mod tests {
         use crate::app::model::EditorRuntimeStatus;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let mut state = codex_solve_state();
+        let mut state = interviewer_solve_state();
         let solve = state.solve.as_mut().unwrap();
         solve.pane = SolvePane::Editor;
         solve.editor_status = EditorRuntimeStatus::Starting;
@@ -1806,7 +1890,7 @@ mod tests {
     fn tutor_back_uses_newest_coalesced_document_without_changing_run_key_moments() {
         use crate::neovim::{ActionUpdate, DocumentUpdate, TutorAction};
 
-        let mut back_state = codex_solve_state();
+        let mut back_state = interviewer_solve_state();
         let mut coalesced = Some(DocumentUpdate {
             text: "newest accepted bytes".into(),
             mode: "n".into(),
@@ -1846,7 +1930,7 @@ mod tests {
                 RunIntent::Submit,
             ),
         ] {
-            let mut state = codex_solve_state();
+            let mut state = interviewer_solve_state();
             let mut coalesced = Some(DocumentUpdate {
                 text: "bytes accepted after key moment".into(),
                 mode: "n".into(),
@@ -1985,7 +2069,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestCodexBackendState {
+    struct TestInterviewerBackendState {
         transcript: String,
         captures: Vec<String>,
         reset_count: usize,
@@ -2004,13 +2088,16 @@ mod tests {
             let mut state = self.state.lock().expect("test turn gate lock");
             while !state.0 {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                assert!(!remaining.is_zero(), "Codex test turn did not start");
+                assert!(!remaining.is_zero(), "Interviewer test turn did not start");
                 let (next, timeout) = self
                     .changed
                     .wait_timeout(state, remaining)
                     .expect("test turn gate wait");
                 state = next;
-                assert!(!timeout.timed_out() || state.0, "Codex test turn timed out");
+                assert!(
+                    !timeout.timed_out() || state.0,
+                    "Interviewer test turn timed out"
+                );
             }
         }
 
@@ -2030,28 +2117,32 @@ mod tests {
         }
     }
 
-    struct TestCodexBackend {
-        state: Arc<std::sync::Mutex<TestCodexBackendState>>,
+    struct TestInterviewerBackend {
+        state: Arc<std::sync::Mutex<TestInterviewerBackendState>>,
         gate: Arc<TestTurnGate>,
         blocking_turn: Option<usize>,
     }
 
-    impl CodexWorkerBackend for TestCodexBackend {
+    impl InterviewerWorkerBackend for TestInterviewerBackend {
+        fn backend(&self) -> crate::interviewer::Backend {
+            crate::interviewer::Backend::Pi
+        }
+
         fn connect(
             &mut self,
             _control_pid: Arc<std::sync::atomic::AtomicI32>,
             _cancellation: &CancellationToken,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::interviewer::InterviewerError> {
             Ok(())
         }
 
         fn turn(
             &mut self,
-            request: &CodexTurnRequest,
+            request: &InterviewerTurnRequest,
             _cancellation: &CancellationToken,
-        ) -> Result<String, String> {
+        ) -> Result<String, crate::interviewer::InterviewerError> {
             let turn_count = {
-                let mut state = self.state.lock().expect("test Codex backend lock");
+                let mut state = self.state.lock().expect("test Interviewer backend lock");
                 state.turn_count += 1;
                 let turn_count = state.turn_count;
                 let transcript = state.transcript.clone();
@@ -2067,8 +2158,8 @@ mod tests {
             Ok(format!("response-{turn_count}"))
         }
 
-        fn commit(&mut self, pending: PendingCodexResponse) {
-            let mut state = self.state.lock().expect("test Codex backend lock");
+        fn commit(&mut self, pending: PendingInterviewerResponse) {
+            let mut state = self.state.lock().expect("test Interviewer backend lock");
             state.transcript.push_str(&format!(
                 "user: {}\ninterviewer: {}\n",
                 pending.question, pending.response
@@ -2076,37 +2167,37 @@ mod tests {
         }
 
         fn reset(&mut self) {
-            let mut state = self.state.lock().expect("test Codex backend lock");
+            let mut state = self.state.lock().expect("test Interviewer backend lock");
             state.transcript.clear();
             state.reset_count += 1;
         }
     }
 
-    fn test_codex_worker(
+    fn test_interviewer_worker(
         blocking_turn: Option<usize>,
     ) -> (
-        CodexWorker,
-        Arc<std::sync::Mutex<TestCodexBackendState>>,
+        InterviewerWorker,
+        Arc<std::sync::Mutex<TestInterviewerBackendState>>,
         Arc<TestTurnGate>,
     ) {
-        let state = Arc::new(std::sync::Mutex::new(TestCodexBackendState::default()));
+        let state = Arc::new(std::sync::Mutex::new(TestInterviewerBackendState::default()));
         let gate = Arc::new(TestTurnGate::default());
         let factory_state = Arc::clone(&state);
         let factory_gate = Arc::clone(&gate);
-        let factory: Arc<CodexBackendFactory> = Arc::new(move || {
-            Box::new(TestCodexBackend {
+        let factory: Arc<InterviewerBackendFactory> = Arc::new(move || {
+            Box::new(TestInterviewerBackend {
                 state: Arc::clone(&factory_state),
                 gate: Arc::clone(&factory_gate),
                 blocking_turn,
             })
         });
-        (CodexWorker::start_with_backend(factory), state, gate)
+        (InterviewerWorker::start_with_backend(factory), state, gate)
     }
 
-    fn send_codex_connect(worker: &mut CodexWorker, operation: u64) {
+    fn send_interviewer_connect(worker: &mut InterviewerWorker, operation: u64) {
         let generation = worker.generation();
         worker
-            .send(CodexWorkerCommand::Connect {
+            .send(InterviewerWorkerCommand::Connect {
                 operation: OperationId(operation),
                 generation,
                 cancellation: CancellationToken::new(),
@@ -2114,14 +2205,19 @@ mod tests {
             .unwrap();
     }
 
-    fn send_codex_turn(worker: &mut CodexWorker, operation: u64, source: &str, question: &str) {
+    fn send_interviewer_turn(
+        worker: &mut InterviewerWorker,
+        operation: u64,
+        source: &str,
+        question: &str,
+    ) {
         let generation = worker.generation();
         worker
-            .send(CodexWorkerCommand::Turn {
+            .send(InterviewerWorkerCommand::Turn {
                 operation: OperationId(operation),
                 generation,
                 revision: 0,
-                mode: crate::codex::prompt::Mode::Interviewer,
+                mode: crate::interviewer::Mode::Interviewer,
                 statement: format!("statement-{operation}"),
                 source: source.into(),
                 output: String::new(),
@@ -2132,7 +2228,7 @@ mod tests {
             .unwrap();
     }
 
-    fn poll_codex_one(worker: &mut CodexWorker) -> Event {
+    fn poll_interviewer_one(worker: &mut InterviewerWorker) -> Event {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(event) = worker.poll().into_iter().next() {
@@ -2140,13 +2236,13 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "Codex worker event timeout"
+                "Interviewer worker event timeout"
             );
             thread::yield_now();
         }
     }
 
-    fn wait_for_queued_codex_event(worker: &CodexWorker, operation: u64) {
+    fn wait_for_queued_interviewer_event(worker: &InterviewerWorker, operation: u64) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while worker
             .queued_event_operation
@@ -2155,7 +2251,7 @@ mod tests {
         {
             assert!(
                 std::time::Instant::now() < deadline,
-                "Codex worker did not queue operation {operation}"
+                "Interviewer worker did not queue operation {operation}"
             );
             thread::yield_now();
         }
@@ -2163,7 +2259,7 @@ mod tests {
 
     #[test]
     fn save_acknowledgement_requires_the_active_run_and_exact_editor_snapshot() {
-        let mut state = codex_solve_state();
+        let mut state = interviewer_solve_state();
         let solve = state.solve.as_mut().unwrap();
         solve
             .editor
@@ -2202,7 +2298,7 @@ mod tests {
         assert_eq!(matching_save_acknowledgement(&state, &wrong_source), None);
     }
 
-    fn codex_solve_state() -> AppState {
+    fn interviewer_solve_state() -> AppState {
         use crate::app::model::Screen;
         use crate::editor::EditorDocument;
 
@@ -2483,27 +2579,30 @@ mod tests {
     }
 
     #[test]
-    fn disabled_codex_worker_has_no_thread_and_never_constructs_backend() {
+    fn disabled_interviewer_worker_has_no_thread_and_never_constructs_backend() {
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let observed_calls = Arc::clone(&factory_calls);
-        let factory: Arc<CodexBackendFactory> = Arc::new(move || {
+        let factory: Arc<InterviewerBackendFactory> = Arc::new(move || {
             observed_calls.fetch_add(1, Ordering::SeqCst);
-            Box::new(SessionCodexBackend::default())
+            Box::new(SessionInterviewerBackend {
+                backend: crate::interviewer::Backend::Pi,
+                session: None,
+            })
         });
-        let mut worker = CodexWorker::new(factory, false);
+        let mut worker = InterviewerWorker::new(factory, false);
         assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
         assert!(worker.join.is_none());
         assert!(worker.sender.is_none());
         assert!(worker.poll().is_empty());
         assert_eq!(
             worker
-                .send(CodexWorkerCommand::Connect {
+                .send(InterviewerWorkerCommand::Connect {
                     operation: OperationId(1),
                     generation: worker.generation(),
                     cancellation: CancellationToken::new(),
                 })
                 .unwrap_err(),
-            "Codex is disabled"
+            "Interviewer is disabled"
         );
         assert!(worker.join.is_none());
         assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
@@ -2512,34 +2611,38 @@ mod tests {
     }
 
     #[test]
-    fn codex_worker_panic_is_converted_to_a_recoverable_error() {
-        let result = catch_codex_worker_panic::<()>(|| panic!("injected Codex panic"));
-        assert_eq!(result.unwrap_err(), "Codex worker panicked");
+    fn interviewer_worker_panic_is_converted_to_a_recoverable_error() {
+        let result = catch_interviewer_worker_panic::<()>(crate::interviewer::Backend::Pi, || {
+            panic!("injected Interviewer panic")
+        });
+        assert_eq!(result.unwrap_err().message(), "Interviewer worker panicked");
     }
 
     #[test]
-    fn codex_poll_reports_disconnect_once_joins_and_allows_reconnect() {
-        let (mut worker, _, _) = test_codex_worker(None);
-        let mut state = codex_solve_state();
-        state.codex.active = Some((OperationId(8), 0, crate::codex::prompt::Mode::Interviewer));
-        state.codex.status = crate::app::model::CodexStatus::Thinking;
-        worker.send(CodexWorkerCommand::Panic).unwrap();
+    fn interviewer_poll_reports_disconnect_once_joins_and_allows_reconnect() {
+        let (mut worker, _, _) = test_interviewer_worker(None);
+        let mut state = interviewer_solve_state();
+        state.interviewer.active = Some((OperationId(8), 0, crate::interviewer::Mode::Interviewer));
+        state.interviewer.status = crate::app::model::InterviewerStatus::Thinking;
+        worker.send(InterviewerWorkerCommand::Panic).unwrap();
 
-        let event = poll_codex_one(&mut worker);
-        assert!(matches!(event, Event::CodexDisconnected(ref error) if error.contains("panicked")));
+        let event = poll_interviewer_one(&mut worker);
+        assert!(
+            matches!(event, Event::InterviewerDisconnected(ref error) if error.contains("panicked"))
+        );
         assert!(worker.join.is_none());
         assert!(worker.poll().is_empty());
         assert!(reduce(&mut state, event).is_empty());
-        assert!(state.codex.active.is_none());
+        assert!(state.interviewer.active.is_none());
         assert_eq!(
-            state.codex.status,
-            crate::app::model::CodexStatus::Disconnected
+            state.interviewer.status,
+            crate::app::model::InterviewerStatus::Disconnected
         );
 
-        send_codex_connect(&mut worker, 9);
+        send_interviewer_connect(&mut worker, 9);
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexConnected(OperationId(9), Ok(()))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerConnected(OperationId(9), Ok(()))
         ));
         assert!(worker.join.is_some());
         worker.shutdown();
@@ -2547,28 +2650,28 @@ mod tests {
 
     #[test]
     fn queued_completion_cancel_race_discards_pending_and_next_turn_succeeds() {
-        let (mut worker, backend, _) = test_codex_worker(None);
-        send_codex_connect(&mut worker, 1);
+        let (mut worker, backend, _) = test_interviewer_worker(None);
+        send_interviewer_connect(&mut worker, 1);
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexConnected(OperationId(1), Ok(()))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerConnected(OperationId(1), Ok(()))
         ));
 
-        let mut state = codex_solve_state();
-        state.codex.active = Some((OperationId(2), 0, crate::codex::prompt::Mode::Interviewer));
-        state.codex.status = crate::app::model::CodexStatus::Thinking;
+        let mut state = interviewer_solve_state();
+        state.interviewer.active = Some((OperationId(2), 0, crate::interviewer::Mode::Interviewer));
+        state.interviewer.status = crate::app::model::InterviewerStatus::Thinking;
         state
-            .codex
+            .interviewer
             .push_message("You".into(), "cancelled-question".into());
-        send_codex_turn(&mut worker, 2, "cancelled-source", "cancelled-question");
-        wait_for_queued_codex_event(&worker, 2);
+        send_interviewer_turn(&mut worker, 2, "cancelled-source", "cancelled-question");
+        wait_for_queued_interviewer_event(&worker, 2);
 
         let cancel = reduce(&mut state, Event::Command(crate::app::Action::Cancel));
-        let [Effect::CancelCodex { operation }] = cancel.as_slice() else {
-            panic!("expected Codex cancellation")
+        let [Effect::CancelInterviewer { operation }] = cancel.as_slice() else {
+            panic!("expected Interviewer cancellation")
         };
         worker
-            .send(CodexWorkerCommand::Cancel {
+            .send(InterviewerWorkerCommand::Cancel {
                 operation: *operation,
             })
             .unwrap();
@@ -2576,14 +2679,14 @@ mod tests {
             worker
                 .pending_response
                 .lock()
-                .expect("Codex pending response lock")
+                .expect("Interviewer pending response lock")
                 .is_none()
         );
 
-        let event = poll_codex_one(&mut worker);
+        let event = poll_interviewer_one(&mut worker);
         let effects = reduce(&mut state, event);
         let [
-            Effect::FinalizeCodexTurn {
+            Effect::FinalizeInterviewerTurn {
                 operation,
                 revision,
                 mode,
@@ -2598,25 +2701,25 @@ mod tests {
             .unwrap();
         assert!(
             !state
-                .codex
+                .interviewer
                 .messages
                 .iter()
                 .any(|(_, message)| message == "response-1")
         );
 
-        send_codex_connect(&mut worker, 3);
+        send_interviewer_connect(&mut worker, 3);
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexConnected(OperationId(3), Ok(()))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerConnected(OperationId(3), Ok(()))
         ));
-        send_codex_turn(&mut worker, 4, "new-source", "new-question");
+        send_interviewer_turn(&mut worker, 4, "new-source", "new-question");
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexFinished(OperationId(4), 0, _, Ok(ref response))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerFinished(OperationId(4), 0, _, Ok(ref response))
                 if response == "response-2"
         ));
         {
-            let backend = backend.lock().expect("test Codex backend lock");
+            let backend = backend.lock().expect("test Interviewer backend lock");
             let next_capture = backend.captures.last().expect("next turn capture");
             assert!(!next_capture.contains("cancelled-question"));
             assert!(!next_capture.contains("cancelled-source"));
@@ -2627,28 +2730,28 @@ mod tests {
 
     #[test]
     fn saturated_reset_epoch_clears_ui_and_worker_transcript_before_next_problem() {
-        let (mut worker, backend, gate) = test_codex_worker(Some(2));
-        send_codex_connect(&mut worker, 1);
+        let (mut worker, backend, gate) = test_interviewer_worker(Some(2));
+        send_interviewer_connect(&mut worker, 1);
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexConnected(OperationId(1), Ok(()))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerConnected(OperationId(1), Ok(()))
         ));
-        send_codex_turn(&mut worker, 2, "prior-source", "prior-question");
+        send_interviewer_turn(&mut worker, 2, "prior-source", "prior-question");
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexFinished(OperationId(2), 0, mode, Ok(_))
-                if mode == crate::codex::prompt::Mode::Interviewer
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerFinished(OperationId(2), 0, mode, Ok(_))
+                if mode == crate::interviewer::Mode::Interviewer
         ));
         worker
             .finalize_turn(
                 OperationId(2),
                 0,
-                crate::codex::prompt::Mode::Interviewer,
+                crate::interviewer::Mode::Interviewer,
                 true,
             )
             .unwrap();
 
-        send_codex_turn(
+        send_interviewer_turn(
             &mut worker,
             3,
             "active-prior-source",
@@ -2656,10 +2759,10 @@ mod tests {
         );
         gate.wait_until_started();
         let old_generation = worker.generation();
-        let sender = worker.sender.as_ref().expect("Codex sender");
+        let sender = worker.sender.as_ref().expect("Interviewer sender");
         for operation in [90, 91] {
             sender
-                .try_send(CodexWorkerCommand::Connect {
+                .try_send(InterviewerWorkerCommand::Connect {
                     operation: OperationId(operation),
                     generation: old_generation,
                     cancellation: CancellationToken::new(),
@@ -2667,16 +2770,16 @@ mod tests {
                 .unwrap();
         }
 
-        let mut state = codex_solve_state();
+        let mut state = interviewer_solve_state();
         state
-            .codex
+            .interviewer
             .push_message("Interviewer".into(), "private".into());
         let effects = reduce(&mut state, Event::Command(crate::app::Action::Back));
-        assert!(state.codex.messages.is_empty());
+        assert!(state.interviewer.messages.is_empty());
         assert!(
             effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::ResetCodex))
+                .any(|effect| matches!(effect, Effect::ResetInterviewer))
         );
         worker.reset();
         assert_eq!(worker.generation(), old_generation + 1);
@@ -2684,28 +2787,28 @@ mod tests {
             worker
                 .pending_response
                 .lock()
-                .expect("Codex pending response lock")
+                .expect("Interviewer pending response lock")
                 .is_none()
         );
 
         gate.release();
-        wait_for_queued_codex_event(&worker, 91);
+        wait_for_queued_interviewer_event(&worker, 91);
         let events = worker.poll();
         assert!(events.iter().any(|event| {
-            matches!(event, Event::CodexFinished(OperationId(3), 0, _, Err(error)) if error.contains("reset"))
+            matches!(event, Event::InterviewerFinished(OperationId(3), 0, _, Err(error)) if error.contains("reset"))
         }));
-        send_codex_connect(&mut worker, 10);
+        send_interviewer_connect(&mut worker, 10);
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexConnected(OperationId(10), Ok(()))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerConnected(OperationId(10), Ok(()))
         ));
-        send_codex_turn(&mut worker, 11, "next-source", "next-question");
+        send_interviewer_turn(&mut worker, 11, "next-source", "next-question");
         assert!(matches!(
-            poll_codex_one(&mut worker),
-            Event::CodexFinished(OperationId(11), 0, _, Ok(_))
+            poll_interviewer_one(&mut worker),
+            Event::InterviewerFinished(OperationId(11), 0, _, Ok(_))
         ));
 
-        let backend = backend.lock().expect("test Codex backend lock");
+        let backend = backend.lock().expect("test Interviewer backend lock");
         assert!(backend.reset_count >= 1);
         let next_capture = backend.captures.last().expect("next problem capture");
         assert!(next_capture.contains("next-source"));
@@ -2724,15 +2827,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_cancel_command_sets_active_cancellation_token() {
-        let mut worker = CodexWorker::start();
+    fn interviewer_cancel_command_sets_active_cancellation_token() {
+        let mut worker = InterviewerWorker::start(crate::interviewer::Backend::Pi);
         let cancellation = CancellationToken::new();
         *worker
             .active_cancellation
             .lock()
-            .expect("Codex cancellation lock") = Some((OperationId(7), cancellation.clone()));
+            .expect("Interviewer cancellation lock") = Some((OperationId(7), cancellation.clone()));
         worker
-            .send(CodexWorkerCommand::Cancel {
+            .send(InterviewerWorkerCommand::Cancel {
                 operation: OperationId(7),
             })
             .unwrap();

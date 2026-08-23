@@ -1,77 +1,81 @@
-# Codex setup, compatibility, and privacy
+# Interviewer setup, compatibility, and privacy
 
-Codex Interview is optional. Local browsing, editing, testing, and submission work without it.
+The interviewer is optional. Local browsing, Neovim editing, testing, submission, and navigation work without it and continue working after interviewer failures.
 
-## Setup
+## Backend selection
 
-1. Install the Codex CLI from a trusted source.
-2. Authenticate through the CLI:
+`./interview` resolves exactly one backend in this order:
 
-   ```console
-   codex login
-   codex login status
-   ```
+1. `--interviewer pi|codex|none`
+2. legacy `--no-codex`, mapped to `none`
+3. `INTERVIEW_TUTOR_INTERVIEWER`
+4. default `pi`
 
-3. Run `./interview`, focus Interview with `i`, read the disclosure, and accept with Enter/`y`.
+Using both CLI selectors is an error. Empty, non-UTF-8, mixed-case, whitespace-padded, and unknown selected values are rejected. There is no silent fallback between Pi and Codex. `none` probes or spawns neither executable.
 
-Interview Tutor defaults to the `codex` found on `PATH` and starts `codex app-server --stdio`. `INTERVIEW_TUTOR_CODEX_EXECUTABLE=/absolute/path/to/codex` may select a different executable. That configured executable is a trusted user-selected boundary. It must resolve to a regular file owned by the current user or root and not be group- or world-writable. Its device, inode, owner, mode, size, and change timestamps are checked again immediately before app-server spawn.
+Both transports require visible in-app consent before version probing, authentication/configuration access, or model turns. They receive the same application-owned prompt, transcript, hint, structured-envelope, revision, and stale-response validation.
 
-Those checks and the version probe establish compatibility, not provenance. They do not authenticate same-user PATH entries, package-manager content, scripts/interpreters, or dependencies. Prefer an official Codex executable from a trusted installation. Use `./interview --no-codex` to prevent even a version probe or process spawn.
+## Pi default
 
-Interview Tutor does not read OpenAI API keys, login tokens, or Codex credential files. It does not call OpenAI HTTP APIs directly. The selected Codex process reads its own account/configuration state through `HOME` or `CODEX_HOME`. Do not pass or paste credentials into the Interview composer.
+Install trusted Pi 0.84.2, configure its default model/provider and credentials, then run `./interview`. The executable resolves from `INTERVIEW_TUTOR_PI_EXECUTABLE` and then `PATH`. Only exact `pi --version` output `0.84.2` is accepted.
 
-## Exact supported protocol
+The resolved executable must be a regular file owned by the effective user or root and must not be group- or world-writable. Device, inode, owner, mode, size, and change timestamps are checked before and after the bounded version probe and again before RPC spawn. This reduces replacement races and establishes compatibility, not provenance.
 
-Only exact Codex CLI versions 0.146.0 and 0.147.0 are accepted. Another patch or minor version is not treated as compatible merely because its version string is close.
+Every application turn starts a fresh process group in a new empty mode-0700 cwd with this exact argv:
 
-This stack validated these installed executables:
+```console
+pi --mode rpc --no-session --no-tools --no-extensions --no-skills \
+  --no-prompt-templates --no-themes --no-context-files --no-approve --offline
+```
 
-- `/home/elijahrou/.bun/install/global/node_modules/@openai/codex/bin/codex.js`, exactly `codex-cli 0.146.0`
-- `/home/elijahrou/.npm/_npx/c8ab89660c602c20/node_modules/@openai/codex/bin/codex.js`, exactly `codex-cli 0.147.0`
+The process is retained only for one structured-output correction, then terminated and reaped. The environment is cleared. Interview Tutor restores a bounded allowlist for `HOME`, `PATH`, locale, proxy, certificate, Pi agent/package directories, documented provider credential variables, and cloud-provider authentication variables. It forces `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`, and `NO_COLOR=1`. Secrets are never placed on argv or application logs.
 
-Schemas were generated into separate temporary directories with `codex app-server generate-json-schema --out <temporary-directory>` without `--experimental`. Since 0.146.0 does not emit definitions in stable object order, evidence uses canonical `jq -cS` output:
+Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
 
-- 0.146.0 full `codex_app_server_protocol.v2.schemas.json`: SHA-256 `2f402b7d1356adccc1a4785c0656db457578ca9ea5d5b08953487a410c630ce8`
-- 0.147.0 full schema: SHA-256 `4422f141444d5531e549f4a3e8e7371c82e4dfbc6d5b6d06c8cd3dff8b4a8607`
-- exact shared subset: SHA-256 `d3187a04cbd0e7a46f3dda33934e1cfcb12415371fa2c0543663d216d71bafe5` for both versions, with byte-for-byte `cmp` success
+### Pi RPC contract
 
-The extracted definitions were `InitializeParams`, `GetAccountParams`, `GetAccountResponse`, `ThreadStartParams`, `ThreadStartResponse`, `TurnStartParams`, `TurnStartResponse`, `AgentMessageDeltaNotification`, `ItemCompletedNotification`, `TurnCompletedNotification`, `ErrorNotification`, `TurnInterruptParams`, and `TurnInterruptResponse`. The client also follows the generated server-request response schemas when declining command execution, file changes, permission expansion, user input, and MCP elicitation. Unknown server requests fail closed.
+Commands and responses use correlated string IDs and strict LF-only JSONL. Records, the bounded protocol queue, and total accepted protocol output are capped at 2 MiB; assistant text is capped at 64 KiB. Prompt completion requires all of:
 
-Messages omit `jsonrpc` as required by these versions. Responses must match a pending numeric request ID, with at most 16 pending IDs. Deltas and item completion must match the active thread/turn/item; terminal errors and completion must match the active thread and turn. Retryable `willRetry` errors and unrelated events are ignored.
+- a matching successful `prompt` response before events
+- ordered assistant-only events with no tool calls or tool results
+- terminal `stopReason: "stop"` and no retry/queue continuation
+- `agent_settled`
+- a matching successful `get_last_assistant_text` response equal to the authoritative completed assistant message
 
-The version probe has a 10-second wall bound and combined 64-KiB stdout/stderr capture. Startup requests have 10-second bounds, turns 120 seconds, interrupt acknowledgement 2 seconds, and shutdown 2 seconds followed by bounded kill/reap and reader drains. Protocol lines are limited to 2 MiB and assistant content to 64 KiB.
+The client rejects CRLF framing, malformed/unknown envelopes, unexpected or duplicate IDs, event reordering, tool/bash/extension-UI events, queue/retry/compaction continuations, provider changes, null or stale final text, non-stop completions, oversized records, aggregate/queue floods, EOF, and reader failures. Cancellation after prompt acceptance sends one correlated `abort`, requires its acknowledgement before `agent_settled`, and otherwise kills/reaps the process group within bounded cleanup deadlines.
 
-## Disclosure and outbound data
+## Explicit Codex compatibility
 
-After visible consent, Interview Tutor intentionally supplies exactly five application fields to the configured process:
+Select Codex with `./interview --interviewer codex` or `INTERVIEW_TUTOR_INTERVIEWER=codex`. Install from a trusted source, authenticate with `codex login`, and confirm with `codex login status`. The executable resolves from `INTERVIEW_TUTOR_CODEX_EXECUTABLE` and then `PATH`.
+
+Only exact Codex CLI versions 0.146.0 and 0.147.0 are accepted. The existing stable app-server subset remains unchanged: initialize/account reads, separate ephemeral interviewer/hinter threads, read-only sandbox, disabled sandbox network/web search, never-approve policy, strict numeric request correlation, typed request declines, terminal event matching, bounded stderr/JSONL queues, interrupt acknowledgement, process-group cleanup, and at most one replacement process for a later distinct operation. Unknown server requests fail closed. Codex receives no silent replay of a failed turn.
+
+The Codex child environment is cleared and restores only `HOME`, `CODEX_HOME`, `PATH`, locale, proxy, and certificate variables. `OPENAI_API_KEY` and unrelated variables are excluded. Codex still reads its own account/configuration state and may use configured read-only tools or MCP servers to access other sandbox-readable paths. Prefer a dedicated minimal `CODEX_HOME` when that boundary is too broad.
+
+The generated stable protocol evidence remains:
+
+- 0.146.0 canonical schema SHA-256 `2f402b7d1356adccc1a4785c0656db457578ca9ea5d5b08953487a410c630ce8`
+- 0.147.0 canonical schema SHA-256 `4422f141444d5531e549f4a3e8e7371c82e4dfbc6d5b6d06c8cd3dff8b4a8607`
+- exact shared subset SHA-256 `d3187a04cbd0e7a46f3dda33934e1cfcb12415371fa2c0543663d216d71bafe5`
+
+## Disclosure and memory-only state
+
+After consent, Interview Tutor intentionally supplies exactly five application fields:
 
 1. selected local statement
 2. current source revision
-3. bounded latest local test output
+3. most recent 16 KiB of local test output
 4. bounded in-memory transcript
 5. current user question
 
-The latest output included in a turn is capped to its most recent 16 KiB. Questions/composer content are capped at 16 KiB. The transcript retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. Prompt content is then sent to OpenAI by the configured Codex client and remains governed by the user's Codex account controls.
+Questions are capped at 16 KiB. The transcript retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. Hints omit transcript context, allow three levels per source revision, and must not reveal a complete solution. One malformed response receives one correction request in the same transport operation; a second malformed response fails closed.
 
-Each connection uses a new empty mode-0700 temporary cwd. The child environment is cleared and restores only `HOME`, `CODEX_HOME`, `PATH`, locale, proxy, and certificate variables. `OPENAI_API_KEY` and unrelated environment variables are excluded. Threads request and verify the exact temporary cwd, ephemeral storage with a null path, read-only sandboxing, no sandbox network access, never-approve policy, and disabled web search. Interview Tutor refuses command, file-change, permission, user-input, and MCP approval requests.
+Submission review starts only after local attempt recording succeeds and uses that submit operation's exact captured source, not a newer editor buffer. A response enters UI/transcript state only while operation, mode, and source revision still match. The local runner remains authoritative. Transcript state is cleared on reset, solve exit, and process exit; Interview Tutor writes no prompt or transcript log.
 
-These controls limit the application's intended payload, but they are not total process isolation. The configured Codex executable may use its read-only tools, configuration, or MCP servers and may access other readable local paths allowed by its sandbox/configuration. `HOME` and `CODEX_HOME` remain available for account/configuration lookup. A compromised or unexpectedly configured executable is outside Interview Tutor's isolation boundary. Use a dedicated Codex profile/home with minimal readable data, tools, and MCP configuration for stronger separation.
+## Bounds and recovery
 
-## Session behavior
+Version probes have a 10-second wall bound and combined 64-KiB output capture. Startup/state requests have 10-second bounds, turns 120 seconds, abort/interrupt acknowledgement 2 seconds, and shutdown 2 seconds followed by bounded kill/reap and reader drains. Temporary cwd removal failures are reported during explicit cleanup.
 
-Interviewer and hinter use separate ephemeral app-server threads. The interviewer asks focused Socratic questions and receives the bounded transcript. Hints omit the transcript and are limited to three levels per source revision; no hint may return complete language code. Editing starts a new hint allowance.
+Authentication, executable, protocol, timeout, cancellation, and transport failures are typed rather than classified from message text. The UI shows backend-aware recovery guidance. Press `i` to reconnect for a later distinct operation, select `none`, or continue using local solve functions.
 
-Submission review begins only after local attempt recording succeeds. It receives the exact source captured by that submit operation, not a newer editor buffer, and reviews correctness, complexity, edge cases, and communication. The local runner and recorded outcome remain authoritative.
-
-A response enters the UI and transcript only while operation, role, and source revision still match. Stale responses are discarded. Transcript state is memory-only and cleared on `Space r`, solve exit, and application exit; Interview Tutor writes no prompt/transcript log. The temporary submitted-source copy is wiped when dropped. Explicit process shutdown removes the temporary cwd and reports cleanup failures; destructor cleanup is best effort only.
-
-## Troubleshooting
-
-- **`auth` / authentication required:** run `codex login`, confirm with `codex login status`, then press `i` to reconnect for the next operation.
-- **unsupported version:** install exact 0.146.0 or 0.147.0 and confirm the selected binary with `codex --version`. If using an override, verify `INTERVIEW_TUTOR_CODEX_EXECUTABLE` points to the intended trusted file.
-- **executable rejected:** correct its owner/permissions or select a trusted regular file. Group- or world-writable executables are rejected.
-- **protocol error, malformed response, EOF, timeout, or missing interrupt acknowledgement:** the process is invalidated. Press `i` to make one fresh connection for the next distinct operation. Failed request content is not replayed, and a session permits at most one replacement process.
-- **offline/client failure:** local edit, F5/Ctrl-S tests, and F9 submission still work. Restart with `--no-codex` to disable the integration completely.
-- **privacy boundary is too broad:** decline disclosure or use `--no-codex`. Otherwise use a dedicated minimal `CODEX_HOME`/profile and remove unneeded read-only tools and MCP configuration.
-
-A safe manual compatibility smoke is limited to version, initialize, `initialized`, and `account/read` with `refreshToken=false`. It does not start a model turn. Automated tests use the checked-in fake app-server only and never invoke a live model.
+Automated tests use checked-in fake Pi RPC and Codex app-server executables and never invoke a live model or provider credentials.

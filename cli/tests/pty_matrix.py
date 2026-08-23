@@ -235,6 +235,7 @@ else:
         environment["INTERVIEW_TUTOR_CODEX_EXECUTABLE"] = str(
             executable or self.fake_codex
         )
+        environment["INTERVIEW_TUTOR_INTERVIEWER"] = "codex"
         if timeout_ms is not None:
             environment["INTERVIEW_TUTOR_TEST_RUN_TIMEOUT_MS"] = str(timeout_ms)
         if pid_file is not None:

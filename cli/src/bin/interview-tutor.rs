@@ -27,9 +27,12 @@ struct Cli {
         help = "required clean Neovim executable used by the embedded editor"
     )]
     neovim: Option<PathBuf>,
+    #[arg(long, value_enum, value_name = "BACKEND", help = "interviewer backend")]
+    interviewer: Option<practice_cli::interviewer::Backend>,
     #[arg(
         long,
-        help = "disable Codex without probing or spawning its executable"
+        conflicts_with = "interviewer",
+        help = "legacy alias for --interviewer none"
     )]
     no_codex: bool,
 }
@@ -59,11 +62,10 @@ fn run() -> Result<ExitCode, String> {
             .position(|item| item.slug == "python")
             .unwrap_or(0),
     };
+    let interviewer_backend =
+        practice_cli::interviewer::selection::from_environment(cli.interviewer, cli.no_codex)?;
     let neovim_executable = practice_cli::neovim::resolve_executable(cli.neovim.as_deref())?;
-    let mut state = AppState::new(languages, language_index);
-    if cli.no_codex {
-        state.disable_codex();
-    }
+    let state = AppState::new_with_interviewer(languages, language_index, interviewer_backend);
     #[cfg(debug_assertions)]
     let disposition_probe =
         practice_cli::signals::test_support::DispositionProbe::from_environment()?;
@@ -97,14 +99,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_codex_is_an_explicit_opt_in_flag() {
+    fn interviewer_selector_and_legacy_flag_parse_without_resolution_side_effects() {
         let default = Cli::try_parse_from(["interview-tutor"]).unwrap();
         assert!(!default.no_codex);
+        assert_eq!(default.interviewer, None);
 
         let disabled =
             Cli::try_parse_from(["interview-tutor", "--language", "python", "--no-codex"]).unwrap();
         assert!(disabled.no_codex);
         assert_eq!(disabled.language.as_deref(), Some("python"));
+
+        let codex = Cli::try_parse_from(["interview-tutor", "--interviewer", "codex"]).unwrap();
+        assert_eq!(
+            codex.interviewer,
+            Some(practice_cli::interviewer::Backend::Codex)
+        );
+        assert!(
+            Cli::try_parse_from(["interview-tutor", "--interviewer", "codex", "--no-codex",])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["interview-tutor", "--interviewer", "Codex"]).is_err());
 
         let selected =
             Cli::try_parse_from(["interview-tutor", "--neovim", "/usr/bin/nvim"]).unwrap();
