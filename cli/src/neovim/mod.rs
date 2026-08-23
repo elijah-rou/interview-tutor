@@ -4,7 +4,7 @@ mod msgpack;
 mod process;
 
 use grid::GridSnapshot;
-use process::{OriginEvent, RpcProcess, Snapshot};
+use process::{OriginEvent, RpcProcess, Snapshot, SnapshotOverflow};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -430,7 +430,9 @@ fn accept_snapshot(
     if !process.is_solution_buffer(&snapshot.buffer) {
         return Err("Neovim snapshot targeted a non-solution buffer".into());
     }
-    let text = snapshot.text.ok_or("document exceeds host source bounds")?;
+    let text = snapshot
+        .text
+        .map_err(|_| "overflowed Neovim snapshot reached source acceptance".to_string())?;
     if snapshot.changedtick < config.accepted_changedtick {
         if text == config.source {
             return Ok(DocumentUpdate {
@@ -472,7 +474,7 @@ fn recover_overflow(
     let mut replacement = spawn(executable, &last_valid)
         .map_err(|restart| format!("{error}; cannot restart Neovim: {restart}"))?;
     let snapshot = replacement.snapshot()?;
-    if snapshot.text.as_deref() != Some(last_valid.source.as_str()) {
+    if snapshot.text.as_deref() != Ok(last_valid.source.as_str()) {
         let _ = replacement.shutdown();
         return Err("Neovim overflow recovery changed source bytes".into());
     }
@@ -495,14 +497,16 @@ fn handle_snapshot(
     shared: &Arc<Mutex<WorkerShared>>,
     candidate: Result<Snapshot, String>,
 ) -> Option<(DocumentUpdate, bool)> {
-    let overflow = match &candidate {
-        Ok(snapshot) => snapshot.text.is_none(),
-        Err(error) => error.contains("document exceeds"),
-    };
-    if overflow {
-        let reason = candidate
-            .err()
-            .unwrap_or_else(|| "document exceeds host source bounds".into());
+    let overflow = candidate
+        .as_ref()
+        .ok()
+        .and_then(|snapshot| snapshot.text.as_ref().err().copied());
+    if let Some(overflow) = overflow {
+        let reason = match overflow {
+            SnapshotOverflow::Bytes => "document exceeds host source byte bound",
+            SnapshotOverflow::Lines => "document exceeds host source line bound",
+        }
+        .to_string();
         return match recover_overflow(executable, process, config, shared, reason) {
             Ok(update) => Some((update, true)),
             Err(error) => {
@@ -590,9 +594,10 @@ fn sync_reader_state(
                 .as_mut()
                 .ok_or_else(|| "Neovim session is unavailable".to_string())
                 .and_then(RpcProcess::snapshot),
-            OriginEvent::Action { snapshot, .. } | OriginEvent::Barrier { snapshot, .. } => {
-                Ok(snapshot)
-            }
+            OriginEvent::Action { snapshot, .. } | OriginEvent::Barrier { snapshot, .. } => process
+                .as_mut()
+                .ok_or_else(|| "Neovim session is unavailable".to_string())
+                .and_then(|process| process.resolve_notified_snapshot(snapshot)),
         };
         let Some((document, recovered)) =
             handle_snapshot(executable, process, config, shared, candidate)
@@ -934,10 +939,15 @@ mod tests {
                 Value::Unsigned(1),
                 Value::Unsigned(2),
                 Value::String("n".into()),
-                Value::Bool(true),
-                array([Value::String("processed-action".into())]),
-                Value::Bool(true),
+                Value::Unsigned(1),
+                Value::String("none".into()),
             ]),
+        ]);
+        let action_snapshot = map([
+            ("lines", array([Value::String("processed-action".into())])),
+            ("eol", Value::Bool(true)),
+            ("mode", Value::String("n".into())),
+            ("tick", Value::Unsigned(2)),
         ]);
         let barrier = array([
             Value::Unsigned(2),
@@ -947,21 +957,28 @@ mod tests {
                 Value::Unsigned(1),
                 Value::Unsigned(3),
                 Value::String("n".into()),
-                Value::Bool(true),
-                array([Value::String("processed-barrier".into())]),
-                Value::Bool(true),
+                Value::Unsigned(2),
+                Value::String("none".into()),
             ]),
+        ]);
+        let barrier_snapshot = map([
+            ("lines", array([Value::String("processed-barrier".into())])),
+            ("eol", Value::Bool(true)),
+            ("mode", Value::String("n".into())),
+            ("tick", Value::Unsigned(3)),
         ]);
         let messages = [
             rpc_response(1, api),
             rpc_response(2, Value::Nil),
             rpc_response(3, Value::Nil),
             rpc_response(4, Value::Unsigned(1)),
-            rpc_response(5, Value::Bool(true)),
+            rpc_response(5, Value::Unsigned(1)),
             rpc_response(6, Value::Nil),
             rpc_response(7, initial_snapshot),
             action,
+            rpc_response(8, action_snapshot),
             barrier,
+            rpc_response(9, barrier_snapshot),
         ]
         .iter()
         .map(|message| format!("sleep 0.02\nprintf '{}'\n", shell_encoded(message)))
@@ -1068,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn serialized_barrier_captures_immediately_preceding_input() {
+    fn solve_open_input_and_alias_barrier_stay_serialized_during_startup() {
         let executable = resolve_executable(None).unwrap();
         let worker = Worker::start(executable);
         worker
@@ -1080,10 +1097,9 @@ mod tests {
                 8,
             )
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        wait_until_started(&worker, deadline);
         worker.input("iZ".into()).unwrap();
         worker.barrier(42).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
         worker.input("!<Esc>".into()).unwrap();
         let mut barrier = None;
         let mut latest_text = None;
@@ -1151,6 +1167,99 @@ mod tests {
         assert_eq!(action.document.text, "Zx\n");
         assert_eq!(latest_text.as_deref(), Some("Zx!\n"));
         worker.shutdown();
+    }
+
+    #[test]
+    fn over_four_mib_native_read_restarts_without_decoding_or_host_mutation() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        let source = "saved\0bytes\r\n界\n".to_string();
+        let mut host_document = crate::editor::EditorDocument::new(source.clone()).unwrap();
+        let saved_revision = host_document.revision;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let oversized_path = std::env::temp_dir().join(format!(
+            "interview-native-overflow-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::write(
+            &oversized_path,
+            vec![b'z'; super::msgpack::MAX_MESSAGE_BYTES + 4096],
+        )
+        .unwrap();
+
+        worker
+            .start_session(
+                source.clone(),
+                "interview://native-read-overflow.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        wait_until_started(&worker, deadline);
+        worker
+            .input(format!(":0read {}<CR>", oversized_path.display()))
+            .unwrap();
+
+        let mut warning = None;
+        let mut restored = None;
+        while warning.is_none() || restored.is_none() {
+            let poll = worker.poll();
+            if let Some(document) = poll.document {
+                restored = Some(document);
+            }
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Warning(message) => warning = Some(message),
+                    WorkerEvent::Failed(error) => {
+                        panic!("native read overflow must recover cleanly: {error}")
+                    }
+                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "native read recovery timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|message| message.contains("restarted from the last valid source"))
+        );
+        let restored = restored.unwrap();
+        assert_eq!(restored.text, source);
+        host_document
+            .install_neovim_snapshot(restored.text, &restored.mode, restored.changedtick)
+            .unwrap();
+        assert_eq!(host_document.text().as_bytes(), source.as_bytes());
+        assert_eq!(host_document.saved_text().as_bytes(), source.as_bytes());
+        assert_eq!(host_document.revision, saved_revision);
+        assert!(!host_document.dirty());
+
+        worker.barrier(91).unwrap();
+        let barrier = loop {
+            let poll = worker.poll();
+            let event = poll.events.into_iter().find_map(|event| match event {
+                WorkerEvent::Source(SourceEvent::Barrier(update)) => Some(update),
+                WorkerEvent::Failed(error) => panic!("restarted Neovim failed: {error}"),
+                WorkerEvent::Started(_)
+                | WorkerEvent::Source(SourceEvent::Action(_))
+                | WorkerEvent::Warning(_) => None,
+            });
+            if let Some(barrier) = event {
+                break barrier;
+            }
+            assert!(Instant::now() < deadline, "restarted barrier timed out");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(barrier.id, 91);
+        assert_eq!(barrier.document.text.as_bytes(), source.as_bytes());
+
+        worker.shutdown();
+        fs::remove_file(oversized_path).unwrap();
     }
 
     #[test]

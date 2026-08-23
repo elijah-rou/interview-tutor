@@ -101,19 +101,43 @@ impl BoundedThread {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotOverflow {
+    Bytes,
+    Lines,
+}
+
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub buffer: Value,
-    pub text: Option<String>,
+    pub text: Result<String, SnapshotOverflow>,
+    pub mode: String,
+    pub changedtick: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct NotifiedSnapshot {
+    pub buffer: Value,
+    pub capture_id: Option<u64>,
+    pub overflow: Option<SnapshotOverflow>,
     pub mode: String,
     pub changedtick: u64,
 }
 
 #[derive(Clone, Debug)]
 pub enum OriginEvent {
-    Dirty { buffer: Value, changedtick: u64 },
-    Action { action: String, snapshot: Snapshot },
-    Barrier { id: u64, snapshot: Snapshot },
+    Dirty {
+        buffer: Value,
+        changedtick: u64,
+    },
+    Action {
+        action: String,
+        snapshot: NotifiedSnapshot,
+    },
+    Barrier {
+        id: u64,
+        snapshot: NotifiedSnapshot,
+    },
 }
 
 #[derive(Default)]
@@ -121,7 +145,6 @@ pub struct ReaderShared {
     pub latest_grid: Option<Arc<GridSnapshot>>,
     pub solution_buffer: Option<u64>,
     pub origin_events: VecDeque<OriginEvent>,
-    pub multipart_changedtick: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -381,7 +404,7 @@ impl RpcProcess {
             STARTUP_TIMEOUT,
         )?;
         let script = r#"
-local source, name, filetype, channel, max_bytes, max_lines = ...
+local source, name, filetype, channel, max_bytes, max_lines, max_captures = ...
 local buf = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(buf)
 vim.api.nvim_buf_set_name(buf, name)
@@ -401,33 +424,74 @@ bo.endofline = has_eol
 bo.filetype = filetype
 vim.o.shadafile = "NONE"
 vim.o.clipboard = ""
-local function snapshot_args()
+local function snapshot_metadata()
   local tick = vim.api.nvim_buf_get_changedtick(buf)
   local mode = vim.api.nvim_get_mode().mode
   local line_count = vim.api.nvim_buf_line_count(buf)
-  if line_count > max_lines then return tick, mode, false, {}, false end
-  local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+  if line_count > max_lines then return tick, mode, "lines", false end
   local eol = vim.bo[buf].endofline
-  local size = eol and 1 or 0
-  for index, line in ipairs(current_lines) do
-    size = size + #line
-    if index > 1 then size = size + 1 end
-    if size > max_bytes then return tick, mode, false, {}, false end
+  local offset = vim.api.nvim_buf_get_offset(buf, line_count)
+  if offset < 0 then error("cannot measure synthetic solution buffer") end
+  local size = offset
+  if size > max_bytes then return tick, mode, "bytes", eol end
+  return tick, mode, "none", eol
+end
+local function snapshot_now()
+  local tick, mode, overflow, eol = snapshot_metadata()
+  if overflow ~= "none" then
+    return { tick = tick, mode = mode, overflow = overflow }
   end
-  return tick, mode, true, current_lines, eol
+  return {
+    tick = tick,
+    mode = mode,
+    overflow = overflow,
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true),
+    eol = eol,
+  }
+end
+local captures = {}
+local capture_count = 0
+local next_capture_id = 1
+local function capture_snapshot()
+  local tick, mode, overflow, eol = snapshot_metadata()
+  if overflow ~= "none" then return tick, mode, 0, overflow end
+  if capture_count >= max_captures then error("source snapshot capture queue exceeds bound") end
+  if next_capture_id > 9007199254740990 then error("source snapshot capture id overflow") end
+  local capture_id = next_capture_id
+  next_capture_id = next_capture_id + 1
+  captures[capture_id] = {
+    tick = tick,
+    mode = mode,
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true),
+    eol = eol,
+  }
+  capture_count = capture_count + 1
+  return tick, mode, capture_id, overflow
+end
+local function take_capture(capture_id)
+  local capture = captures[capture_id]
+  if capture == nil then error("source snapshot capture is unavailable") end
+  captures[capture_id] = nil
+  capture_count = capture_count - 1
+  if capture_count < 0 then error("source snapshot capture count underflow") end
+  return capture
 end
 local function tutor(action)
-  local tick, mode, valid, current_lines, eol = snapshot_args()
-  vim.rpcnotify(channel, "tutor_action", action, buf, tick, mode, valid, current_lines, eol)
+  local tick, mode, capture_id, overflow = capture_snapshot()
+  vim.rpcnotify(channel, "tutor_action", action, buf, tick, mode, capture_id, overflow)
 end
 local function barrier(id)
-  local tick, mode, valid, current_lines, eol = snapshot_args()
-  vim.rpcnotify(channel, "tutor_barrier", id, buf, tick, mode, valid, current_lines, eol)
+  local tick, mode, capture_id, overflow = capture_snapshot()
+  vim.rpcnotify(channel, "tutor_barrier", id, buf, tick, mode, capture_id, overflow)
 end
 _G.__interview_tutor_barriers = _G.__interview_tutor_barriers or {}
 _G.__interview_tutor_barrier_ids = _G.__interview_tutor_barrier_ids or {}
+_G.__interview_tutor_snapshots = _G.__interview_tutor_snapshots or {}
+_G.__interview_tutor_captures = _G.__interview_tutor_captures or {}
 _G.__interview_tutor_barriers[channel] = barrier
 _G.__interview_tutor_barrier_ids[channel] = {}
+_G.__interview_tutor_snapshots[channel] = snapshot_now
+_G.__interview_tutor_captures[channel] = take_capture
 local function acknowledge_barrier()
   local ids = _G.__interview_tutor_barrier_ids[channel]
   local id = table.remove(ids, 1)
@@ -452,6 +516,18 @@ for _, mode in ipairs({ "n", "i", "x" }) do
   vim.keymap.set(mode, "<C-s>", function() tutor("test") end, { buffer = buf, silent = true, nowait = true })
 end
 vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function() tutor("test") end })
+local attached = vim.api.nvim_buf_attach(buf, false, {
+  on_lines = function(_, event_buf, tick)
+    vim.rpcnotify(channel, "tutor_dirty", event_buf, tick)
+  end,
+  on_changedtick = function(_, event_buf, tick)
+    vim.rpcnotify(channel, "tutor_dirty", event_buf, tick)
+  end,
+  on_detach = function(_, event_buf)
+    vim.rpcnotify(channel, "tutor_detach", event_buf)
+  end,
+})
+if not attached then error("cannot attach synthetic solution buffer callbacks") end
 vim.bo[buf].modified = false
 return buf
 "#;
@@ -466,6 +542,7 @@ return buf
                     Value::Unsigned(self.channel_id),
                     Value::Unsigned(crate::editor::MAX_DOCUMENT_BYTES as u64),
                     Value::Unsigned(crate::editor::MAX_DOCUMENT_LINES as u64),
+                    Value::Unsigned(MAX_ORIGIN_EVENTS as u64),
                 ]),
             ],
             STARTUP_TIMEOUT,
@@ -476,10 +553,13 @@ return buf
             .expect("Neovim reader lock")
             .solution_buffer =
             Some(buffer_id(&buffer).ok_or("Neovim returned an invalid solution buffer handle")?);
-        self.call(
-            "nvim_buf_attach",
-            vec![buffer, Value::Bool(false), Value::Map(Vec::new())],
-        )?;
+        let installed_lines = self
+            .call("nvim_buf_line_count", vec![buffer])?
+            .as_u64()
+            .ok_or("Neovim returned an invalid solution buffer line count")?;
+        if installed_lines == 0 {
+            return Err("Neovim installed an empty solution buffer line table".into());
+        }
         self.call("nvim_command", vec![Value::String("redraw!".into())])?;
         Ok(())
     }
@@ -541,42 +621,67 @@ return buf
 
     pub fn snapshot(&mut self) -> Result<Snapshot, String> {
         let script = r#"
-local buf = ...
-if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
-  error("synthetic solution buffer is unavailable")
+local channel = ...
+local snapshots = _G.__interview_tutor_snapshots
+if snapshots == nil or snapshots[channel] == nil then
+  error("synthetic solution snapshot is unavailable")
 end
-return {
-  lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true),
-  eol = vim.bo[buf].endofline,
-  mode = vim.api.nvim_get_mode().mode,
-  tick = vim.api.nvim_buf_get_changedtick(buf),
-}
+return snapshots[channel]()
 "#;
         let result = self.call(
             "nvim_exec_lua",
-            vec![Value::String(script.into()), array([self.buffer.clone()])],
+            vec![
+                Value::String(script.into()),
+                array([Value::Unsigned(self.channel_id)]),
+            ],
         )?;
-        let text = snapshot_text(
-            result
-                .map_get("lines")
-                .ok_or("Neovim snapshot omitted lines")?,
-            result.map_get("eol").and_then(Value::as_bool) == Some(true),
+        snapshot_from_result(self.buffer.clone(), &result)
+    }
+
+    pub fn resolve_notified_snapshot(
+        &mut self,
+        notified: NotifiedSnapshot,
+    ) -> Result<Snapshot, String> {
+        if !self.is_solution_buffer(&notified.buffer) {
+            return Err("Neovim notification targeted a non-solution buffer".into());
+        }
+        if let Some(overflow) = notified.overflow {
+            if notified.capture_id.is_some() {
+                return Err("overflowed Neovim snapshot included a capture id".into());
+            }
+            return Ok(Snapshot {
+                buffer: notified.buffer,
+                text: Err(overflow),
+                mode: notified.mode,
+                changedtick: notified.changedtick,
+            });
+        }
+        let capture_id = notified
+            .capture_id
+            .ok_or("bounded Neovim snapshot omitted capture id")?;
+        let script = r#"
+local channel, capture_id = ...
+local captures = _G.__interview_tutor_captures
+if captures == nil or captures[channel] == nil then
+  error("synthetic solution captures are unavailable")
+end
+return captures[channel](capture_id)
+"#;
+        let result = self.call(
+            "nvim_exec_lua",
+            vec![
+                Value::String(script.into()),
+                array([
+                    Value::Unsigned(self.channel_id),
+                    Value::Unsigned(capture_id),
+                ]),
+            ],
         )?;
-        let mode = result
-            .map_get("mode")
-            .and_then(Value::as_str)
-            .ok_or("Neovim snapshot omitted mode")?
-            .to_string();
-        let changedtick = result
-            .map_get("tick")
-            .and_then(Value::as_u64)
-            .ok_or("Neovim snapshot omitted changedtick")?;
-        Ok(Snapshot {
-            buffer: self.buffer.clone(),
-            text: Some(text),
-            mode,
-            changedtick,
-        })
+        let snapshot = snapshot_from_result(notified.buffer, &result)?;
+        if snapshot.mode != notified.mode || snapshot.changedtick != notified.changedtick {
+            return Err("Neovim snapshot capture metadata changed".into());
+        }
+        Ok(snapshot)
     }
 
     pub fn request_barrier(&mut self, id: u64) -> Result<(), String> {
@@ -1017,6 +1122,53 @@ fn buffer_id(value: &Value) -> Option<u64> {
     }
 }
 
+fn parse_snapshot_overflow(value: &str) -> Result<Option<SnapshotOverflow>, String> {
+    match value {
+        "none" => Ok(None),
+        "bytes" => Ok(Some(SnapshotOverflow::Bytes)),
+        "lines" => Ok(Some(SnapshotOverflow::Lines)),
+        _ => Err("Neovim snapshot overflow classification is invalid".into()),
+    }
+}
+
+fn snapshot_from_result(buffer: Value, result: &Value) -> Result<Snapshot, String> {
+    let mode = result
+        .map_get("mode")
+        .and_then(Value::as_str)
+        .ok_or("Neovim snapshot omitted mode")?
+        .to_string();
+    let changedtick = result
+        .map_get("tick")
+        .and_then(Value::as_u64)
+        .ok_or("Neovim snapshot omitted changedtick")?;
+    let overflow = result
+        .map_get("overflow")
+        .and_then(Value::as_str)
+        .map(parse_snapshot_overflow)
+        .transpose()?
+        .flatten();
+    let text = match overflow {
+        Some(overflow) => {
+            if result.map_get("lines").is_some() || result.map_get("eol").is_some() {
+                return Err("overflowed Neovim snapshot included source content".into());
+            }
+            Err(overflow)
+        }
+        None => Ok(snapshot_text(
+            result
+                .map_get("lines")
+                .ok_or("Neovim snapshot omitted lines")?,
+            result.map_get("eol").and_then(Value::as_bool) == Some(true),
+        )?),
+    };
+    Ok(Snapshot {
+        buffer,
+        text,
+        mode,
+        changedtick,
+    })
+}
+
 fn snapshot_text(lines: &Value, endofline: bool) -> Result<String, String> {
     let lines = lines
         .as_array()
@@ -1050,7 +1202,7 @@ fn snapshot_text(lines: &Value, endofline: bool) -> Result<String, String> {
     Ok(text)
 }
 
-fn notified_snapshot(parameters: &[Value], start: usize) -> Result<Snapshot, String> {
+fn notified_snapshot(parameters: &[Value], start: usize) -> Result<NotifiedSnapshot, String> {
     let buffer = parameters
         .get(start)
         .ok_or("Neovim snapshot omitted solution buffer")?
@@ -1064,23 +1216,26 @@ fn notified_snapshot(parameters: &[Value], start: usize) -> Result<Snapshot, Str
         .and_then(Value::as_str)
         .ok_or("Neovim snapshot omitted mode")?
         .to_string();
-    let valid = parameters
+    let raw_capture_id = parameters
         .get(start + 3)
-        .and_then(Value::as_bool)
-        .ok_or("Neovim snapshot omitted validity")?;
-    let text = if valid {
-        Some(snapshot_text(
-            parameters
-                .get(start + 4)
-                .ok_or("Neovim snapshot omitted lines")?,
-            parameters.get(start + 5).and_then(Value::as_bool) == Some(true),
-        )?)
-    } else {
-        None
+        .and_then(Value::as_u64)
+        .ok_or("Neovim snapshot omitted capture id")?;
+    let overflow = parse_snapshot_overflow(
+        parameters
+            .get(start + 4)
+            .and_then(Value::as_str)
+            .ok_or("Neovim snapshot omitted overflow classification")?,
+    )?;
+    let capture_id = match overflow {
+        None if raw_capture_id > 0 => Some(raw_capture_id),
+        None => return Err("bounded Neovim snapshot capture id is invalid".into()),
+        Some(_) if raw_capture_id == 0 => None,
+        Some(_) => return Err("overflowed Neovim snapshot capture id is invalid".into()),
     };
-    Ok(Snapshot {
+    Ok(NotifiedSnapshot {
         buffer,
-        text,
+        capture_id,
+        overflow,
         mode,
         changedtick,
     })
@@ -1155,67 +1310,30 @@ fn read_rpc(
                             shared.lock().expect("Neovim reader lock").latest_grid = Some(snapshot);
                         }
                     }),
-                    "nvim_buf_lines_event" if parameters.len() == 6 => {
+                    "tutor_dirty" if parameters.len() == 2 => {
                         let buffer = parameters[0].clone();
                         let changedtick = parameters[1]
                             .as_u64()
-                            .ok_or("Neovim line event changedtick is invalid")?;
-                        let more = parameters[5]
-                            .as_bool()
-                            .ok_or("Neovim line event multipart flag is invalid")?;
+                            .ok_or("Neovim dirty event changedtick is invalid")?;
                         let mut reader = shared.lock().expect("Neovim reader lock");
                         if buffer_id(&buffer) != reader.solution_buffer {
-                            Err("Neovim line event targeted a non-solution buffer".into())
-                        } else if reader
-                            .multipart_changedtick
-                            .is_some_and(|pending| pending != changedtick)
-                        {
-                            Err("Neovim multipart line events changed tick".into())
-                        } else if more {
-                            reader.multipart_changedtick = Some(changedtick);
+                            Err("Neovim dirty event targeted a non-solution buffer".into())
+                        } else if matches!(
+                            reader.origin_events.back(),
+                            Some(OriginEvent::Dirty { changedtick: pending, .. }) if *pending == changedtick
+                        ) {
                             Ok(())
+                        } else if reader.origin_events.len() == MAX_ORIGIN_EVENTS {
+                            Err("Neovim origin event queue exceeds bound".into())
                         } else {
-                            reader.multipart_changedtick = None;
-                            if !matches!(
-                                reader.origin_events.back(),
-                                Some(OriginEvent::Dirty { changedtick: pending, .. }) if *pending == changedtick
-                            ) {
-                                if reader.origin_events.len() == MAX_ORIGIN_EVENTS {
-                                    Err("Neovim origin event queue exceeds bound".into())
-                                } else {
-                                    reader.origin_events.push_back(OriginEvent::Dirty {
-                                        buffer,
-                                        changedtick,
-                                    });
-                                    Ok(())
-                                }
-                            } else {
-                                Ok(())
-                            }
+                            reader.origin_events.push_back(OriginEvent::Dirty {
+                                buffer,
+                                changedtick,
+                            });
+                            Ok(())
                         }
                     }
-                    "nvim_buf_changedtick_event" if parameters.len() == 2 => {
-                        let buffer = parameters[0].clone();
-                        let changedtick = parameters[1]
-                            .as_u64()
-                            .ok_or("Neovim changedtick event is invalid")?;
-                        let reader = shared.lock().expect("Neovim reader lock");
-                        if buffer_id(&buffer) != reader.solution_buffer {
-                            Err("Neovim changedtick event targeted a non-solution buffer".into())
-                        } else if reader.multipart_changedtick.is_some() {
-                            Err("Neovim changedtick event interrupted multipart lines".into())
-                        } else {
-                            drop(reader);
-                            push_origin_event(
-                                &shared,
-                                OriginEvent::Dirty {
-                                    buffer,
-                                    changedtick,
-                                },
-                            )
-                        }
-                    }
-                    "nvim_buf_detach_event" if parameters.len() == 1 => {
+                    "tutor_detach" if parameters.len() == 1 => {
                         if shared.lock().expect("Neovim reader lock").solution_buffer
                             == parameters.first().and_then(buffer_id)
                         {
@@ -1224,7 +1342,12 @@ fn read_rpc(
                             Err("Neovim detached an unexpected buffer".into())
                         }
                     }
-                    "tutor_action" if parameters.len() == 7 => {
+                    "nvim_buf_lines_event"
+                    | "nvim_buf_changedtick_event"
+                    | "nvim_buf_detach_event" => {
+                        Err("Neovim emitted an unexpected native buffer notification".into())
+                    }
+                    "tutor_action" if parameters.len() == 6 => {
                         let action = parameters[0]
                             .as_str()
                             .ok_or("Neovim Tutor action is invalid")?
@@ -1237,7 +1360,7 @@ fn read_rpc(
                             push_origin_event(&shared, OriginEvent::Action { action, snapshot })
                         }
                     }
-                    "tutor_barrier" if parameters.len() == 7 => {
+                    "tutor_barrier" if parameters.len() == 6 => {
                         let id = parameters[0]
                             .as_u64()
                             .ok_or("Neovim barrier id is invalid")?;
@@ -1648,7 +1771,7 @@ mod tests {
                 rpc_response(2, Value::Nil),
                 rpc_response(3, Value::Nil),
                 rpc_response(4, Value::Unsigned(1)),
-                rpc_response(5, Value::Bool(true)),
+                rpc_response(5, Value::Unsigned(1)),
                 rpc_response(6, Value::Nil),
             ]
             .iter()
@@ -1690,26 +1813,22 @@ mod tests {
         }
     }
 
-    fn wait_for_barrier(process: &RpcProcess, id: u64) -> Snapshot {
+    fn wait_for_barrier(process: &mut RpcProcess, id: u64) -> Snapshot {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let snapshot = process
-                .shared()
-                .lock()
-                .unwrap()
-                .origin_events
-                .iter()
-                .find_map(|event| match event {
-                    OriginEvent::Barrier {
-                        id: actual,
-                        snapshot,
-                    } if *actual == id => Some(snapshot.clone()),
-                    OriginEvent::Dirty { .. }
-                    | OriginEvent::Action { .. }
-                    | OriginEvent::Barrier { .. } => None,
+            let reader = process.shared();
+            let snapshot = {
+                let mut reader = reader.lock().unwrap();
+                let index = reader.origin_events.iter().position(|event| {
+                    matches!(event, OriginEvent::Barrier { id: actual, .. } if *actual == id)
                 });
+                index.and_then(|index| match reader.origin_events.remove(index).unwrap() {
+                    OriginEvent::Barrier { snapshot, .. } => Some(snapshot),
+                    OriginEvent::Dirty { .. } | OriginEvent::Action { .. } => unreachable!(),
+                })
+            };
             if let Some(snapshot) = snapshot {
-                return snapshot;
+                return process.resolve_notified_snapshot(snapshot).unwrap();
             }
             assert!(Instant::now() < deadline, "source barrier {id} timed out");
             thread::sleep(Duration::from_millis(10));
@@ -1733,7 +1852,7 @@ mod tests {
                 RpcProcess::start(&executable, source, "interview://p.py", "python", 40, 12)
                     .unwrap();
             let snapshot = process.snapshot().unwrap();
-            assert_eq!(snapshot.text.as_deref(), Some(source));
+            assert_eq!(snapshot.text.as_deref(), Ok(source));
             assert!(snapshot.mode.starts_with('n'));
             process.shutdown().unwrap();
         }
@@ -2013,35 +2132,13 @@ end, { buffer = buf, expr = true })
         let started = Instant::now();
         process.feed_key("iZ").unwrap();
         process.request_barrier(77).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let barrier = loop {
-            let event = process
-                .shared()
-                .lock()
-                .unwrap()
-                .origin_events
-                .iter()
-                .find_map(|event| match event {
-                    OriginEvent::Barrier { id: 77, snapshot } => Some(snapshot.clone()),
-                    OriginEvent::Dirty { .. }
-                    | OriginEvent::Action { .. }
-                    | OriginEvent::Barrier { .. } => None,
-                });
-            if let Some(snapshot) = event {
-                break snapshot;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "processed-input barrier timed out"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
+        let barrier = wait_for_barrier(&mut process, 77);
 
         assert!(
             started.elapsed() >= Duration::from_millis(100),
             "barrier overtook delayed input"
         );
-        assert_eq!(barrier.text.as_deref(), Some("Zx\n"));
+        assert_eq!(barrier.text.as_deref(), Ok("Zx\n"));
         assert!(barrier.mode.starts_with('i'));
         process.shutdown().unwrap();
     }
@@ -2070,51 +2167,61 @@ end, { buffer = buf, expr = true })
             process.feed_key(&format!(":{command}<CR>")).unwrap();
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let actions = process
-                .shared()
-                .lock()
-                .unwrap()
-                .origin_events
-                .iter()
-                .filter_map(|event| match event {
-                    OriginEvent::Action { action, snapshot } => {
-                        assert_eq!(snapshot.text.as_deref(), Some("solution\n"));
-                        Some(action.clone())
-                    }
-                    OriginEvent::Dirty { .. } | OriginEvent::Barrier { .. } => None,
+        let notifications = loop {
+            let reader = process.shared();
+            let actions = {
+                let mut reader = reader.lock().unwrap();
+                let action_count = reader
+                    .origin_events
+                    .iter()
+                    .filter(|event| matches!(event, OriginEvent::Action { .. }))
+                    .count();
+                (action_count == 6).then(|| {
+                    std::mem::take(&mut reader.origin_events)
+                        .into_iter()
+                        .filter_map(|event| match event {
+                            OriginEvent::Action { action, snapshot } => Some((action, snapshot)),
+                            OriginEvent::Dirty { .. } | OriginEvent::Barrier { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>();
-            if actions.len() == 6 {
-                assert_eq!(
-                    actions,
-                    ["test", "submit", "back", "collapse", "quit", "hint"]
-                );
-                break;
+            };
+            if let Some(actions) = actions {
+                break actions;
             }
             assert!(Instant::now() < deadline, "Tutor commands timed out");
             thread::sleep(Duration::from_millis(10));
+        };
+        let mut actions = Vec::new();
+        for (action, snapshot) in notifications {
+            let snapshot = process.resolve_notified_snapshot(snapshot).unwrap();
+            assert_eq!(snapshot.text.as_deref(), Ok("solution\n"));
+            actions.push(action);
         }
+        assert_eq!(
+            actions,
+            ["test", "submit", "back", "collapse", "quit", "hint"]
+        );
 
         process.feed_key(":enew<CR>iALTERNATE<Esc>").unwrap();
         process.request_barrier(101).unwrap();
         assert_eq!(
-            wait_for_barrier(&process, 101).text.as_deref(),
-            Some("solution\n")
+            wait_for_barrier(&mut process, 101).text.as_deref(),
+            Ok("solution\n")
         );
 
         process.feed_key(":new<CR>iSPLIT<Esc>").unwrap();
         process.request_barrier(102).unwrap();
         assert_eq!(
-            wait_for_barrier(&process, 102).text.as_deref(),
-            Some("solution\n")
+            wait_for_barrier(&mut process, 102).text.as_deref(),
+            Ok("solution\n")
         );
 
         process.feed_key(":tabnew<CR>iTAB<Esc>").unwrap();
         process.request_barrier(103).unwrap();
         assert_eq!(
-            wait_for_barrier(&process, 103).text.as_deref(),
-            Some("solution\n")
+            wait_for_barrier(&mut process, 103).text.as_deref(),
+            Ok("solution\n")
         );
 
         for (keys, id, expected_mode) in [
@@ -2126,8 +2233,8 @@ end, { buffer = buf, expr = true })
         ] {
             process.feed_key(keys).unwrap();
             process.request_barrier(id).unwrap();
-            let barrier = wait_for_barrier(&process, id);
-            assert_eq!(barrier.text.as_deref(), Some("solution\n"));
+            let barrier = wait_for_barrier(&mut process, id);
+            assert_eq!(barrier.text.as_deref(), Ok("solution\n"));
             assert!(
                 barrier.mode.starts_with(expected_mode),
                 "expected {expected_mode} mode, got {}",
@@ -2153,8 +2260,8 @@ end, { buffer = buf, expr = true })
             thread::sleep(Duration::from_millis(10));
         }
         process.request_barrier(104).unwrap();
-        let terminal_barrier = wait_for_barrier(&process, 104);
-        assert_eq!(terminal_barrier.text.as_deref(), Some("solution\n"));
+        let terminal_barrier = wait_for_barrier(&mut process, 104);
+        assert_eq!(terminal_barrier.text.as_deref(), Ok("solution\n"));
         assert!(terminal_barrier.mode.starts_with('t'));
 
         process.shutdown().unwrap();
@@ -2176,7 +2283,7 @@ end, { buffer = buf, expr = true })
         thread::sleep(Duration::from_millis(20));
         assert_eq!(
             process.snapshot().unwrap().text.as_deref(),
-            Some("solution\n")
+            Ok("solution\n")
         );
         process.shutdown().unwrap();
     }
@@ -2290,37 +2397,56 @@ end, { buffer = buf, expr = true })
         feed(&mut process, "gg0dw");
         assert_eq!(
             process.snapshot().unwrap().text.as_deref(),
-            Some("two\nthree\n")
+            Ok("two\nthree\n")
         );
         feed(&mut process, "u");
         assert_eq!(
             process.snapshot().unwrap().text.as_deref(),
-            Some("one two\nthree\n")
+            Ok("one two\nthree\n")
         );
         feed(&mut process, "G$A!<Esc>");
         feed(&mut process, ".");
         assert_eq!(
             process.snapshot().unwrap().text.as_deref(),
-            Some("one two\nthree!!\n")
+            Ok("one two\nthree!!\n")
         );
         feed(&mut process, "gg0\"ayyGp");
         assert_eq!(
             process.snapshot().unwrap().text.as_deref(),
-            Some("one two\nthree!!\none two\n")
+            Ok("one two\nthree!!\none two\n")
         );
         feed(&mut process, "/three<CR>");
         assert!(process.snapshot().unwrap().mode.starts_with('n'));
         feed(&mut process, "<Space>t");
-        let shared = process.shared();
-        let action_observed = shared.lock().unwrap().origin_events.iter().any(|event| {
-            matches!(
-                event,
-                OriginEvent::Action { action, snapshot }
-                    if action == "test"
-                        && snapshot.text.as_deref() == Some("one two\nthree!!\none two\n")
-            )
-        });
-        assert!(action_observed);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (action, notified) = loop {
+            let shared = process.shared();
+            let action = {
+                let mut shared = shared.lock().unwrap();
+                let index = shared
+                    .origin_events
+                    .iter()
+                    .position(|event| matches!(event, OriginEvent::Action { .. }));
+                index.and_then(|index| match shared.origin_events.remove(index).unwrap() {
+                    OriginEvent::Action { action, snapshot } => Some((action, snapshot)),
+                    OriginEvent::Dirty { .. } | OriginEvent::Barrier { .. } => unreachable!(),
+                })
+            };
+            if let Some(action) = action {
+                break action;
+            }
+            assert!(Instant::now() < deadline, "Tutor action timed out");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(action, "test");
+        assert_eq!(
+            process
+                .resolve_notified_snapshot(notified)
+                .unwrap()
+                .text
+                .as_deref(),
+            Ok("one two\nthree!!\none two\n")
+        );
         process.shutdown().unwrap();
     }
 }

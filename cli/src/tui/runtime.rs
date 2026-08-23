@@ -1251,7 +1251,7 @@ fn apply_neovim_cursor_shape(state: &AppState) -> Result<(), String> {
 fn action_requires_neovim_barrier(state: &AppState, action: &crate::app::Action) -> bool {
     state.screen == crate::app::Screen::Solve
         && state.solve.as_ref().is_some_and(|solve| {
-            solve.editor_status == crate::app::model::EditorRuntimeStatus::Ready
+            solve.editor_status != crate::app::model::EditorRuntimeStatus::Failed
         })
         && matches!(
             action,
@@ -1373,7 +1373,11 @@ pub fn run(
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
         let mut next_neovim_barrier_id = 1_u64;
-        let mut pending_neovim_barriers = std::collections::VecDeque::new();
+        let mut pending_neovim_barriers: std::collections::VecDeque<(
+            u64,
+            crate::app::Action,
+            Option<Instant>,
+        )> = std::collections::VecDeque::new();
         let mut last_neovim_grid_size = None;
         while !state.quit {
             if let Some(signal) = signal_state.received() {
@@ -1420,13 +1424,25 @@ pub fn run(
             }
             for worker_event in neovim_poll.events {
                 match worker_event {
-                    crate::neovim::WorkerEvent::Started(started) => apply_event(
-                        &mut state,
-                        &repository,
-                        &root,
-                        &mut workers,
-                        Event::NeovimStarted(started),
-                    ),
+                    crate::neovim::WorkerEvent::Started(started) => {
+                        if started.is_ok() {
+                            let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
+                            for (_, _, pending_deadline) in &mut pending_neovim_barriers {
+                                if pending_deadline.is_none() {
+                                    *pending_deadline = Some(deadline);
+                                }
+                            }
+                        } else {
+                            pending_neovim_barriers.clear();
+                        }
+                        apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::NeovimStarted(started),
+                        );
+                    }
                     crate::neovim::WorkerEvent::Warning(error) => apply_event(
                         &mut state,
                         &repository,
@@ -1505,7 +1521,8 @@ pub fn run(
             }
             if pending_neovim_barriers
                 .front()
-                .is_some_and(|(_, _, deadline)| Instant::now() >= *deadline)
+                .and_then(|(_, _, deadline)| *deadline)
+                .is_some_and(|deadline| Instant::now() >= deadline)
             {
                 return Err("Neovim source barrier timed out".into());
             }
@@ -1571,11 +1588,15 @@ pub fn run(
                                 .as_ref()
                                 .expect("runtime Neovim worker exists")
                                 .barrier(id)?;
-                            pending_neovim_barriers.push_back((
-                                id,
-                                action,
-                                Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT,
-                            ));
+                            let deadline = state
+                                .solve
+                                .as_ref()
+                                .is_some_and(|solve| {
+                                    solve.editor_status
+                                        == crate::app::model::EditorRuntimeStatus::Ready
+                                })
+                                .then(|| Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT);
+                            pending_neovim_barriers.push_back((id, action, deadline));
                         } else {
                             apply_event(
                                 &mut state,
@@ -1696,6 +1717,52 @@ mod tests {
     use crate::app::model::OperationId;
     use crate::runner::{ExecutionPlan, ExecutionResult, Termination};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn solve_open_aliases_and_source_actions_wait_for_starting_neovim() {
+        use crate::app::model::EditorRuntimeStatus;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut state = codex_solve_state();
+        let solve = state.solve.as_mut().unwrap();
+        solve.pane = SolvePane::Editor;
+        solve.editor_status = EditorRuntimeStatus::Starting;
+
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+                crate::app::Action::SaveTest,
+            ),
+            (
+                KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+                crate::app::Action::Submit,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                crate::app::Action::SaveTest,
+            ),
+        ] {
+            let action = input::action_for_key(key, &mut state).unwrap();
+            assert_eq!(action, expected);
+            assert!(action_requires_neovim_barrier(&state, &action));
+        }
+        for action in [
+            crate::app::Action::SaveTest,
+            crate::app::Action::Submit,
+            crate::app::Action::Back,
+            crate::app::Action::Quit,
+            crate::app::Action::Hint,
+            crate::app::Action::InterviewSend,
+        ] {
+            assert!(action_requires_neovim_barrier(&state, &action));
+        }
+
+        state.solve.as_mut().unwrap().editor_status = EditorRuntimeStatus::Failed;
+        assert!(!action_requires_neovim_barrier(
+            &state,
+            &crate::app::Action::SaveTest
+        ));
+    }
 
     #[test]
     fn mouse_events_map_to_neovim_protocol_actions() {
