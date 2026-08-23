@@ -201,7 +201,7 @@ impl PiProcess {
         if self.provider.is_none() {
             self.load_state(cancellation)?;
         }
-        let prompt_id = self.send_command(json!({"type":"prompt","message":input}))?;
+        let prompt_id = self.send_command(json!({"type":"prompt","message":&input}))?;
         let deadline = Instant::now() + timeout;
         let mut prompt_accepted = false;
         let mut observation = TurnObservation::default();
@@ -222,6 +222,7 @@ impl PiProcess {
                     reason,
                     abort_id,
                     acknowledged: false,
+                    settled: false,
                     deadline: now + ABORT_TIMEOUT,
                 });
             }
@@ -271,6 +272,9 @@ impl PiProcess {
                             ));
                         }
                         state.acknowledged = true;
+                        if state.settled {
+                            return self.fail(state.reason.error());
+                        }
                         continue;
                     }
                     return self.fail(InterviewerError::protocol(
@@ -279,7 +283,7 @@ impl PiProcess {
                     ));
                 }
                 if !prompt_accepted && response_id(object) == Some(prompt_id.as_str()) {
-                    if let Err(error) = validate_success_response(object, &prompt_id, "prompt") {
+                    if let Err(error) = validate_prompt_response(object, &prompt_id) {
                         return self.fail(error);
                     }
                     prompt_accepted = true;
@@ -297,7 +301,7 @@ impl PiProcess {
                     "Pi emitted an event before prompt acceptance",
                 ));
             }
-            if let Some(state) = interruption.as_ref() {
+            if let Some(state) = interruption.as_mut() {
                 if is_forbidden_event(record_type, object) {
                     return self.fail(InterviewerError::protocol(
                         Backend::Pi,
@@ -308,13 +312,17 @@ impl PiProcess {
                     if let Err(error) = require_exact_keys(object, &["type"], "agent_settled") {
                         return self.fail(error);
                     }
-                    if !state.acknowledged {
+                    if state.settled {
                         return self.fail(InterviewerError::protocol(
                             Backend::Pi,
-                            "Pi settled before acknowledging abort",
+                            "Pi duplicated agent_settled while aborting",
                         ));
                     }
-                    return self.fail(state.reason.error());
+                    state.settled = true;
+                    if state.acknowledged {
+                        return self.fail(state.reason.error());
+                    }
+                    continue;
                 }
                 if !is_known_turn_event(record_type) {
                     return self.fail(InterviewerError::protocol(
@@ -325,7 +333,9 @@ impl PiProcess {
                 continue;
             }
 
-            if let Err(error) = observation.accept(record_type, object, self.provider.as_deref()) {
+            if let Err(error) =
+                observation.accept(record_type, object, self.provider.as_deref(), &input)
+            {
                 return self.fail(error);
             }
             if observation.settled {
@@ -398,18 +408,18 @@ impl PiProcess {
             if let Err(error) = validate_state_data(data) {
                 return self.fail(error);
             }
-            let Some(model) = data.get("model") else {
+            if data.contains_key("sessionFile") {
                 return self.fail(InterviewerError::protocol(
                     Backend::Pi,
-                    "Pi get_state omitted model",
-                ));
-            };
-            if model.is_null() {
-                return self.fail(InterviewerError::authentication(
-                    Backend::Pi,
-                    "Pi authentication required; configure credentials for the selected provider",
+                    "Pi --no-session process reported persisted session state",
                 ));
             }
+            let Some(model) = data.get("model") else {
+                return self.fail(InterviewerError::authentication(
+                    Backend::Pi,
+                    "Pi authentication required; select a model and configure its provider credentials",
+                ));
+            };
             let Some(provider) = model.get("provider").and_then(Value::as_str) else {
                 return self.fail(InterviewerError::protocol(
                     Backend::Pi,
@@ -643,8 +653,10 @@ impl Drop for PiProcess {
 struct TurnObservation {
     agent_started: bool,
     turn_started: bool,
-    message_started: bool,
-    message_ended: bool,
+    user_message: Option<Value>,
+    user_ended: bool,
+    assistant_message_started: bool,
+    assistant_message: Option<Value>,
     turn_ended: bool,
     agent_ended: bool,
     settled: bool,
@@ -657,6 +669,7 @@ impl TurnObservation {
         record_type: &str,
         object: &Map<String, Value>,
         provider: Option<&str>,
+        prompt: &str,
     ) -> Result<(), InterviewerError> {
         match record_type {
             "agent_start" => {
@@ -675,14 +688,28 @@ impl TurnObservation {
             }
             "message_start" => {
                 require_exact_keys(object, &["type", "message"], "message_start")?;
-                if !self.turn_started || self.message_started {
+                if !self.turn_started || self.turn_ended {
                     return Err(protocol("Pi message_start ordering is invalid"));
                 }
-                validate_message_has_no_tools(
-                    object.get("message").expect("required key"),
-                    "message_start",
-                )?;
-                self.message_started = true;
+                let message = object.get("message").expect("required key");
+                match message.get("role").and_then(Value::as_str) {
+                    Some("user") if self.user_message.is_none() => {
+                        validate_user_message(message, prompt)?;
+                        self.user_message = Some(message.clone());
+                    }
+                    Some("assistant")
+                        if self.user_ended
+                            && !self.assistant_message_started
+                            && self.assistant_message.is_none() =>
+                    {
+                        validate_message_has_no_tools(message, "message_start")?;
+                        self.assistant_message_started = true;
+                    }
+                    Some("user" | "assistant") => {
+                        return Err(protocol("Pi message_start ordering is invalid"));
+                    }
+                    _ => return Err(protocol("Pi message_start contained an invalid role")),
+                }
             }
             "message_update" => {
                 require_exact_keys(
@@ -690,7 +717,7 @@ impl TurnObservation {
                     &["type", "usage", "assistantMessageEvent"],
                     "message_update",
                 )?;
-                if !self.message_started || self.message_ended {
+                if !self.assistant_message_started || self.assistant_message.is_some() {
                     return Err(protocol("Pi message_update ordering is invalid"));
                 }
                 let event = object
@@ -702,8 +729,7 @@ impl TurnObservation {
                 let expected_keys = match event_type {
                     "text_start" | "thinking_start" => &["type", "contentIndex"][..],
                     "text_delta" | "thinking_delta" => &["type", "contentIndex", "delta"][..],
-                    "text_end" => &["type", "contentIndex", "content"][..],
-                    "thinking_end" => &["type", "contentIndex", "content"][..],
+                    "text_end" | "thinking_end" => &["type", "contentIndex", "content"][..],
                     _ => {
                         return Err(protocol(&format!(
                             "Pi requested forbidden assistant event {event_type}"
@@ -714,19 +740,32 @@ impl TurnObservation {
             }
             "message_end" => {
                 require_exact_keys(object, &["type", "message"], "message_end")?;
-                if !self.message_started || self.message_ended {
-                    return Err(protocol("Pi message_end ordering is invalid"));
+                let message = object.get("message").expect("required key");
+                match message.get("role").and_then(Value::as_str) {
+                    Some("user")
+                        if self.user_message.as_ref() == Some(message) && !self.user_ended =>
+                    {
+                        self.user_ended = true;
+                    }
+                    Some("assistant")
+                        if self.user_ended
+                            && self.assistant_message_started
+                            && self.assistant_message.is_none() =>
+                    {
+                        let text = validate_completed_assistant(message, provider)?;
+                        self.assistant_text = Some(text);
+                        self.assistant_message = Some(message.clone());
+                    }
+                    Some("user") => return Err(protocol("Pi user message lifecycle changed")),
+                    Some("assistant") => {
+                        return Err(protocol("Pi assistant message_end ordering is invalid"));
+                    }
+                    _ => return Err(protocol("Pi message_end contained an invalid role")),
                 }
-                let text = validate_completed_assistant(
-                    object.get("message").expect("required key"),
-                    provider,
-                )?;
-                self.assistant_text = Some(text);
-                self.message_ended = true;
             }
             "turn_end" => {
                 require_exact_keys(object, &["type", "message", "toolResults"], "turn_end")?;
-                if !self.message_ended || self.turn_ended {
+                if self.assistant_message.is_none() || self.turn_ended {
                     return Err(protocol("Pi turn_end ordering is invalid"));
                 }
                 let tools = object
@@ -736,12 +775,8 @@ impl TurnObservation {
                 if !tools.is_empty() {
                     return Err(protocol("Pi emitted forbidden tool results"));
                 }
-                let text = validate_completed_assistant(
-                    object.get("message").expect("required key"),
-                    provider,
-                )?;
-                if self.assistant_text.as_deref() != Some(&text) {
-                    return Err(protocol("Pi turn_end assistant text changed"));
+                if self.assistant_message.as_ref() != object.get("message") {
+                    return Err(protocol("Pi turn_end assistant message changed"));
                 }
                 self.turn_ended = true;
             }
@@ -757,14 +792,16 @@ impl TurnObservation {
                     .get("messages")
                     .and_then(Value::as_array)
                     .ok_or_else(|| protocol("Pi agent_end messages is malformed"))?;
-                if messages.len() != 1 {
+                if messages.len() != 2 {
                     return Err(protocol(
                         "Pi agent_end contained an unexpected message count",
                     ));
                 }
-                let text = validate_completed_assistant(&messages[0], provider)?;
-                if self.assistant_text.as_deref() != Some(&text) {
-                    return Err(protocol("Pi agent_end assistant text changed"));
+                if self.user_message.as_ref() != messages.first() {
+                    return Err(protocol("Pi agent_end user message changed"));
+                }
+                if self.assistant_message.as_ref() != messages.get(1) {
+                    return Err(protocol("Pi agent_end assistant message changed"));
                 }
                 self.agent_ended = true;
             }
@@ -782,6 +819,36 @@ impl TurnObservation {
         }
         Ok(())
     }
+}
+
+fn validate_user_message(value: &Value, prompt: &str) -> Result<(), InterviewerError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| protocol("Pi user message is malformed"))?;
+    require_exact_keys(object, &["role", "content", "timestamp"], "user message")?;
+    if object.get("role").and_then(Value::as_str) != Some("user") {
+        return Err(protocol("Pi user message role is invalid"));
+    }
+    if object.get("timestamp").and_then(Value::as_u64).is_none() {
+        return Err(protocol("Pi user message timestamp is invalid"));
+    }
+    let content = object
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| protocol("Pi user message content is malformed"))?;
+    if content.len() != 1 {
+        return Err(protocol("Pi user message content count is invalid"));
+    }
+    let text = content[0]
+        .as_object()
+        .ok_or_else(|| protocol("Pi user text block is malformed"))?;
+    require_exact_keys(text, &["type", "text"], "user text block")?;
+    if text.get("type").and_then(Value::as_str) != Some("text")
+        || text.get("text").and_then(Value::as_str) != Some(prompt)
+    {
+        return Err(protocol("Pi user message did not match the prompt"));
+    }
+    Ok(())
 }
 
 fn validate_message_has_no_tools(value: &Value, context: &str) -> Result<(), InterviewerError> {
@@ -852,21 +919,23 @@ fn validate_completed_assistant(
 }
 
 fn validate_state_data(data: &Map<String, Value>) -> Result<(), InterviewerError> {
-    const REQUIRED: [&str; 11] = [
-        "model",
+    const REQUIRED: [&str; 9] = [
         "thinkingLevel",
         "isStreaming",
         "isCompacting",
         "steeringMode",
         "followUpMode",
-        "sessionFile",
         "sessionId",
         "autoCompactionEnabled",
         "messageCount",
         "pendingMessageCount",
     ];
-    let expected_length = REQUIRED.len() + usize::from(data.contains_key("sessionName"));
-    if data.len() != expected_length || REQUIRED.iter().any(|key| !data.contains_key(*key)) {
+    const OPTIONAL: [&str; 3] = ["model", "sessionFile", "sessionName"];
+    if REQUIRED.iter().any(|key| !data.contains_key(*key))
+        || data
+            .keys()
+            .any(|key| !REQUIRED.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()))
+    {
         return Err(protocol("Pi get_state data envelope is malformed"));
     }
     if data.get("thinkingLevel").and_then(Value::as_str).is_none()
@@ -874,9 +943,10 @@ fn validate_state_data(data: &Map<String, Value>) -> Result<(), InterviewerError
         || data.get("isCompacting").and_then(Value::as_bool).is_none()
         || data.get("steeringMode").and_then(Value::as_str).is_none()
         || data.get("followUpMode").and_then(Value::as_str).is_none()
-        || !data
+        || data.get("model").is_some_and(|value| !value.is_object())
+        || data
             .get("sessionFile")
-            .is_some_and(|value| value.is_null() || value.is_string())
+            .is_some_and(|value| !value.is_string())
         || data.get("sessionId").and_then(Value::as_str).is_none()
         || data
             .get("autoCompactionEnabled")
@@ -894,6 +964,43 @@ fn validate_state_data(data: &Map<String, Value>) -> Result<(), InterviewerError
         return Err(protocol("Pi get_state data types are malformed"));
     }
     Ok(())
+}
+
+fn validate_prompt_response(
+    object: &Map<String, Value>,
+    expected_id: &str,
+) -> Result<(), InterviewerError> {
+    if object.get("success").and_then(Value::as_bool) == Some(true) {
+        return validate_success_response(object, expected_id, "prompt");
+    }
+    require_exact_keys(
+        object,
+        &["id", "type", "command", "success", "error"],
+        "prompt error response",
+    )?;
+    if object.get("type").and_then(Value::as_str) != Some("response")
+        || response_id(object) != Some(expected_id)
+        || object.get("command").and_then(Value::as_str) != Some("prompt")
+        || object.get("success").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(protocol("Pi prompt error response correlation is invalid"));
+    }
+    let message = object
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .ok_or_else(|| protocol("Pi prompt error response omitted error"))?;
+    if message.starts_with("No API key found for ")
+        || message.starts_with("Authentication failed for ")
+    {
+        return Err(InterviewerError::authentication(
+            Backend::Pi,
+            format!("Pi authentication required: {message}"),
+        ));
+    }
+    Err(protocol(&format!(
+        "Pi rejected the prompt command: {message}"
+    )))
 }
 
 fn validate_success_response(
@@ -1012,6 +1119,7 @@ struct Interruption {
     reason: InterruptReason,
     abort_id: String,
     acknowledged: bool,
+    settled: bool,
     deadline: Instant,
 }
 
@@ -1079,15 +1187,8 @@ fn spawn_stdout_reader(
                 }
                 Ok(count) => {
                     for byte in &buffer[..count] {
-                        aggregate = match aggregate.checked_add(1) {
-                            Some(value) => value,
-                            None => {
-                                set_reader_failure(&failure, "Pi protocol aggregate overflowed");
-                                break 'read;
-                            }
-                        };
-                        if aggregate > MAX_PROTOCOL_AGGREGATE_BYTES {
-                            set_reader_failure(&failure, "Pi protocol aggregate exceeds 2 MiB");
+                        if *byte != b'\n' && line.len() == MAX_JSON_RECORD_BYTES {
+                            set_reader_failure(&failure, "Pi protocol record exceeds 2 MiB");
                             break 'read;
                         }
                         if *byte == b'\n' {
@@ -1099,6 +1200,23 @@ fn spawn_stdout_reader(
                                 break 'read;
                             }
                             let record = std::mem::replace(&mut line, Vec::with_capacity(4096));
+                            // The aggregate cap bounds accepted protocol output, so
+                            // charge a record only once its LF terminator arrives; an
+                            // incomplete oversized record fails via the record cap.
+                            aggregate = match aggregate.checked_add(record.len() + 1) {
+                                Some(value) => value,
+                                None => {
+                                    set_reader_failure(
+                                        &failure,
+                                        "Pi protocol aggregate overflowed",
+                                    );
+                                    break 'read;
+                                }
+                            };
+                            if aggregate > MAX_PROTOCOL_AGGREGATE_BYTES {
+                                set_reader_failure(&failure, "Pi protocol aggregate exceeds 2 MiB");
+                                break 'read;
+                            }
                             match sender.try_send(record) {
                                 Ok(()) => {}
                                 Err(TrySendError::Full(_)) => {
@@ -1108,10 +1226,6 @@ fn spawn_stdout_reader(
                                 Err(TrySendError::Disconnected(_)) => break 'read,
                             }
                         } else {
-                            if line.len() == MAX_JSON_RECORD_BYTES {
-                                set_reader_failure(&failure, "Pi protocol record exceeds 2 MiB");
-                                break 'read;
-                            }
                             line.push(*byte);
                         }
                     }
@@ -1236,7 +1350,10 @@ pub fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, St
     })
 }
 
-pub fn validate_version(executable: &Path, cancellation: &CancellationToken) -> Result<(), String> {
+pub fn validate_version(
+    executable: &Path,
+    cancellation: &CancellationToken,
+) -> Result<(), InterviewerError> {
     validate_version_with_timeout(executable, cancellation, VERSION_TIMEOUT)
 }
 
@@ -1244,23 +1361,35 @@ fn validate_version_with_timeout(
     executable: &Path,
     cancellation: &CancellationToken,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<(), InterviewerError> {
     let capture = bounded_version_capture(executable, cancellation, timeout)?;
     if !capture.status.success() {
-        return Err(format!(
-            "cannot query Pi version: process exited with {}",
-            capture.status
+        return Err(InterviewerError::configuration(
+            Backend::Pi,
+            format!(
+                "cannot query Pi version: process exited with {}",
+                capture.status
+            ),
         ));
     }
     if capture.truncated {
-        return Err("cannot query Pi version: output exceeded 64 KiB".into());
+        return Err(InterviewerError::configuration(
+            Backend::Pi,
+            "cannot query Pi version: output exceeded 64 KiB",
+        ));
     }
     let version = std::str::from_utf8(&capture.stdout)
-        .map_err(|_| "cannot query Pi version: stdout was not UTF-8")?
+        .map_err(|_| {
+            InterviewerError::configuration(
+                Backend::Pi,
+                "cannot query Pi version: stdout was not UTF-8",
+            )
+        })?
         .trim();
     if version != "0.84.2" {
-        return Err(format!(
-            "unsupported Pi CLI {version}; install verified version 0.84.2"
+        return Err(InterviewerError::configuration(
+            Backend::Pi,
+            format!("unsupported Pi CLI {version}; install verified version 0.84.2"),
         ));
     }
     Ok(())
@@ -1298,7 +1427,7 @@ fn bounded_version_capture(
     executable: &Path,
     cancellation: &CancellationToken,
     timeout: Duration,
-) -> Result<VersionCapture, String> {
+) -> Result<VersionCapture, InterviewerError> {
     let mut command = Command::new(executable);
     command
         .arg("--version")
@@ -1313,16 +1442,16 @@ fn bounded_version_capture(
         .env("PI_TELEMETRY", "0")
         .env("NO_COLOR", "1");
     configure_process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("cannot query Pi version: {error}"))?;
+    let mut child = command.spawn().map_err(|error| {
+        InterviewerError::configuration(Backend::Pi, format!("cannot query Pi version: {error}"))
+    })?;
     let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
         (Some(stdout), Some(stderr)) => (stdout, stderr),
         _ => {
             let cleanup = terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
-            return Err(combine_cleanup_error(
-                "Pi version probe pipes unavailable".into(),
-                cleanup,
+            return Err(InterviewerError::configuration(
+                Backend::Pi,
+                combine_cleanup_error("Pi version probe pipes unavailable".into(), cleanup),
             ));
         }
     };
@@ -1332,7 +1461,10 @@ fn bounded_version_capture(
         drop(stdout);
         drop(stderr);
         let cleanup = terminate_child_group(&mut child, SHUTDOWN_TIMEOUT);
-        return Err(combine_cleanup_error(primary, cleanup));
+        return Err(InterviewerError::configuration(
+            Backend::Pi,
+            combine_cleanup_error(primary, cleanup),
+        ));
     }
     let buffers = Arc::new(Mutex::new(CaptureBuffers::default()));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1343,17 +1475,28 @@ fn bounded_version_capture(
     let deadline = Instant::now() + timeout;
     let outcome = loop {
         if cancellation.is_cancelled() {
-            break Err("Pi version probe cancelled".into());
+            break Err(InterviewerError::cancelled(
+                Backend::Pi,
+                "Pi version probe cancelled",
+            ));
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
-            Err(error) => break Err(format!("cannot wait for Pi version: {error}")),
+            Err(error) => {
+                break Err(InterviewerError::configuration(
+                    Backend::Pi,
+                    format!("cannot wait for Pi version: {error}"),
+                ));
+            }
         }
         if Instant::now() >= deadline {
-            break Err(format!(
-                "Pi version probe timed out after {}s",
-                timeout.as_secs_f64()
+            break Err(InterviewerError::timeout(
+                Backend::Pi,
+                format!(
+                    "Pi version probe timed out after {}s",
+                    timeout.as_secs_f64()
+                ),
             ));
         }
         thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
@@ -1370,15 +1513,19 @@ fn bounded_version_capture(
         cleanup_errors.push("Pi version stderr reader panicked".into());
     }
     let buffers = Arc::try_unwrap(buffers)
-        .map_err(|_| "Pi version capture still shared".to_string())?
+        .map_err(|_| InterviewerError::transport(Backend::Pi, "Pi version capture still shared"))?
         .into_inner()
-        .map_err(|_| "Pi version capture lock poisoned".to_string())?;
+        .map_err(|_| {
+            InterviewerError::transport(Backend::Pi, "Pi version capture lock poisoned")
+        })?;
     if !cleanup_errors.is_empty() {
-        return Err(combine_cleanup_error(
-            outcome
-                .err()
-                .unwrap_or_else(|| "cannot clean up Pi version probe".into()),
-            Err(cleanup_errors.join("; ")),
+        let primary = outcome.err().unwrap_or_else(|| {
+            InterviewerError::transport(Backend::Pi, "cannot clean up Pi version probe")
+        });
+        return Err(InterviewerError::new(
+            Backend::Pi,
+            primary.kind(),
+            format!("{primary}; cleanup failed: {}", cleanup_errors.join("; ")),
         ));
     }
     Ok(VersionCapture {
@@ -1457,6 +1604,7 @@ fn provider_auth_environment_names() -> &'static [&'static str] {
         "DEEPSEEK_API_KEY",
         "NVIDIA_API_KEY",
         "GEMINI_API_KEY",
+        "GOOGLE_CLOUD_API_KEY",
         "GROQ_API_KEY",
         "CEREBRAS_API_KEY",
         "XAI_API_KEY",
@@ -1469,9 +1617,12 @@ fn provider_auth_environment_names() -> &'static [&'static str] {
         "ZAI_CODING_CN_API_KEY",
         "MISTRAL_API_KEY",
         "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
         "MOONSHOT_API_KEY",
         "OPENCODE_API_KEY",
         "KIMI_API_KEY",
+        "RADIUS_API_KEY",
+        "HF_TOKEN",
         "CLOUDFLARE_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_GATEWAY_ID",
@@ -1487,7 +1638,18 @@ fn provider_auth_environment_names() -> &'static [&'static str] {
         "AWS_SESSION_TOKEN",
         "AWS_BEARER_TOKEN_BEDROCK",
         "AWS_REGION",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+        "AWS_BEDROCK_FORCE_CACHE",
+        "AWS_BEDROCK_SKIP_AUTH",
+        "AWS_BEDROCK_FORCE_HTTP1",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "PI_CACHE_RETENTION",
     ]
 }
 
@@ -1793,6 +1955,67 @@ mod tests {
     }
 
     #[test]
+    fn version_cancellation_timeout_and_identity_replacement_remain_typed() {
+        let directory = empty_temp_dir().unwrap();
+        let slow = directory.join("slow-pi.py");
+        fs::write(
+            &slow,
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n",
+        )
+        .unwrap();
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            validate_version_with_timeout(&slow, &cancellation, Duration::from_secs(10))
+                .unwrap_err()
+                .kind(),
+            crate::interviewer::ErrorKind::Cancelled
+        );
+        assert_eq!(
+            validate_version_with_timeout(
+                &slow,
+                &CancellationToken::new(),
+                Duration::from_millis(50),
+            )
+            .unwrap_err()
+            .kind(),
+            crate::interviewer::ErrorKind::Timeout
+        );
+
+        let replacing = directory.join("replacing-pi.py");
+        fs::write(
+            &replacing,
+            r##"#!/usr/bin/env python3
+import os
+from pathlib import Path
+path = Path(__file__)
+replacement = path.with_suffix(".next")
+replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
+replacement.chmod(0o700)
+os.replace(replacement, path)
+print("0.84.2")
+"##,
+        )
+        .unwrap();
+        fs::set_permissions(&replacing, fs::Permissions::from_mode(0o700)).unwrap();
+        let original = trusted_executable_identity(&replacing).unwrap();
+        validate_version(&replacing, &CancellationToken::new()).unwrap();
+        assert_ne!(trusted_executable_identity(&replacing).unwrap(), original);
+        let error = PiProcess::start(
+            replacing,
+            &original,
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .err()
+        .expect("identity replacement must be rejected");
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Configuration);
+        assert!(error.contains("changed after version probe"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn rpc_argv_environment_cwd_and_fresh_process_per_turn_are_exact() {
         let environment = FakeEnvironment::new("normal");
         let mut session = crate::interviewer::InterviewerSession::connect(
@@ -1835,6 +2058,20 @@ mod tests {
             assert_eq!(process["forced_offline"], true);
             assert_eq!(process["forced_telemetry_off"], true);
         }
+        for documented in [
+            "RADIUS_API_KEY",
+            "HF_TOKEN",
+            "MINIMAX_CN_API_KEY",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "PI_CACHE_RETENTION",
+        ] {
+            assert!(provider_auth_environment_names().contains(&documented));
+        }
     }
 
     #[test]
@@ -1865,11 +2102,6 @@ mod tests {
                 crate::interviewer::ErrorKind::Protocol,
                 "malformed JSON",
             ),
-            (
-                "flood",
-                crate::interviewer::ErrorKind::Protocol,
-                "unexpected",
-            ),
         ] {
             let (_environment, mut process) = fake_process(mode);
             let error = process
@@ -1877,6 +2109,62 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind(), kind, "{mode}: {error}");
             assert!(error.to_string().contains(expected), "{mode}: {error}");
+        }
+    }
+
+    #[test]
+    fn authoritative_omitted_state_and_full_user_assistant_lifecycle_are_accepted() {
+        let (_environment, mut process) = fake_process("normal");
+        assert_eq!(
+            process
+                .turn("authoritative prompt".into(), &CancellationToken::new())
+                .unwrap(),
+            r#"{"kind":"question","text":"What invariant holds?","assessment":"continue"}"#
+        );
+    }
+
+    #[test]
+    fn omitted_model_is_authentication_and_persisted_session_is_protocol() {
+        {
+            let (_environment, mut process) = fake_process("auth");
+            assert_eq!(
+                process
+                    .turn("prompt".into(), &CancellationToken::new())
+                    .unwrap_err()
+                    .kind(),
+                crate::interviewer::ErrorKind::Authentication
+            );
+        }
+        let (_environment, mut process) = fake_process("persisted-session");
+        let error = process
+            .turn("prompt".into(), &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Protocol);
+        assert!(error.contains("persisted session"));
+    }
+
+    #[test]
+    fn prompt_authentication_and_lifecycle_correlations_are_typed_and_strict() {
+        {
+            let (_environment, mut process) = fake_process("prompt-auth");
+            assert_eq!(
+                process
+                    .turn("prompt".into(), &CancellationToken::new())
+                    .unwrap_err()
+                    .kind(),
+                crate::interviewer::ErrorKind::Authentication
+            );
+        }
+        for (mode, expected) in [
+            ("user-lifecycle-mismatch", "user message lifecycle"),
+            ("one-message-agent-end", "message count"),
+        ] {
+            let (_environment, mut process) = fake_process(mode);
+            let error = process
+                .turn("prompt".into(), &CancellationToken::new())
+                .unwrap_err();
+            assert_eq!(error.kind(), crate::interviewer::ErrorKind::Protocol);
+            assert!(error.contains(expected), "{mode}: {error}");
         }
     }
 
@@ -1908,6 +2196,36 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_accepts_abort_ack_and_settlement_in_either_order() {
+        for mode in ["hold", "settled-first"] {
+            let (environment, mut process) = fake_process(mode);
+            let cancellation = CancellationToken::new();
+            let other = cancellation.clone();
+            let capture_path = environment.directory.join("fake-capture.jsonl");
+            let cancel = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    if fs::read_to_string(&capture_path)
+                        .is_ok_and(|capture| capture.contains("\"command_type\": \"prompt\""))
+                    {
+                        other.cancel();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                panic!("Pi prompt was not accepted before cancellation deadline");
+            });
+            let error = process.turn("prompt".into(), &cancellation).unwrap_err();
+            cancel.join().unwrap();
+            assert_eq!(
+                error.kind(),
+                crate::interviewer::ErrorKind::Cancelled,
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
     fn cancellation_requires_abort_ack_before_settlement_and_cleans_process() {
         let (environment, mut process) = fake_process("hold");
         let cwd = process.cwd_path();
@@ -1936,6 +2254,63 @@ mod tests {
     }
 
     #[test]
+    fn abort_timeout_requires_both_acknowledgement_and_settlement() {
+        let (environment, mut process) = fake_process("abort-timeout");
+        let cancellation = CancellationToken::new();
+        let other = cancellation.clone();
+        let capture_path = environment.directory.join("fake-capture.jsonl");
+        let cancel = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if fs::read_to_string(&capture_path)
+                    .is_ok_and(|capture| capture.contains("\"command_type\": \"prompt\""))
+                {
+                    other.cancel();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let error = process.turn("prompt".into(), &cancellation).unwrap_err();
+        cancel.join().unwrap();
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Protocol);
+        assert!(error.contains("did not acknowledge abort and settle"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn oversized_record_and_mid_record_eof_fail_closed() {
+        for (mode, expected) in [
+            ("oversized-record", "record exceeds 2 MiB"),
+            ("mid-record-eof", "mid-record"),
+        ] {
+            let (_environment, mut process) = fake_process(mode);
+            let error = process
+                .turn("prompt".into(), &CancellationToken::new())
+                .unwrap_err();
+            assert_eq!(error.kind(), crate::interviewer::ErrorKind::Protocol);
+            assert!(error.contains(expected), "{mode}: {error}");
+        }
+    }
+
+    #[test]
+    fn process_group_shutdown_reaps_descendants() {
+        let (environment, mut process) = fake_process("descendant");
+        let pid_path = environment.directory.join("descendant-pid");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let descendant = fs::read_to_string(pid_path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        process.shutdown().unwrap();
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, -1);
+    }
+
+    #[test]
     fn stderr_and_protocol_readers_are_bounded() {
         let (_environment, process) = fake_process("stderr");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1943,6 +2318,39 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(process.stderr_len(), MAX_STDERR_BYTES);
+
+        let oversized = vec![b'x'; MAX_JSON_RECORD_BYTES + 1];
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let failure = Arc::new(Mutex::new(None));
+        let reader = spawn_stdout_reader(
+            std::io::Cursor::new(oversized),
+            sender,
+            Arc::clone(&failure),
+            Arc::new(AtomicBool::new(false)),
+        );
+        reader.join().unwrap();
+        assert_eq!(
+            failure.lock().unwrap().as_deref(),
+            Some("Pi protocol record exceeds 2 MiB")
+        );
+        drop(receiver);
+
+        let valid_record = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(1_100_000));
+        let aggregate_input = format!("{valid_record}{valid_record}").into_bytes();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let failure = Arc::new(Mutex::new(None));
+        let reader = spawn_stdout_reader(
+            std::io::Cursor::new(aggregate_input),
+            sender,
+            Arc::clone(&failure),
+            Arc::new(AtomicBool::new(false)),
+        );
+        reader.join().unwrap();
+        assert_eq!(
+            failure.lock().unwrap().as_deref(),
+            Some("Pi protocol aggregate exceeds 2 MiB")
+        );
+        drop(receiver);
 
         let input = b"{}\n".repeat(PROTOCOL_QUEUE_CAPACITY + 1);
         let (sender, receiver) = mpsc::sync_channel(PROTOCOL_QUEUE_CAPACITY);

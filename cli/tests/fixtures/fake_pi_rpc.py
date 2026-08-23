@@ -2,6 +2,7 @@
 import json
 import os
 import select
+import signal
 import sys
 import time
 
@@ -64,6 +65,14 @@ with open("fake-pi-artifact", "w", encoding="utf-8") as file:
 if mode == "stderr":
     sys.stderr.write("e" * (2 * 1024 * 1024))
     sys.stderr.flush()
+if mode == "descendant":
+    child = os.fork()
+    if child == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            time.sleep(60)
+    with open(os.path.join(agent_dir, "descendant-pid"), "w", encoding="utf-8") as file:
+        file.write(str(child))
 
 provider = "fixture-provider"
 last_text = None
@@ -96,12 +105,26 @@ def assistant(text, stop_reason="stop"):
     }
 
 
-def complete(text, stop_reason="stop"):
+def user(text):
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": text}],
+        "timestamp": 1,
+    }
+
+
+def complete(prompt, text, stop_reason="stop"):
     global last_text
     last_text = text
+    user_message = user(prompt)
     message = assistant(text, stop_reason)
     emit({"type": "agent_start"})
     emit({"type": "turn_start"})
+    emit({"type": "message_start", "message": user_message})
+    ended_user_message = user_message
+    if mode == "user-lifecycle-mismatch":
+        ended_user_message = user(prompt + "changed")
+    emit({"type": "message_end", "message": ended_user_message})
     emit({"type": "message_start", "message": assistant("")})
     emit(
         {
@@ -116,7 +139,10 @@ def complete(text, stop_reason="stop"):
     )
     emit({"type": "message_end", "message": message})
     emit({"type": "turn_end", "message": message, "toolResults": []})
-    emit({"type": "agent_end", "messages": [message], "willRetry": False})
+    agent_messages = [user_message, message]
+    if mode == "one-message-agent-end":
+        agent_messages = [message]
+    emit({"type": "agent_end", "messages": agent_messages, "willRetry": False})
     emit({"type": "agent_settled"})
 
 
@@ -130,41 +156,54 @@ for raw in sys.stdin:
             sys.stdout.write("{not-json}\n")
             sys.stdout.flush()
             continue
-        model = None if mode == "auth" else {
-            "id": "fixture-model",
-            "name": "Fixture Model",
-            "api": "fixture",
-            "provider": provider,
-            "baseUrl": "https://fixture.invalid",
-            "reasoning": False,
-            "input": ["text"],
-            "contextWindow": 1000,
-            "maxTokens": 100,
-            "cost": {},
+        state = {
+            "thinkingLevel": "off",
+            "isStreaming": False,
+            "isCompacting": False,
+            "steeringMode": "one-at-a-time",
+            "followUpMode": "one-at-a-time",
+            "sessionId": "fixture",
+            "autoCompactionEnabled": True,
+            "messageCount": 0,
+            "pendingMessageCount": 0,
         }
+        if mode != "auth":
+            state["model"] = {
+                "id": "fixture-model",
+                "name": "Fixture Model",
+                "api": "fixture",
+                "provider": provider,
+                "baseUrl": "https://fixture.invalid",
+                "reasoning": False,
+                "input": ["text"],
+                "contextWindow": 1000,
+                "maxTokens": 100,
+                "cost": {},
+            }
+        if mode == "persisted-session":
+            state["sessionFile"] = "/tmp/persisted.jsonl"
         emit(
             {
                 "id": "unexpected-id" if mode == "wrong-id" else command_id,
                 "type": "response",
                 "command": "get_state",
                 "success": True,
-                "data": {
-                    "model": model,
-                    "thinkingLevel": "off",
-                    "isStreaming": False,
-                    "isCompacting": False,
-                    "steeringMode": "one-at-a-time",
-                    "followUpMode": "one-at-a-time",
-                    "sessionFile": None,
-                    "sessionId": "fixture",
-                    "autoCompactionEnabled": True,
-                    "messageCount": 0,
-                    "pendingMessageCount": 0,
-                },
+                "data": state,
             }
         )
     elif command_type == "prompt":
         prompt_count += 1
+        if mode == "prompt-auth":
+            emit(
+                {
+                    "id": command_id,
+                    "type": "response",
+                    "command": "prompt",
+                    "success": False,
+                    "error": "No API key found for fixture-provider.",
+                }
+            )
+            continue
         emit(
             {
                 "id": command_id,
@@ -175,6 +214,14 @@ for raw in sys.stdin:
         )
         if mode == "eof":
             raise SystemExit(0)
+        if mode == "mid-record-eof":
+            sys.stdout.write('{"type":"agent_start"')
+            sys.stdout.flush()
+            raise SystemExit(0)
+        if mode == "oversized-record":
+            sys.stdout.write('{"type":"future","padding":"' + ("x" * (2 * 1024 * 1024)) + '"}\n')
+            sys.stdout.flush()
+            continue
         if mode == "flood":
             sys.stdout.write(
                 "".join(
@@ -189,7 +236,7 @@ for raw in sys.stdin:
             emit({"type": "agent_start"})
             emit({"type": "tool_execution_start", "toolCallId": "tool-1"})
             continue
-        if mode == "hold":
+        if mode in {"hold", "settled-first", "abort-timeout"}:
             emit({"type": "agent_start"})
             emit({"type": "turn_start"})
             deadline = time.monotonic() + 5
@@ -207,6 +254,11 @@ for raw in sys.stdin:
                 )
                 if abort.get("type") != "abort":
                     raise SystemExit(3)
+                if mode == "abort-timeout":
+                    time.sleep(5)
+                    break
+                if mode == "settled-first":
+                    emit({"type": "agent_settled"})
                 emit(
                     {
                         "id": abort["id"],
@@ -215,13 +267,26 @@ for raw in sys.stdin:
                         "success": True,
                     }
                 )
-                emit({"type": "agent_settled"})
+                if mode == "hold":
+                    emit({"type": "agent_settled"})
                 break
             continue
+        prompt = command.get("message", "")
         if mode == "correction" and prompt_count == 1:
-            complete("{}")
+            complete(
+                prompt,
+                json.dumps(
+                    {
+                        "kind": "question",
+                        "text": "Invalid relation",
+                        "assessment": "pass",
+                    },
+                    separators=(",", ":"),
+                ),
+            )
         elif mode == "correction":
             complete(
+                prompt,
                 json.dumps(
                     {
                         "kind": "question",
@@ -229,12 +294,13 @@ for raw in sys.stdin:
                         "assessment": "continue",
                     },
                     separators=(",", ":"),
-                )
+                ),
             )
         elif mode == "non-stop":
-            complete("not accepted", "length")
+            complete(prompt, "not accepted", "length")
         else:
             complete(
+                prompt,
                 json.dumps(
                     {
                         "kind": "question",
@@ -242,7 +308,7 @@ for raw in sys.stdin:
                         "assessment": "continue",
                     },
                     separators=(",", ":"),
-                )
+                ),
             )
     elif command_type == "get_last_assistant_text":
         text = last_text

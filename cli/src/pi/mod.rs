@@ -24,8 +24,7 @@ impl PiTransport {
             .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
         let identity = process::trusted_executable_identity(&executable)
             .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
-        process::validate_version(&executable, cancellation)
-            .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
+        process::validate_version(&executable, cancellation)?;
         let current = process::trusted_executable_identity(&executable)
             .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
         if current != identity {

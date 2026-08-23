@@ -30,19 +30,19 @@ pi --mode rpc --no-session --no-tools --no-extensions --no-skills \
 
 The process is retained only for one structured-output correction, then terminated and reaped. The environment is cleared. Interview Tutor restores a bounded allowlist for `HOME`, `PATH`, locale, proxy, certificate, Pi agent/package directories, documented provider credential variables, and cloud-provider authentication variables. It forces `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`, and `NO_COLOR=1`. Secrets are never placed on argv or application logs.
 
-Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
+Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. A credential whose `auth.json` key begins with `!command` causes Pi to execute that command through a shell and use its stdout, as documented by Pi 0.84.2. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
 
 ### Pi RPC contract
 
 Commands and responses use correlated string IDs and strict LF-only JSONL. Records, the bounded protocol queue, and total accepted protocol output are capped at 2 MiB; assistant text is capped at 64 KiB. Prompt completion requires all of:
 
 - a matching successful `prompt` response before events
-- ordered assistant-only events with no tool calls or tool results
+- ordered `agent_start`, `turn_start`, correlated user message start/end, assistant message lifecycle, `turn_end`, and two-message user-plus-assistant `agent_end`, with no tool calls or tool results
 - terminal `stopReason: "stop"` and no retry/queue continuation
 - `agent_settled`
 - a matching successful `get_last_assistant_text` response equal to the authoritative completed assistant message
 
-The client rejects CRLF framing, malformed/unknown envelopes, unexpected or duplicate IDs, event reordering, tool/bash/extension-UI events, queue/retry/compaction continuations, provider changes, null or stale final text, non-stop completions, oversized records, aggregate/queue floods, EOF, and reader failures. Cancellation after prompt acceptance sends one correlated `abort`, requires its acknowledgement before `agent_settled`, and otherwise kills/reaps the process group within bounded cleanup deadlines.
+The client rejects CRLF framing, malformed/unknown envelopes, unexpected or duplicate IDs, event reordering, tool/bash/extension-UI events, queue/retry/compaction continuations, provider changes, null or stale final text, non-stop completions, oversized records, aggregate/queue floods, EOF, and reader failures. Cancellation after prompt acceptance sends one correlated `abort`; the acknowledgement and `agent_settled` may arrive in either order, but both are required by the abort deadline. Failure kills and reaps the process group within bounded cleanup deadlines.
 
 ## Explicit Codex compatibility
 
