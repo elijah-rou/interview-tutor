@@ -2,9 +2,11 @@ use crate::interviewer::{Backend, InterviewerError};
 use crate::runner::CancellationToken;
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -63,8 +65,7 @@ pub struct PiProcess {
 
 impl PiProcess {
     pub fn start(
-        executable: PathBuf,
-        expected_identity: &ExecutableIdentity,
+        executable: &ValidatedExecutable,
         control_pid: Arc<AtomicI32>,
         cancellation: &CancellationToken,
     ) -> Result<Self, InterviewerError> {
@@ -74,17 +75,9 @@ impl PiProcess {
                 "Pi startup cancelled",
             ));
         }
-        let current_identity = trusted_executable_identity(&executable)
-            .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
-        if &current_identity != expected_identity {
-            return Err(InterviewerError::configuration(
-                Backend::Pi,
-                "Pi executable changed after version probe",
-            ));
-        }
         let cwd =
             empty_temp_dir().map_err(|error| InterviewerError::transport(Backend::Pi, error))?;
-        let mut command = Command::new(&executable);
+        let mut command = executable.command();
         command
             .args(PI_RPC_ARGUMENTS)
             .current_dir(&cwd)
@@ -98,18 +91,7 @@ impl PiProcess {
             .env("PI_SKIP_VERSION_CHECK", "1")
             .env("PI_TELEMETRY", "0")
             .env("NO_COLOR", "1");
-        configure_process_group(&mut command);
-        let current_identity = trusted_executable_identity(&executable);
-        if current_identity.as_ref() != Ok(expected_identity) {
-            let primary = match current_identity {
-                Ok(_) => "Pi executable changed before RPC spawn".to_string(),
-                Err(error) => error,
-            };
-            return Err(InterviewerError::configuration(
-                Backend::Pi,
-                combine_cleanup_error(primary, remove_temp_dir(&cwd)),
-            ));
-        }
+        configure_process_group(&mut command, Some(executable.raw_fd()));
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -1330,11 +1312,12 @@ fn spawn_stderr_reader(
     })
 }
 
-pub fn configured_executable() -> Result<PathBuf, String> {
+pub fn configured_executable() -> Result<ValidatedExecutable, String> {
     let configured = std::env::var_os("INTERVIEW_TUTOR_PI_EXECUTABLE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("pi"));
-    resolve_executable(&configured)
+    let resolved = resolve_executable(&configured)?;
+    ValidatedExecutable::open(&resolved)
 }
 
 fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
@@ -1353,6 +1336,49 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+pub struct ValidatedExecutable {
+    file: File,
+    display_path: PathBuf,
+}
+
+impl ValidatedExecutable {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let canonical = fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve Pi executable: {error}"))?;
+        let encoded = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|_| "Pi executable path contains NUL")?;
+        let descriptor = unsafe {
+            libc::open(
+                encoded.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor == -1 {
+            return Err(format!(
+                "cannot open Pi executable: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot inspect Pi executable: {error}"))?;
+        trusted_pi_metadata(&metadata)?;
+        Ok(Self {
+            file,
+            display_path: canonical,
+        })
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    fn command(&self) -> Command {
+        Command::new(format!("/proc/self/fd/{}", self.raw_fd()))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutableIdentity {
     device: u64,
@@ -1366,9 +1392,7 @@ pub struct ExecutableIdentity {
     changed_nanoseconds: i64,
 }
 
-pub fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("cannot inspect Pi executable: {error}"))?;
+fn trusted_pi_metadata(metadata: &fs::Metadata) -> Result<(), String> {
     if !metadata.file_type().is_file() {
         return Err("Pi executable must be a regular file".into());
     }
@@ -1379,6 +1403,16 @@ pub fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, St
     if metadata.mode() & 0o022 != 0 {
         return Err("Pi executable must not be group- or world-writable".into());
     }
+    if metadata.mode() & 0o111 == 0 {
+        return Err("Pi executable is not executable".into());
+    }
+    Ok(())
+}
+
+pub fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("cannot inspect Pi executable: {error}"))?;
+    trusted_pi_metadata(&metadata)?;
     Ok(ExecutableIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -1392,15 +1426,36 @@ pub fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, St
     })
 }
 
+#[cfg(test)]
 pub fn validate_version(
     executable: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(), InterviewerError> {
-    validate_version_with_timeout(executable, cancellation, VERSION_TIMEOUT)
+    let executable = ValidatedExecutable::open(executable)
+        .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
+    validate_validated_version(&executable, cancellation)
 }
 
+pub fn validate_validated_version(
+    executable: &ValidatedExecutable,
+    cancellation: &CancellationToken,
+) -> Result<(), InterviewerError> {
+    validate_validated_version_with_timeout(executable, cancellation, VERSION_TIMEOUT)
+}
+
+#[cfg(test)]
 fn validate_version_with_timeout(
     executable: &Path,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+) -> Result<(), InterviewerError> {
+    let executable = ValidatedExecutable::open(executable)
+        .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
+    validate_validated_version_with_timeout(&executable, cancellation, timeout)
+}
+
+fn validate_validated_version_with_timeout(
+    executable: &ValidatedExecutable,
     cancellation: &CancellationToken,
     timeout: Duration,
 ) -> Result<(), InterviewerError> {
@@ -1466,11 +1521,11 @@ impl CaptureBuffers {
 }
 
 fn bounded_version_capture(
-    executable: &Path,
+    executable: &ValidatedExecutable,
     cancellation: &CancellationToken,
     timeout: Duration,
 ) -> Result<VersionCapture, InterviewerError> {
-    let mut command = Command::new(executable);
+    let mut command = executable.command();
     command
         .arg("--version")
         .stdin(Stdio::null())
@@ -1483,9 +1538,15 @@ fn bounded_version_capture(
         .env("PI_SKIP_VERSION_CHECK", "1")
         .env("PI_TELEMETRY", "0")
         .env("NO_COLOR", "1");
-    configure_process_group(&mut command);
+    configure_process_group(&mut command, Some(executable.raw_fd()));
     let mut child = command.spawn().map_err(|error| {
-        InterviewerError::configuration(Backend::Pi, format!("cannot query Pi version: {error}"))
+        InterviewerError::configuration(
+            Backend::Pi,
+            format!(
+                "cannot query Pi version through validated descriptor {}: {error}",
+                executable.display_path.display()
+            ),
+        )
     })?;
     let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
         (Some(stdout), Some(stderr)) => (stdout, stderr),
@@ -1715,9 +1776,14 @@ fn copy_allowed_environment(command: &mut Command, include_auth: bool) {
     }
 }
 
-fn configure_process_group(command: &mut Command) {
+fn configure_process_group(command: &mut Command, executable_descriptor: Option<RawFd>) {
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            if let Some(descriptor) = executable_descriptor
+                && libc::fcntl(descriptor, libc::F_SETFD, 0) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
             if libc::setpgid(0, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -2016,11 +2082,9 @@ mod tests {
     fn fake_process(mode: &str) -> (FakeEnvironment, PiProcess) {
         let environment = FakeEnvironment::new(mode);
         let executable = configured_executable().unwrap();
-        let identity = trusted_executable_identity(&executable).unwrap();
-        validate_version(&executable, &CancellationToken::new()).unwrap();
+        validate_validated_version(&executable, &CancellationToken::new()).unwrap();
         let process = PiProcess::start(
-            executable,
-            &identity,
+            &executable,
             Arc::new(AtomicI32::new(0)),
             &CancellationToken::new(),
         )
@@ -2049,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn version_cancellation_timeout_and_identity_replacement_remain_typed() {
+    fn version_cancellation_timeout_and_descriptor_replacement_remain_typed() {
         let directory = empty_temp_dir().unwrap();
         let slow = directory.join("slow-pi.py");
         fs::write(
@@ -2077,35 +2141,45 @@ mod tests {
             crate::interviewer::ErrorKind::Timeout
         );
 
-        let replacing = directory.join("replacing-pi.py");
+        let environment = FakeEnvironment::new("normal");
+        let replacing = directory.join("replacing-pi");
+        let replacement = directory.join("replacing-pi.next");
+        let replacement_launched = directory.join("replacement-launched");
         fs::write(
             &replacing,
-            r##"#!/usr/bin/env python3
-import os
-from pathlib import Path
-path = Path(__file__)
-replacement = path.with_suffix(".next")
-replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
-replacement.chmod(0o700)
-os.replace(replacement, path)
-print("0.84.2")
-"##,
+            format!(
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then mv '{}' '{}'; printf '0.84.2\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+                replacement.display(), replacing.display(), fake_executable().display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &replacement,
+            format!(
+                "#!/bin/sh\nprintf launched > '{}'\nexit 91\n",
+                replacement_launched.display()
+            ),
         )
         .unwrap();
         fs::set_permissions(&replacing, fs::Permissions::from_mode(0o700)).unwrap();
-        let original = trusted_executable_identity(&replacing).unwrap();
-        validate_version(&replacing, &CancellationToken::new()).unwrap();
-        assert_ne!(trusted_executable_identity(&replacing).unwrap(), original);
-        let error = PiProcess::start(
-            replacing,
-            &original,
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = ValidatedExecutable::open(&replacing).unwrap();
+        validate_validated_version(&executable, &CancellationToken::new()).unwrap();
+        let mut process = PiProcess::start(
+            &executable,
             Arc::new(AtomicI32::new(0)),
             &CancellationToken::new(),
         )
-        .err()
-        .expect("identity replacement must be rejected");
-        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Configuration);
-        assert!(error.contains("changed after version probe"));
+        .unwrap();
+        assert!(
+            process
+                .turn("prompt".into(), &CancellationToken::new())
+                .unwrap()
+                .contains("What invariant holds?")
+        );
+        process.shutdown().unwrap();
+        assert!(!replacement_launched.exists());
+        drop(environment);
         fs::remove_dir_all(directory).unwrap();
     }
 

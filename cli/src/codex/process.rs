@@ -2,9 +2,11 @@ use super::protocol::{self, Incoming, RequestId};
 use crate::runner::CancellationToken;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -69,13 +71,13 @@ impl CodexProcess {
     ) -> Result<Self, String> {
         let executable = fs::canonicalize(&executable)
             .map_err(|error| format!("cannot resolve Codex executable: {error}"))?;
-        let probed_identity = trusted_executable_identity(&executable)?;
-        validate_version(&executable, cancellation)?;
+        let executable = ValidatedExecutable::open(&executable)?;
+        validate_validated_version(&executable, cancellation)?;
         if cancellation.is_cancelled() {
             return Err("Codex startup cancelled".into());
         }
         let cwd = empty_temp_dir()?;
-        let mut command = Command::new(&executable);
+        let mut command = executable.command();
         command
             .arg("app-server")
             .arg("--stdio")
@@ -85,15 +87,7 @@ impl CodexProcess {
             .stderr(Stdio::piped())
             .env_clear();
         copy_allowed_environment(&mut command);
-        configure_process_group(&mut command);
-        let current_identity = trusted_executable_identity(&executable);
-        if current_identity.as_ref() != Ok(&probed_identity) {
-            let primary = match current_identity {
-                Ok(_) => "Codex executable changed after version probe".to_string(),
-                Err(error) => error,
-            };
-            return Err(combine_cleanup_error(primary, remove_temp_dir(&cwd)));
-        }
+        configure_process_group(&mut command, Some(executable.raw_fd()));
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -986,6 +980,47 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+struct ValidatedExecutable {
+    file: File,
+    display_path: PathBuf,
+}
+
+impl ValidatedExecutable {
+    fn open(path: &Path) -> Result<Self, String> {
+        let encoded = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "Codex executable path contains NUL")?;
+        let descriptor = unsafe {
+            libc::open(
+                encoded.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor == -1 {
+            return Err(format!(
+                "cannot open Codex executable: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot inspect Codex executable: {error}"))?;
+        trusted_codex_metadata(&metadata)?;
+        Ok(Self {
+            file,
+            display_path: path.to_path_buf(),
+        })
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    fn command(&self) -> Command {
+        Command::new(format!("/proc/self/fd/{}", self.raw_fd()))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ExecutableIdentity {
     device: u64,
@@ -999,9 +1034,7 @@ struct ExecutableIdentity {
     changed_nanoseconds: i64,
 }
 
-fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("cannot inspect Codex executable: {error}"))?;
+fn trusted_codex_metadata(metadata: &fs::Metadata) -> Result<(), String> {
     if !metadata.file_type().is_file() {
         return Err("Codex executable must be a regular file".into());
     }
@@ -1012,6 +1045,16 @@ fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String
     if metadata.mode() & 0o022 != 0 {
         return Err("Codex executable must not be group- or world-writable".into());
     }
+    if metadata.mode() & 0o111 == 0 {
+        return Err("Codex executable is not executable".into());
+    }
+    Ok(())
+}
+
+fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("cannot inspect Codex executable: {error}"))?;
+    trusted_codex_metadata(&metadata)?;
     Ok(ExecutableIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -1025,12 +1068,31 @@ fn trusted_executable_identity(path: &Path) -> Result<ExecutableIdentity, String
     })
 }
 
+#[cfg(test)]
 fn validate_version(executable: &Path, cancellation: &CancellationToken) -> Result<(), String> {
-    validate_version_with_timeout(executable, cancellation, VERSION_TIMEOUT)
+    let executable = ValidatedExecutable::open(executable)?;
+    validate_validated_version(&executable, cancellation)
 }
 
+fn validate_validated_version(
+    executable: &ValidatedExecutable,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    validate_validated_version_with_timeout(executable, cancellation, VERSION_TIMEOUT)
+}
+
+#[cfg(test)]
 fn validate_version_with_timeout(
     executable: &Path,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+) -> Result<(), String> {
+    let executable = ValidatedExecutable::open(executable)?;
+    validate_validated_version_with_timeout(&executable, cancellation, timeout)
+}
+
+fn validate_validated_version_with_timeout(
+    executable: &ValidatedExecutable,
     cancellation: &CancellationToken,
     timeout: Duration,
 ) -> Result<(), String> {
@@ -1087,11 +1149,11 @@ impl CaptureBuffers {
 }
 
 fn bounded_version_capture(
-    executable: &Path,
+    executable: &ValidatedExecutable,
     cancellation: &CancellationToken,
     timeout: Duration,
 ) -> Result<VersionCapture, String> {
-    let mut command = Command::new(executable);
+    let mut command = executable.command();
     command
         .arg("--version")
         .stdin(Stdio::null())
@@ -1099,10 +1161,13 @@ fn bounded_version_capture(
         .stderr(Stdio::piped())
         .env_clear();
     copy_allowed_environment(&mut command);
-    configure_process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("cannot query Codex version: {error}"))?;
+    configure_process_group(&mut command, Some(executable.raw_fd()));
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "cannot query Codex version through validated descriptor {}: {error}",
+            executable.display_path.display()
+        )
+    })?;
     let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
         (Some(stdout), Some(stderr)) => (stdout, stderr),
         _ => {
@@ -1220,9 +1285,14 @@ fn spawn_capture_reader(
     })
 }
 
-fn configure_process_group(command: &mut Command) {
+fn configure_process_group(command: &mut Command, executable_descriptor: Option<RawFd>) {
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            if let Some(descriptor) = executable_descriptor
+                && libc::fcntl(descriptor, libc::F_SETFD, 0) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
             if libc::setpgid(0, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -1666,35 +1736,40 @@ mod tests {
     }
 
     #[test]
-    fn executable_swap_after_version_probe_is_rejected_before_app_server_spawn() {
+    fn version_probe_and_app_server_use_the_same_held_descriptor_after_replacement() {
+        let environment = FakeEnvironment::new("normal");
         let directory = empty_temp_dir().unwrap();
         let executable = directory.join("codex-swap");
         let replacement = directory.join("codex-swap.replacement");
-        let launched = directory.join("app-server-launched");
+        let replacement_launched = directory.join("replacement-launched");
         fs::write(
             &executable,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  mv \"$0.replacement\" \"$0\"\n  echo 'codex-cli 0.146.0'\n  exit 0\nfi\nexit 91\n",
+            format!(
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then mv '{}' '{}'; printf 'codex-cli 0.146.0\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+                replacement.display(), executable.display(), fake_executable().display()
+            ),
         )
         .unwrap();
         fs::write(
             &replacement,
             format!(
-                "#!/bin/sh\necho launched > {}\nexit 92\n",
-                launched.display()
+                "#!/bin/sh\nprintf launched > '{}'\nexit 92\n",
+                replacement_launched.display()
             ),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = CodexProcess::start_executable(
+        let mut process = CodexProcess::start_executable(
             executable,
             Arc::new(AtomicI32::new(0)),
             &CancellationToken::new(),
         )
-        .err()
-        .expect("executable swap must fail");
-        assert!(error.contains("changed after version probe"), "{error}");
-        assert!(!launched.exists());
+        .unwrap();
+        assert!(process.account_ready().unwrap());
+        process.shutdown().unwrap();
+        assert!(!replacement_launched.exists());
+        drop(environment);
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -2,15 +2,13 @@ pub mod process;
 
 use crate::interviewer::{Backend, InterviewerError, Mode, Transport};
 use crate::runner::CancellationToken;
-use process::{ExecutableIdentity, PiProcess};
+use process::{PiProcess, ValidatedExecutable};
 use serde_json::Value;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 
 pub struct PiTransport {
-    executable: PathBuf,
-    identity: ExecutableIdentity,
+    executable: ValidatedExecutable,
     control_pid: Arc<AtomicI32>,
     process: Option<PiProcess>,
 }
@@ -22,20 +20,9 @@ impl PiTransport {
     ) -> Result<Self, InterviewerError> {
         let executable = process::configured_executable()
             .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
-        let identity = process::trusted_executable_identity(&executable)
-            .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
-        process::validate_version(&executable, cancellation)?;
-        let current = process::trusted_executable_identity(&executable)
-            .map_err(|error| InterviewerError::configuration(Backend::Pi, error))?;
-        if current != identity {
-            return Err(InterviewerError::configuration(
-                Backend::Pi,
-                "Pi executable changed after version probe",
-            ));
-        }
+        process::validate_validated_version(&executable, cancellation)?;
         Ok(Self {
             executable,
-            identity,
             control_pid,
             process: None,
         })
@@ -96,8 +83,7 @@ impl Transport for PiTransport {
             ));
         }
         self.process = Some(PiProcess::start(
-            self.executable.clone(),
-            &self.identity,
+            &self.executable,
             Arc::clone(&self.control_pid),
             cancellation,
         )?);
