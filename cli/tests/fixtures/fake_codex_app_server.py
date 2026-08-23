@@ -213,7 +213,7 @@ for raw in sys.stdin:
             )
             text = json.dumps(
                 {
-                    "kind": "feedback",
+                    "kind": "decision",
                     "text": review_text,
                     "assessment": "pass",
                 }
