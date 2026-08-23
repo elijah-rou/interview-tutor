@@ -54,6 +54,36 @@ impl CodexTransport {
         cancellation: &CancellationToken,
     ) -> Result<(), InterviewerError> {
         if self.process.as_ref().is_some_and(CodexProcess::is_usable) {
+            if self.interviewer_thread.is_empty() {
+                self.interviewer_thread = match self
+                    .process
+                    .as_mut()
+                    .expect("usable Codex process exists")
+                    .start_thread_with_cancellation(cancellation)
+                {
+                    Ok(thread) => thread,
+                    Err(error) => {
+                        return Err(self.invalidate_after_turn_failure(format!(
+                            "cannot replace rejected Codex interviewer thread: {error}"
+                        )));
+                    }
+                };
+            }
+            if self.hinter_thread.is_empty() {
+                self.hinter_thread = match self
+                    .process
+                    .as_mut()
+                    .expect("usable Codex process exists")
+                    .start_thread_with_cancellation(cancellation)
+                {
+                    Ok(thread) => thread,
+                    Err(error) => {
+                        return Err(self.invalidate_after_turn_failure(format!(
+                            "cannot replace rejected Codex hinter thread: {error}"
+                        )));
+                    }
+                };
+            }
             return Ok(());
         }
         if let Some(mut process) = self.process.take()
@@ -133,6 +163,14 @@ impl Transport for CodexTransport {
 
     fn finish_operation(&mut self) -> Result<(), InterviewerError> {
         Ok(())
+    }
+
+    fn reject_operation(&mut self, mode: Mode) {
+        if matches!(mode, Mode::Hint(_)) {
+            self.hinter_thread.clear();
+        } else {
+            self.interviewer_thread.clear();
+        }
     }
 
     fn invalidate_operation(&mut self) -> Result<(), InterviewerError> {
@@ -220,6 +258,10 @@ impl CodexSession {
         self.0
             .ask_deferred_with_cancellation(request, cancellation)
             .map_err(string_error)
+    }
+
+    pub fn reject_response(&mut self, mode: Mode) {
+        self.0.reject_response(mode);
     }
 
     pub fn commit_response(

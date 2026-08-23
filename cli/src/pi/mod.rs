@@ -114,6 +114,13 @@ impl Transport for PiTransport {
         process.shutdown()
     }
 
+    fn reject_operation(&mut self, _mode: Mode) {
+        assert!(
+            self.process.is_none(),
+            "Pi operation must finish before rejection"
+        );
+    }
+
     fn invalidate_operation(&mut self) -> Result<(), InterviewerError> {
         self.finish_operation()
     }

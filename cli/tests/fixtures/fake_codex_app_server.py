@@ -75,6 +75,7 @@ if codex_home:
 
 thread_number = 0
 turn_number = 0
+thread_contexts = {}
 for raw in sys.stdin:
     message = json.loads(raw)
     record({"kind": "message", "json": message})
@@ -100,9 +101,11 @@ for raw in sys.stdin:
     elif method == "thread/start":
         thread_number += 1
         cwd = "/unexpected-cwd" if mode == "bad-cwd" else os.getcwd()
+        thread_id = f"thread-{thread_number}"
+        thread_contexts[thread_id] = []
         result = {
             "thread": {
-                "id": f"thread-{thread_number}",
+                "id": thread_id,
                 "cwd": cwd,
                 "ephemeral": True,
                 "path": None,
@@ -173,6 +176,14 @@ for raw in sys.stdin:
             )
             continue
         input_text = params["input"][0]["text"]
+        record(
+            {
+                "kind": "remote-context",
+                "threadId": thread_id,
+                "turn": turn_number,
+                "before": thread_contexts[thread_id],
+            }
+        )
         if mode == "hold-interviewer" and turn_number == 1:
             held_path = os.path.join(codex_home, "fake-held-turn")
             release_path = os.path.join(codex_home, "fake-release-turn")
@@ -226,6 +237,7 @@ for raw in sys.stdin:
                     "assessment": "continue",
                 }
             )
+        thread_contexts[thread_id].extend([input_text, text])
         print(
             json.dumps(
                 {

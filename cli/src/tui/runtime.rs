@@ -191,6 +191,7 @@ trait InterviewerWorkerBackend: Send {
         cancellation: &CancellationToken,
     ) -> Result<String, crate::interviewer::InterviewerError>;
     fn commit(&mut self, pending: PendingInterviewerResponse);
+    fn reject(&mut self, mode: crate::interviewer::Mode);
     fn reset(&mut self);
 }
 
@@ -256,6 +257,12 @@ impl InterviewerWorkerBackend for SessionInterviewerBackend {
                 &pending.question,
                 pending.response,
             );
+    }
+
+    fn reject(&mut self, mode: crate::interviewer::Mode) {
+        if let Some(session) = self.session.as_mut() {
+            session.reject_response(mode);
+        }
     }
 
     fn reset(&mut self) {
@@ -438,10 +445,12 @@ impl InterviewerWorker {
                             None
                         }
                     };
-                    if finalization.accepted
-                        && let Some(pending) = pending
-                    {
-                        backend.commit(pending);
+                    if finalization.accepted {
+                        if let Some(pending) = pending {
+                            backend.commit(pending);
+                        }
+                    } else {
+                        backend.reject(finalization.mode);
                     }
                 }
                 match command {
@@ -730,19 +739,6 @@ impl InterviewerWorker {
         mode: crate::interviewer::Mode,
         accepted: bool,
     ) -> Result<(), String> {
-        if !accepted {
-            let mut pending = self
-                .pending_response
-                .lock()
-                .expect("Interviewer pending response lock");
-            if pending.as_ref().is_some_and(|response| {
-                (response.operation, response.revision, response.mode)
-                    == (operation, revision, mode)
-            }) {
-                *pending = None;
-            }
-            return Ok(());
-        }
         if self.join.is_none() {
             return Err("Interviewer worker stopped before finalizing the turn".into());
         }
@@ -2071,8 +2067,10 @@ mod tests {
     #[derive(Default)]
     struct TestInterviewerBackendState {
         transcript: String,
+        remote_context: String,
         captures: Vec<String>,
         reset_count: usize,
+        rejection_count: usize,
         turn_count: usize,
     }
 
@@ -2146,8 +2144,9 @@ mod tests {
                 state.turn_count += 1;
                 let turn_count = state.turn_count;
                 let transcript = state.transcript.clone();
+                let remote_context = state.remote_context.clone();
                 state.captures.push(format!(
-                    "transcript={transcript}\nstatement={}\nsource={}\nquestion={}",
+                    "transcript={transcript}\nremote={remote_context}\nstatement={}\nsource={}\nquestion={}",
                     request.statement, request.source, request.question
                 ));
                 turn_count
@@ -2155,7 +2154,16 @@ mod tests {
             if self.blocking_turn == Some(turn_count) {
                 self.gate.block_until_released();
             }
-            Ok(format!("response-{turn_count}"))
+            let response = format!("response-{turn_count}");
+            self.state
+                .lock()
+                .expect("test Interviewer backend lock")
+                .remote_context
+                .push_str(&format!(
+                    "user: {}\ninterviewer: {response}\n",
+                    request.question
+                ));
+            Ok(response)
         }
 
         fn commit(&mut self, pending: PendingInterviewerResponse) {
@@ -2166,9 +2174,16 @@ mod tests {
             ));
         }
 
+        fn reject(&mut self, _mode: crate::interviewer::Mode) {
+            let mut state = self.state.lock().expect("test Interviewer backend lock");
+            state.remote_context.clear();
+            state.rejection_count += 1;
+        }
+
         fn reset(&mut self) {
             let mut state = self.state.lock().expect("test Interviewer backend lock");
             state.transcript.clear();
+            state.remote_context.clear();
             state.reset_count += 1;
         }
     }

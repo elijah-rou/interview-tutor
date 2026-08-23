@@ -36,6 +36,8 @@ pub trait Transport: Send {
 
     fn finish_operation(&mut self) -> Result<(), InterviewerError>;
 
+    fn reject_operation(&mut self, mode: Mode);
+
     fn invalidate_operation(&mut self) -> Result<(), InterviewerError>;
 
     fn requires_restart(&self) -> bool;
@@ -249,6 +251,10 @@ impl InterviewerSession {
             );
         }
         Ok(response)
+    }
+
+    pub(crate) fn reject_response(&mut self, mode: Mode) {
+        self.transport.reject_operation(mode);
     }
 
     pub(crate) fn commit_response(

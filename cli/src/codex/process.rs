@@ -1990,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_stale_response_is_absent_from_the_next_prompt_transcript() {
+    fn rejected_turn_replaces_remote_thread_without_losing_accepted_transcript() {
         let environment = FakeEnvironment::new("normal");
         let mut session = crate::codex::CodexSession::connect_executable(
             fake_executable(),
@@ -1999,19 +1999,31 @@ mod tests {
         )
         .unwrap();
         session
+            .ask(crate::codex::InterviewRequest {
+                mode: crate::codex::prompt::Mode::Interviewer,
+                statement: "statement",
+                source: "accepted-source",
+                latest_output: "output",
+                question: "accepted-question",
+                source_revision: 1,
+                solved: false,
+            })
+            .unwrap();
+        session
             .ask_deferred_with_cancellation(
                 crate::codex::InterviewRequest {
                     mode: crate::codex::prompt::Mode::Interviewer,
                     statement: "statement",
-                    source: "old-source",
+                    source: "stale-source",
                     latest_output: "output",
                     question: "stale-question",
-                    source_revision: 1,
+                    source_revision: 2,
                     solved: false,
                 },
                 &CancellationToken::new(),
             )
             .unwrap();
+        session.reject_response(crate::codex::prompt::Mode::Interviewer);
         session
             .ask(crate::codex::InterviewRequest {
                 mode: crate::codex::prompt::Mode::SubmissionReview,
@@ -2019,7 +2031,7 @@ mod tests {
                 source: "new-source",
                 latest_output: "output",
                 question: "",
-                source_revision: 2,
+                source_revision: 3,
                 solved: true,
             })
             .unwrap();
@@ -2035,13 +2047,32 @@ mod tests {
             .filter_map(|record| record.get("json"))
             .filter(|message| message["method"] == "turn/start")
             .collect::<Vec<_>>();
-        assert_eq!(turns.len(), 2);
-        let next_input = turns[1]["params"]["input"][0]["text"].as_str().unwrap();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(
+            turns[0]["params"]["threadId"],
+            turns[1]["params"]["threadId"]
+        );
+        assert_ne!(
+            turns[1]["params"]["threadId"],
+            turns[2]["params"]["threadId"]
+        );
+
+        let next_input = turns[2]["params"]["input"][0]["text"].as_str().unwrap();
         let next_payload: Value =
             serde_json::from_str(next_input.split_once("INPUT_JSON:").unwrap().1).unwrap();
-        assert_eq!(next_payload["transcript"], "");
+        let transcript = next_payload["transcript"].as_str().unwrap();
+        assert!(transcript.contains("accepted-question"));
+        assert!(transcript.contains("What invariant holds? [turn-1]"));
         assert!(!next_input.contains("stale-question"));
-        assert!(!next_input.contains("What invariant holds?"));
+        assert!(!next_input.contains("stale-source"));
+        assert!(!next_input.contains("turn-2"));
+
+        let remote_contexts = records
+            .iter()
+            .filter(|record| record["kind"] == "remote-context")
+            .collect::<Vec<_>>();
+        assert_eq!(remote_contexts.len(), 3);
+        assert_eq!(remote_contexts[2]["before"], serde_json::json!([]));
     }
 
     #[test]
