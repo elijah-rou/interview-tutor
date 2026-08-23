@@ -18,6 +18,11 @@ pub fn routes_to_neovim(key: KeyEvent, state: &AppState) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
+    if matches!(key.code, KeyCode::F(5 | 9))
+        || key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return false;
+    }
     !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
 }
 
@@ -65,6 +70,16 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     }
     if key.code == KeyCode::F(9) {
         return Some(Action::Submit);
+    }
+    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
+        || key.code == KeyCode::BackTab
+    {
+        state.leader_pending = false;
+        return Some(Action::PreviousFocus);
+    }
+    if key.code == KeyCode::Tab {
+        state.leader_pending = false;
+        return Some(Action::NextFocus);
     }
     if solve.pane == crate::app::model::SolvePane::Interview {
         if state.codex.status == crate::app::model::CodexStatus::Disclosure {
@@ -114,14 +129,6 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     }
     if solve.pane != crate::app::model::SolvePane::Editor && key.code == KeyCode::Char('i') {
         return Some(Action::InterviewFocus);
-    }
-    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
-        || key.code == KeyCode::BackTab
-    {
-        return Some(Action::PreviousFocus);
-    }
-    if key.code == KeyCode::Tab {
-        return Some(Action::NextFocus);
     }
     if solve.pane != crate::app::model::SolvePane::Editor {
         return match key.code {
@@ -245,7 +252,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
         ] {
             assert!(routes_to_neovim(key, &state));
         }
@@ -253,6 +259,9 @@ mod tests {
             KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         ] {
             assert!(!routes_to_neovim(key, &state));
         }
@@ -341,6 +350,71 @@ mod tests {
             ),
             Some(Action::Down)
         );
+    }
+
+    #[test]
+    fn tab_and_backtab_precede_interview_disclosure_and_composer() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.status = crate::app::model::CodexStatus::Disclosure;
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                &mut state
+            ),
+            Some(Action::PreviousFocus)
+        );
+
+        state.codex.status = crate::app::model::CodexStatus::Ready;
+        state.codex.composer_focused = true;
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                &mut state
+            ),
+            Some(Action::PreviousFocus)
+        );
+    }
+
+    #[test]
+    fn host_run_aliases_never_enter_neovim_modes() {
+        let mut state = solve_state();
+        for mode in ["n", "i", "v", "c", "no", "/"] {
+            state
+                .solve
+                .as_mut()
+                .unwrap()
+                .editor
+                .update_neovim_mode(mode);
+            for (key, expected) in [
+                (
+                    KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+                    Action::SaveTest,
+                ),
+                (
+                    KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+                    Action::Submit,
+                ),
+                (
+                    KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                    Action::SaveTest,
+                ),
+            ] {
+                assert!(
+                    !routes_to_neovim(key, &state),
+                    "alias routed in mode {mode}"
+                );
+                assert_eq!(action_for_key(key, &mut state), Some(expected));
+            }
+        }
     }
 
     #[test]

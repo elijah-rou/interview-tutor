@@ -62,7 +62,7 @@ pub enum SourceEvent {
 }
 
 #[derive(Clone, Debug)]
-enum WorkerEvent {
+pub enum WorkerEvent {
     Started(Result<(), String>),
     Source(SourceEvent),
     Warning(String),
@@ -73,10 +73,7 @@ enum WorkerEvent {
 pub struct PollResult {
     pub grid: Option<Arc<GridSnapshot>>,
     pub document: Option<DocumentUpdate>,
-    pub started: Option<Result<(), String>>,
-    pub source_events: Vec<SourceEvent>,
-    pub warning: Option<String>,
-    pub failure: Option<String>,
+    pub events: Vec<WorkerEvent>,
 }
 
 enum Command {
@@ -167,6 +164,12 @@ impl Worker {
     }
 
     pub fn paste(&self, text: String) -> Result<(), String> {
+        if text.len() > crate::editor::MAX_DOCUMENT_BYTES {
+            return Err("paste exceeds editor document byte bound".into());
+        }
+        if text.bytes().filter(|byte| *byte == b'\n').count() >= crate::editor::MAX_DOCUMENT_LINES {
+            return Err("paste exceeds editor document line bound".into());
+        }
         self.send(Command::Paste(text))
     }
 
@@ -215,21 +218,7 @@ impl Worker {
     }
 
     pub fn poll(&self) -> PollResult {
-        let mut shared = self.shared.lock().expect("Neovim worker lock");
-        let mut result = PollResult {
-            grid: shared.latest_grid.take(),
-            document: shared.latest_document.take(),
-            ..PollResult::default()
-        };
-        while let Some(event) = shared.events.pop_front() {
-            match event {
-                WorkerEvent::Started(started) => result.started = Some(started),
-                WorkerEvent::Source(event) => result.source_events.push(event),
-                WorkerEvent::Warning(error) => result.warning = Some(error),
-                WorkerEvent::Failed(error) => result.failure = Some(error),
-            }
-        }
-        result
+        take_poll_result(&self.shared)
     }
 
     pub fn shutdown(mut self) {
@@ -256,6 +245,17 @@ impl Drop for Worker {
     fn drop(&mut self) {
         self.shutdown_inner();
     }
+}
+
+fn take_poll_result(shared: &Arc<Mutex<WorkerShared>>) -> PollResult {
+    let mut shared = shared.lock().expect("Neovim worker lock");
+    let mut result = PollResult {
+        grid: shared.latest_grid.take(),
+        document: shared.latest_document.take(),
+        ..PollResult::default()
+    };
+    result.events.extend(shared.events.drain(..));
+    result
 }
 
 fn controller(
@@ -687,6 +687,24 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    fn wait_until_started(worker: &Worker, deadline: Instant) {
+        loop {
+            let poll = worker.poll();
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Started(started) => {
+                        started.unwrap();
+                        return;
+                    }
+                    WorkerEvent::Failed(error) => panic!("Neovim failed during startup: {error}"),
+                    WorkerEvent::Source(_) | WorkerEvent::Warning(_) => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "Neovim startup timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn out_of_band_shutdown_ignores_a_full_queue_and_cancels_startup() {
         let nonce = SystemTime::now()
@@ -743,6 +761,8 @@ mod tests {
         let executable = resolve_executable(None).unwrap();
         let worker = Worker::start(executable);
         let source = "x".repeat(crate::editor::MAX_DOCUMENT_BYTES - 1);
+        let mut host_document = crate::editor::EditorDocument::new(source.clone()).unwrap();
+        let saved_revision = host_document.revision;
         worker
             .start_session(
                 source.clone(),
@@ -753,32 +773,25 @@ mod tests {
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let poll = worker.poll();
-            if let Some(started) = poll.started {
-                started.unwrap();
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "Neovim did not start before deadline"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_started(&worker, deadline);
 
         worker.paste("zz".into()).unwrap();
         let mut warning = None;
         let mut restored = None;
         while Instant::now() < deadline && (warning.is_none() || restored.is_none()) {
             let poll = worker.poll();
-            warning = warning.or(poll.warning);
             if let Some(document) = poll.document {
                 restored = Some(document.text);
             }
-            assert!(
-                poll.failure.is_none(),
-                "overflow recovery must not fail the editor"
-            );
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Warning(message) => warning = Some(message),
+                    WorkerEvent::Failed(error) => {
+                        panic!("overflow recovery must not fail the editor: {error}")
+                    }
+                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                }
+            }
             thread::sleep(Duration::from_millis(10));
         }
         assert!(
@@ -788,7 +801,129 @@ mod tests {
             "overflow recovery warning was not published"
         );
         assert_eq!(restored.as_deref(), Some(source.as_str()));
+        host_document
+            .install_neovim_snapshot(restored.unwrap(), "n", 1)
+            .unwrap();
+        assert_eq!(host_document.text(), source);
+        assert_eq!(host_document.revision, saved_revision);
+        assert_eq!(host_document.saved_text(), source);
+        assert!(!host_document.dirty());
         worker.shutdown();
+    }
+
+    #[test]
+    fn oversized_external_paste_is_rejected_before_queueing_without_mutation() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        let source = "saved bytes\n".to_string();
+        let mut host_document = crate::editor::EditorDocument::new(source.clone()).unwrap();
+        let saved_revision = host_document.revision;
+        worker
+            .start_session(
+                source.clone(),
+                "interview://external-paste.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        wait_until_started(&worker, deadline);
+
+        assert!(
+            worker
+                .paste("z".repeat(crate::editor::MAX_DOCUMENT_BYTES + 1))
+                .unwrap_err()
+                .contains("byte bound")
+        );
+        assert!(
+            worker
+                .paste("\n".repeat(crate::editor::MAX_DOCUMENT_LINES))
+                .unwrap_err()
+                .contains("line bound")
+        );
+        worker.barrier(7).unwrap();
+
+        let barrier = loop {
+            let poll = worker.poll();
+            let mut barrier = None;
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Source(SourceEvent::Barrier(update)) => barrier = Some(update),
+                    WorkerEvent::Failed(error) => panic!("paste rejection killed Neovim: {error}"),
+                    WorkerEvent::Started(_)
+                    | WorkerEvent::Source(SourceEvent::Action(_))
+                    | WorkerEvent::Warning(_) => {}
+                }
+            }
+            if let Some(barrier) = barrier {
+                break barrier;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "post-rejection barrier timed out"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(barrier.id, 7);
+        host_document
+            .install_neovim_snapshot(
+                barrier.document.text,
+                &barrier.document.mode,
+                barrier.document.changedtick,
+            )
+            .unwrap();
+        assert_eq!(host_document.text(), source);
+        assert_eq!(host_document.revision, saved_revision);
+        assert_eq!(host_document.saved_text(), source);
+        assert!(!host_document.dirty());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn poll_preserves_source_barrier_before_following_failure() {
+        let shared = Arc::new(Mutex::new(WorkerShared::default()));
+        let document = DocumentUpdate {
+            text: "processed\n".into(),
+            mode: "n".into(),
+            changedtick: 3,
+        };
+        push_event(
+            &shared,
+            WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate { id: 9, document })),
+        );
+        push_event(&shared, WorkerEvent::Failed("crashed after barrier".into()));
+
+        let poll = take_poll_result(&shared);
+        assert!(matches!(
+            poll.events.as_slice(),
+            [
+                WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate { id: 9, .. })),
+                WorkerEvent::Failed(error)
+            ] if error == "crashed after barrier"
+        ));
+
+        let mut host_document = crate::editor::EditorDocument::new("saved\n".into()).unwrap();
+        let saved_revision = host_document.revision;
+        for event in poll.events {
+            match event {
+                WorkerEvent::Source(SourceEvent::Barrier(update)) => host_document
+                    .install_neovim_snapshot(
+                        update.document.text,
+                        &update.document.mode,
+                        update.document.changedtick,
+                    )
+                    .unwrap(),
+                WorkerEvent::Failed(_) => {}
+                WorkerEvent::Started(_)
+                | WorkerEvent::Source(SourceEvent::Action(_))
+                | WorkerEvent::Warning(_) => unreachable!(),
+            }
+        }
+        assert_eq!(host_document.text(), "processed\n");
+        assert_eq!(host_document.revision, saved_revision + 1);
+        assert_eq!(host_document.saved_text(), "saved\n");
+        assert!(host_document.dirty());
     }
 
     #[test]
@@ -805,15 +940,7 @@ mod tests {
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let poll = worker.poll();
-            if let Some(started) = poll.started {
-                started.unwrap();
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_started(&worker, deadline);
         worker.input("iZ".into()).unwrap();
         worker.barrier(42).unwrap();
         worker.input("!<Esc>".into()).unwrap();
@@ -824,15 +951,15 @@ mod tests {
             if let Some(document) = poll.document {
                 latest_text = Some(document.text);
             }
-            barrier = poll
-                .source_events
-                .into_iter()
-                .find_map(|event| match event {
-                    SourceEvent::Barrier(barrier) => Some(barrier),
-                    SourceEvent::Action(_) => None,
-                })
-                .or(barrier);
-            assert!(poll.failure.is_none());
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Source(SourceEvent::Barrier(update)) => barrier = Some(update),
+                    WorkerEvent::Failed(error) => panic!("source barrier failed: {error}"),
+                    WorkerEvent::Started(_)
+                    | WorkerEvent::Source(SourceEvent::Action(_))
+                    | WorkerEvent::Warning(_) => {}
+                }
+            }
             assert!(Instant::now() < deadline, "source barrier timed out");
             thread::sleep(Duration::from_millis(10));
         }
@@ -857,15 +984,7 @@ mod tests {
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let poll = worker.poll();
-            if let Some(started) = poll.started {
-                started.unwrap();
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_started(&worker, deadline);
         worker.input("iZ<Esc><Space>tA!<Esc>".into()).unwrap();
         let mut action = None;
         let mut latest_text = None;
@@ -874,15 +993,15 @@ mod tests {
             if let Some(document) = poll.document {
                 latest_text = Some(document.text);
             }
-            action = poll
-                .source_events
-                .into_iter()
-                .find_map(|event| match event {
-                    SourceEvent::Action(action) => Some(action),
-                    SourceEvent::Barrier(_) => None,
-                })
-                .or(action);
-            assert!(poll.failure.is_none());
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Source(SourceEvent::Action(update)) => action = Some(update),
+                    WorkerEvent::Failed(error) => panic!("Tutor action failed: {error}"),
+                    WorkerEvent::Started(_)
+                    | WorkerEvent::Source(SourceEvent::Barrier(_))
+                    | WorkerEvent::Warning(_) => {}
+                }
+            }
             assert!(Instant::now() < deadline, "Tutor action timed out");
             thread::sleep(Duration::from_millis(10));
         }
@@ -898,6 +1017,8 @@ mod tests {
         let executable = resolve_executable(None).unwrap();
         let worker = Worker::start(executable);
         let source = "x".repeat(crate::editor::MAX_DOCUMENT_BYTES);
+        let mut host_document = crate::editor::EditorDocument::new(source.clone()).unwrap();
+        let saved_revision = host_document.revision;
         worker
             .start_session(
                 source.clone(),
@@ -908,27 +1029,33 @@ mod tests {
             )
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
-            let poll = worker.poll();
-            if let Some(started) = poll.started {
-                started.unwrap();
-                break;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_started(&worker, deadline);
         worker.input("iZ<Esc>".into()).unwrap();
         let mut warning = None;
         let mut restored = None;
         while Instant::now() < deadline && warning.is_none() {
             let poll = worker.poll();
-            warning = warning.or(poll.warning);
             restored = poll.document.map(|document| document.text).or(restored);
-            assert!(poll.failure.is_none(), "normal input overflow must recover");
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Warning(message) => warning = Some(message),
+                    WorkerEvent::Failed(error) => {
+                        panic!("normal input overflow must recover: {error}")
+                    }
+                    WorkerEvent::Started(_) | WorkerEvent::Source(_) => {}
+                }
+            }
             thread::sleep(Duration::from_millis(10));
         }
         assert!(warning.is_some(), "normal input overflow warning missing");
         assert_eq!(restored.as_deref(), Some(source.as_str()));
+        host_document
+            .install_neovim_snapshot(restored.unwrap(), "n", 1)
+            .unwrap();
+        assert_eq!(host_document.text(), source);
+        assert_eq!(host_document.revision, saved_revision);
+        assert_eq!(host_document.saved_text(), source);
+        assert!(!host_document.dirty());
         worker.shutdown();
     }
 }

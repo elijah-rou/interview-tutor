@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const NEOVIM_SOURCE_BARRIER_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct TerminalGuard;
 impl TerminalGuard {
@@ -1370,8 +1372,6 @@ pub fn run(
             .clear()
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
-        let mut pending_neovim_run_action = false;
-        let mut cancel_after_neovim_run_action = false;
         let mut next_neovim_barrier_id = 1_u64;
         let mut pending_neovim_barriers = std::collections::VecDeque::new();
         let mut last_neovim_grid_size = None;
@@ -1418,113 +1418,96 @@ pub fn run(
                 );
                 needs_draw = true;
             }
-            if let Some(started) = neovim_poll.started {
-                apply_event(
-                    &mut state,
-                    &repository,
-                    &root,
-                    &mut workers,
-                    Event::NeovimStarted(started),
-                );
-                needs_draw = true;
-            }
-            if let Some(error) = neovim_poll.warning {
-                apply_event(
-                    &mut state,
-                    &repository,
-                    &root,
-                    &mut workers,
-                    Event::NeovimWarning(error),
-                );
-                needs_draw = true;
-            }
-            if let Some(error) = neovim_poll.failure {
-                pending_neovim_run_action = false;
-                cancel_after_neovim_run_action = false;
-                pending_neovim_barriers.clear();
-                apply_event(
-                    &mut state,
-                    &repository,
-                    &root,
-                    &mut workers,
-                    Event::NeovimFailed(error),
-                );
-                needs_draw = true;
-            }
-            for source_event in neovim_poll.source_events {
-                match source_event {
-                    crate::neovim::SourceEvent::Barrier(barrier) => {
+            for worker_event in neovim_poll.events {
+                match worker_event {
+                    crate::neovim::WorkerEvent::Started(started) => apply_event(
+                        &mut state,
+                        &repository,
+                        &root,
+                        &mut workers,
+                        Event::NeovimStarted(started),
+                    ),
+                    crate::neovim::WorkerEvent::Warning(error) => apply_event(
+                        &mut state,
+                        &repository,
+                        &root,
+                        &mut workers,
+                        Event::NeovimWarning(error),
+                    ),
+                    crate::neovim::WorkerEvent::Failed(error) => {
+                        pending_neovim_barriers.clear();
                         apply_event(
                             &mut state,
                             &repository,
                             &root,
                             &mut workers,
-                            Event::NeovimDocument(barrier.document),
-                        );
-                        let Some((expected_id, action)) = pending_neovim_barriers.pop_front()
-                        else {
-                            return Err("Neovim returned an unexpected source barrier".into());
-                        };
-                        if expected_id != barrier.id {
-                            return Err(format!(
-                                "Neovim source barrier mismatch: expected {expected_id}, got {}",
-                                barrier.id
-                            ));
-                        }
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::Command(action),
+                            Event::NeovimFailed(error),
                         );
                     }
-                    crate::neovim::SourceEvent::Action(action_update) => {
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimDocument(action_update.document),
-                        );
-                        let source_action = matches!(
-                            action_update.action,
-                            crate::neovim::TutorAction::Test | crate::neovim::TutorAction::Submit
-                        );
-                        let action = match action_update.action {
-                            crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
-                            crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
-                            crate::neovim::TutorAction::Back => crate::app::Action::Back,
-                            crate::neovim::TutorAction::Collapse => {
-                                state.status = "Editor cannot be collapsed".into();
-                                continue;
+                    crate::neovim::WorkerEvent::Source(source_event) => match source_event {
+                        crate::neovim::SourceEvent::Barrier(barrier) => {
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(barrier.document),
+                            );
+                            let Some((expected_id, action, _deadline)) =
+                                pending_neovim_barriers.pop_front()
+                            else {
+                                return Err("Neovim returned an unexpected source barrier".into());
+                            };
+                            if expected_id != barrier.id {
+                                return Err(format!(
+                                    "Neovim source barrier mismatch: expected {expected_id}, got {}",
+                                    barrier.id
+                                ));
                             }
-                            crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
-                            crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
-                        };
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::Command(action),
-                        );
-                        if source_action {
-                            pending_neovim_run_action = false;
-                            if cancel_after_neovim_run_action {
-                                cancel_after_neovim_run_action = false;
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::Command(crate::app::Action::Cancel),
-                                );
-                            }
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::Command(action),
+                            );
                         }
-                    }
+                        crate::neovim::SourceEvent::Action(action_update) => {
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(action_update.document),
+                            );
+                            let action = match action_update.action {
+                                crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
+                                crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
+                                crate::neovim::TutorAction::Back => crate::app::Action::Back,
+                                crate::neovim::TutorAction::Collapse => {
+                                    state.status = "Editor cannot be collapsed".into();
+                                    continue;
+                                }
+                                crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
+                                crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
+                            };
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::Command(action),
+                            );
+                        }
+                    },
                 }
                 needs_draw = true;
+            }
+            if pending_neovim_barriers
+                .front()
+                .is_some_and(|(_, _, deadline)| Instant::now() >= *deadline)
+            {
+                return Err("Neovim source barrier timed out".into());
             }
             if let Some(document) = neovim_poll.document {
                 apply_event(
@@ -1567,25 +1550,14 @@ pub fn run(
                 TerminalEvent::Key(key) => {
                     if input::routes_to_neovim(key, &state) {
                         if let Some(encoded) = crate::neovim::key::encode_key(key)? {
-                            let source_action =
-                                matches!(key.code, crossterm::event::KeyCode::F(5 | 9))
-                                    || key.code == crossterm::event::KeyCode::Char('s')
-                                        && key
-                                            .modifiers
-                                            .contains(crossterm::event::KeyModifiers::CONTROL);
                             workers
                                 .neovim
                                 .as_ref()
                                 .expect("runtime Neovim worker exists")
                                 .input(encoded)?;
-                            pending_neovim_run_action |= source_action;
                         }
                         needs_draw = true;
                     } else if let Some(action) = input::action_for_key(key, &mut state) {
-                        if action == crate::app::Action::Cancel && pending_neovim_run_action {
-                            cancel_after_neovim_run_action = true;
-                            continue;
-                        }
                         if action_requires_neovim_barrier(&state, &action) {
                             if pending_neovim_barriers.len() == 16 {
                                 return Err("Neovim source barrier queue exceeded bound".into());
@@ -1599,7 +1571,11 @@ pub fn run(
                                 .as_ref()
                                 .expect("runtime Neovim worker exists")
                                 .barrier(id)?;
-                            pending_neovim_barriers.push_back((id, action));
+                            pending_neovim_barriers.push_back((
+                                id,
+                                action,
+                                Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT,
+                            ));
                         } else {
                             apply_event(
                                 &mut state,
@@ -1632,12 +1608,24 @@ pub fn run(
                             .as_ref()
                             .is_some_and(|solve| solve.pane == SolvePane::Editor)
                     {
-                        workers
+                        let paste = workers
                             .neovim
                             .as_ref()
                             .expect("runtime Neovim worker exists")
-                            .paste(text)?;
-                        needs_draw = true;
+                            .paste(text);
+                        match paste {
+                            Ok(()) => needs_draw = true,
+                            Err(error) => {
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimWarning(error),
+                                );
+                                needs_draw = true;
+                            }
+                        }
                     }
                 }
                 TerminalEvent::Mouse(mouse) => {

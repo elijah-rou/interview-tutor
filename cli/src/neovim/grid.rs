@@ -728,6 +728,183 @@ mod tests {
     }
 
     #[test]
+    fn exact_grid_highlight_and_flush_bounds_are_enforced() {
+        let mut grid = GridState::default();
+        grid.resize(&[
+            Value::Unsigned(1),
+            Value::Unsigned(MAX_GRID_WIDTH as u64),
+            Value::Unsigned(MAX_GRID_HEIGHT as u64),
+        ])
+        .unwrap();
+        assert_eq!(grid.cells.len(), MAX_GRID_CELLS);
+        grid.line(&[
+            Value::Unsigned(1),
+            Value::Unsigned((MAX_GRID_HEIGHT - 1) as u64),
+            Value::Unsigned((MAX_GRID_WIDTH - 1) as u64),
+            array([array([Value::String("x".into())])]),
+        ])
+        .unwrap();
+        assert!(
+            grid.line(&[
+                Value::Unsigned(1),
+                Value::Unsigned((MAX_GRID_HEIGHT - 1) as u64),
+                Value::Unsigned((MAX_GRID_WIDTH - 1) as u64),
+                array([array([
+                    Value::String("x".into()),
+                    Value::Unsigned(0),
+                    Value::Unsigned(2),
+                ])]),
+            ])
+            .unwrap_err()
+            .contains("exceeds row bounds")
+        );
+        assert!(
+            grid.resize(&[
+                Value::Unsigned(1),
+                Value::Unsigned((MAX_GRID_WIDTH + 1) as u64),
+                Value::Unsigned(1),
+            ])
+            .is_err()
+        );
+
+        let mut highlights = GridState::default();
+        for id in 0..MAX_HIGHLIGHTS as u64 {
+            highlights
+                .define_highlight(&[Value::Unsigned(id), Value::Map(Vec::new())])
+                .unwrap();
+        }
+        highlights
+            .define_highlight(&[Value::Unsigned(0), Value::Map(Vec::new())])
+            .unwrap();
+        assert!(
+            highlights
+                .define_highlight(&[
+                    Value::Unsigned(MAX_HIGHLIGHTS as u64),
+                    Value::Map(Vec::new()),
+                ])
+                .unwrap_err()
+                .contains("highlight table")
+        );
+
+        let flushes = (0..=MAX_FLUSHES_PER_BATCH)
+            .map(|_| event("flush", [Value::Array(Vec::new())]))
+            .collect::<Vec<_>>();
+        assert!(
+            GridState::default()
+                .apply_redraw(&redraw(flushes))
+                .unwrap_err()
+                .contains("flush bound")
+        );
+    }
+
+    #[test]
+    fn wide_continuation_cursor_colors_busy_and_clear_publish_at_flush() {
+        let mut grid = GridState::default();
+        let snapshots = grid
+            .apply_redraw(&redraw([
+                event(
+                    "grid_resize",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(4),
+                        Value::Unsigned(2),
+                    ])],
+                ),
+                event(
+                    "default_colors_set",
+                    [array([
+                        Value::Unsigned(0x010203),
+                        Value::Unsigned(0x040506),
+                        Value::Integer(-1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(0),
+                    ])],
+                ),
+                event(
+                    "grid_line",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(0),
+                        array([
+                            array([Value::String("界".into()), Value::Unsigned(0)]),
+                            array([Value::String(String::new())]),
+                        ]),
+                        Value::Bool(false),
+                    ])],
+                ),
+                event(
+                    "grid_cursor_goto",
+                    [array([
+                        Value::Unsigned(1),
+                        Value::Unsigned(0),
+                        Value::Unsigned(1),
+                    ])],
+                ),
+                event("busy_start", [Value::Array(Vec::new())]),
+                event("flush", [Value::Array(Vec::new())]),
+                event("busy_stop", [Value::Array(Vec::new())]),
+                event("grid_clear", [array([Value::Unsigned(1)])]),
+                event("flush", [Value::Array(Vec::new())]),
+            ]))
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].cell(0, 0).unwrap().text, "界");
+        assert_eq!(snapshots[0].cell(0, 1).unwrap().text, "");
+        assert_eq!(snapshots[0].default_foreground, Some(0x010203));
+        assert_eq!(snapshots[0].default_background, Some(0x040506));
+        assert_eq!(
+            (snapshots[0].cursor_row, snapshots[0].cursor_column),
+            (0, 1)
+        );
+        assert!(!snapshots[0].cursor_visible);
+        assert!(snapshots[1].cursor_visible);
+        assert!(
+            snapshots[1]
+                .cells
+                .iter()
+                .all(|cell| cell == &GridCell::default())
+        );
+    }
+
+    #[test]
+    fn overlapping_vertical_and_horizontal_scroll_reads_original_region() {
+        let mut grid = GridState::default();
+        grid.resize(&[Value::Unsigned(1), Value::Unsigned(4), Value::Unsigned(3)])
+            .unwrap();
+        for (row, text) in ["abcd", "efgh", "ijkl"].into_iter().enumerate() {
+            grid.line(&[
+                Value::Unsigned(1),
+                Value::Unsigned(row as u64),
+                Value::Unsigned(0),
+                array(
+                    text.chars()
+                        .map(|character| array([Value::String(character.to_string())])),
+                ),
+            ])
+            .unwrap();
+        }
+        grid.scroll(&[
+            Value::Unsigned(1),
+            Value::Unsigned(0),
+            Value::Unsigned(3),
+            Value::Unsigned(0),
+            Value::Unsigned(4),
+            Value::Integer(1),
+            Value::Integer(1),
+        ])
+        .unwrap();
+        let rows = (0..3)
+            .map(|row| {
+                (0..4)
+                    .map(|column| grid.cells[row * 4 + column].text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["fgh ", "jkl ", "    "]);
+    }
+
+    #[test]
     fn malformed_known_events_fail_and_unknown_future_events_are_ignored() {
         let mut grid = GridState::default();
         assert!(

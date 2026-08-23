@@ -94,6 +94,11 @@ impl EditorDocument {
         self.text != self.saved_text
     }
 
+    #[cfg(test)]
+    pub(crate) fn saved_text(&self) -> &str {
+        &self.saved_text
+    }
+
     pub fn mark_saved(&mut self, revision: u64, saved_text: &str) {
         if revision <= self.revision {
             self.saved_text = saved_text.to_string();

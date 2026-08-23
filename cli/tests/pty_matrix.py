@@ -23,6 +23,9 @@ F5 = b"\x1b[15~"
 F9 = b"\x1b[20~"
 SHIFT_TAB = b"\x1b[Z"
 CTRL_C = b"\x03"
+CTRL_R = b"\x12"
+CTRL_S = b"\x13"
+CTRL_V = b"\x16"
 
 
 class MatrixFixture:
@@ -533,17 +536,51 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
 
         session.send(b"qaA!" + ESCAPE + b"q@a.")
         session.wait_screen("print('initial')!!!")
-        session.send(b"/initial" + ENTER + b"n")
+
+        session.send(b"/initial")
+        session.wait_screen("/initial")
+        session.send(ENTER + b"nN")
+        session.send(b":echo 'NATIVE-MESSAGE'")
+        session.wait_screen(":echo 'NATIVE-MESSAGE'")
+        session.send(ENTER)
+        session.wait_screen("NATIVE-MESSAGE")
+        session.send(ENTER)
+
         session.send(b"gg\"ayyGp")
-        session.send(b":TutorTest" + ENTER)
-        session.wait_screen("Run complete")
-        assert fixture.solution.read_text(encoding="utf-8") == (
-            "print('initial')!!!\nprint('initial')!!!\n"
+        session.send(b"ggVyp")
+        session.send(b"gg0" + CTRL_V + b"GI#" + ESCAPE)
+        session.wait_screen("#print('initial')!!!")
+        session.send(b"u")
+        session.wait_predicate(
+            "Visual-block undo",
+            lambda: "#print('initial')!!!" not in session.screen.text(),
         )
+        session.send(CTRL_R)
+        session.wait_screen("#print('initial')!!!")
+        session.send(b"ggyyGp")
+
+        session.send(b"Go")
+        session.send(b"\x1b[200~BRACKETED\nPASTE\x1b[201~")
+        session.send(ESCAPE)
+        session.wait_screen("BRACKETED")
+        session.wait_screen("PASTE")
+        session.send(b"\x1b[<0;70;10M\x1b[<0;70;10m")
+
+        session.send(F5)
+        session.wait_screen("Run complete")
+        expected_source = (
+            "#print('initial')!!!\n" * 4 + "BRACKETED\nPASTE\n"
+        )
+        assert fixture.solution.read_text(encoding="utf-8") == expected_source
+        assert query_attempts(database) == []
+        session.send(CTRL_S)
+        session.wait_screen("Testing…")
+        session.wait_screen("Run complete")
         assert query_attempts(database) == []
 
-        session.send(b":TutorSubmit" + ENTER)
+        session.send(F9)
         session.wait_screen("Submit recorded")
+        assert fixture.solution.read_text(encoding="utf-8") == expected_source
         assert query_attempts(database) == [("pass", 0)]
         quit_from_editor(session)
 
@@ -555,7 +592,10 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
     assert not Path(f"/proc/{neovim_pid}").exists(), (
         f"embedded Neovim remained alive after editor shutdown: {neovim_pid}"
     )
-    return "visual+count+text-object+macro+dot+search+named-register+Tutor commands"
+    return (
+        "visual-char+line+block unnamed+named-register n+N undo+redo macro+dot "
+        "bracketed-paste+mouse native-command+search+message F5+F9+Ctrl-S"
+    )
 
 
 def compact_case(fixture: MatrixFixture) -> str:

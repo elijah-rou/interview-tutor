@@ -425,7 +425,18 @@ local function barrier(id)
   vim.rpcnotify(channel, "tutor_barrier", id, buf, tick, mode, valid, current_lines, eol)
 end
 _G.__interview_tutor_barriers = _G.__interview_tutor_barriers or {}
+_G.__interview_tutor_barrier_ids = _G.__interview_tutor_barrier_ids or {}
 _G.__interview_tutor_barriers[channel] = barrier
+_G.__interview_tutor_barrier_ids[channel] = {}
+local function acknowledge_barrier()
+  local ids = _G.__interview_tutor_barrier_ids[channel]
+  local id = table.remove(ids, 1)
+  if id == nil then error("source barrier id queue is empty") end
+  barrier(id)
+end
+for _, mode in ipairs({ "n", "i", "x", "s", "o", "c" }) do
+  vim.keymap.set(mode, "<F35>", acknowledge_barrier, { buffer = buf, silent = true, nowait = true })
+end
 vim.api.nvim_buf_create_user_command(buf, "TutorTest", function() tutor("test") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorSubmit", function() tutor("submit") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorBack", function() tutor("back") end, {})
@@ -572,10 +583,12 @@ return {
         let script = r#"
 local channel, id = ...
 local barriers = _G.__interview_tutor_barriers
-if barriers == nil or barriers[channel] == nil then
+local ids = _G.__interview_tutor_barrier_ids
+if barriers == nil or barriers[channel] == nil or ids == nil or ids[channel] == nil then
   error("synthetic solution barrier is unavailable")
 end
-barriers[channel](id)
+if #ids[channel] >= 32 then error("source barrier id queue exceeds bound") end
+table.insert(ids[channel], id)
 return true
 "#;
         self.call(
@@ -585,7 +598,9 @@ return true
                 array([Value::Unsigned(self.channel_id), Value::Unsigned(id)]),
             ],
         )?;
-        Ok(())
+        // nvim_input() appends bytes to Neovim's FIFO input queue. The private mapped key is a
+        // processed-input acknowledgement: its snapshot runs only after every earlier key.
+        self.feed_key("<F35>")
     }
 
     pub fn acknowledge_saved(&mut self, changedtick: u64, source: String) -> Result<bool, String> {
@@ -1936,6 +1951,73 @@ mod tests {
         );
         fs::remove_dir_all(fixture_root).unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_barrier_waits_until_a_delayed_mapping_has_processed_its_bytes() {
+        let executable = resolve_executable(None).unwrap();
+        let mut process = RpcProcess::start(
+            &executable,
+            "x\n",
+            "interview://processed-input.py",
+            "python",
+            30,
+            10,
+        )
+        .unwrap();
+        process
+            .call(
+                "nvim_exec_lua",
+                vec![
+                    Value::String(
+                        r#"
+local buf = ...
+vim.keymap.set("i", "Z", function()
+  vim.wait(150)
+  return "Z"
+end, { buffer = buf, expr = true })
+"#
+                        .into(),
+                    ),
+                    array([process.buffer.clone()]),
+                ],
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        process.feed_key("iZ").unwrap();
+        process.request_barrier(77).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let barrier = loop {
+            let event = process
+                .shared()
+                .lock()
+                .unwrap()
+                .origin_events
+                .iter()
+                .find_map(|event| match event {
+                    OriginEvent::Barrier { id: 77, snapshot } => Some(snapshot.clone()),
+                    OriginEvent::Dirty { .. }
+                    | OriginEvent::Action { .. }
+                    | OriginEvent::Barrier { .. } => None,
+                });
+            if let Some(snapshot) = event {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "processed-input barrier timed out"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "barrier overtook delayed input"
+        );
+        assert_eq!(barrier.text.as_deref(), Some("Zx\n"));
+        assert!(barrier.mode.starts_with('i'));
+        process.shutdown().unwrap();
     }
 
     #[test]

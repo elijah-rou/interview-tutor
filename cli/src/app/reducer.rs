@@ -370,6 +370,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             effects
         }
         Action::NextFocus | Action::PreviousFocus => {
+            state.codex.composer_focused = false;
             let forward = action == Action::NextFocus;
             solve.pane = match (solve.pane, forward) {
                 (SolvePane::Editor, true) => SolvePane::Problem,
@@ -1080,7 +1081,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::model::{AppData, ProblemRow, SetRow};
+    use crate::app::model::{AppData, ProblemRow, SetRow, SolvePane};
     use crate::database::{Difficulty, EnabledLanguage};
 
     fn state() -> AppState {
@@ -1239,6 +1240,23 @@ mod tests {
             submitted_source: None,
         });
         state
+    }
+
+    #[test]
+    fn pane_focus_changes_close_the_interview_composer() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.composer_focused = true;
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Editor);
+        assert!(!state.codex.composer_focused);
+
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.codex.composer_focused = true;
+        reduce(&mut state, Event::Command(Action::PreviousFocus));
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Output);
+        assert!(!state.codex.composer_focused);
     }
 
     fn finish_successful_submit(state: &mut AppState, output: &str) -> Vec<Effect> {

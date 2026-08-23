@@ -472,6 +472,151 @@ mod tests {
         assert_eq!(decode(&mut Cursor::new(encoded)).unwrap(), value);
     }
 
+    struct OneByteReader {
+        bytes: Cursor<Vec<u8>>,
+    }
+
+    impl Read for OneByteReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let limit = output.len().min(1);
+            self.bytes.read(&mut output[..limit])
+        }
+    }
+
+    fn fragmented(bytes: Vec<u8>) -> Value {
+        decode(&mut OneByteReader {
+            bytes: Cursor::new(bytes),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn decodes_every_supported_marker_from_fragmented_input() {
+        let cases = vec![
+            (vec![0x2a], Value::Unsigned(42)),
+            (vec![0xff], Value::Integer(-1)),
+            (vec![0xc0], Value::Nil),
+            (vec![0xc2], Value::Bool(false)),
+            (vec![0xc3], Value::Bool(true)),
+            (vec![0xcc, 0xff], Value::Unsigned(255)),
+            (vec![0xcd, 0x01, 0x00], Value::Unsigned(256)),
+            (vec![0xce, 0, 1, 0, 0], Value::Unsigned(65_536)),
+            (vec![0xcf, 0, 0, 0, 1, 0, 0, 0, 0], Value::Unsigned(1 << 32)),
+            (vec![0xd0, 0xfe], Value::Integer(-2)),
+            (vec![0xd1, 0xff, 0xfe], Value::Integer(-2)),
+            (vec![0xd2, 0xff, 0xff, 0xff, 0xfe], Value::Integer(-2)),
+            (
+                vec![0xd3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
+                Value::Integer(-2),
+            ),
+            (vec![0xca, 0x3f, 0xc0, 0, 0], Value::Float(1.5)),
+            (vec![0xcb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0], Value::Float(1.5)),
+            (vec![0xa1, b'a'], Value::String("a".into())),
+            (vec![0xd9, 1, b'a'], Value::String("a".into())),
+            (vec![0xda, 0, 1, b'a'], Value::String("a".into())),
+            (vec![0xdb, 0, 0, 0, 1, b'a'], Value::String("a".into())),
+            (vec![0xc4, 1, 7], Value::Binary(vec![7])),
+            (vec![0xc5, 0, 1, 7], Value::Binary(vec![7])),
+            (vec![0xc6, 0, 0, 0, 1, 7], Value::Binary(vec![7])),
+            (vec![0x91, 0xc0], Value::Array(vec![Value::Nil])),
+            (vec![0xdc, 0, 1, 0xc0], Value::Array(vec![Value::Nil])),
+            (vec![0xdd, 0, 0, 0, 1, 0xc0], Value::Array(vec![Value::Nil])),
+            (
+                vec![0x81, 0xa1, b'k', 0xc0],
+                Value::Map(vec![(Value::String("k".into()), Value::Nil)]),
+            ),
+            (
+                vec![0xde, 0, 1, 0xa1, b'k', 0xc0],
+                Value::Map(vec![(Value::String("k".into()), Value::Nil)]),
+            ),
+            (
+                vec![0xdf, 0, 0, 0, 1, 0xa1, b'k', 0xc0],
+                Value::Map(vec![(Value::String("k".into()), Value::Nil)]),
+            ),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(fragmented(bytes), expected);
+        }
+
+        for (marker, length) in [(0xd4, 1), (0xd5, 2), (0xd6, 4), (0xd7, 8), (0xd8, 16)] {
+            let mut bytes = vec![marker, 3];
+            bytes.extend(vec![9; length]);
+            assert_eq!(fragmented(bytes), Value::Ext(3, vec![9; length]));
+        }
+        for (header, length) in [
+            (vec![0xc7, 1], 1),
+            (vec![0xc8, 0, 1], 1),
+            (vec![0xc9, 0, 0, 0, 1], 1),
+        ] {
+            let mut bytes = header;
+            bytes.extend([3, 9]);
+            assert_eq!(fragmented(bytes), Value::Ext(3, vec![9; length]));
+        }
+    }
+
+    #[test]
+    fn exact_message_depth_container_and_node_bounds_are_enforced() {
+        let payload_length = MAX_MESSAGE_BYTES - 5;
+        let mut exact_message = vec![0xdb];
+        exact_message.extend_from_slice(&(payload_length as u32).to_be_bytes());
+        exact_message.extend(vec![b'a'; payload_length]);
+        assert_eq!(
+            decode(&mut Cursor::new(exact_message))
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .len(),
+            payload_length
+        );
+        let oversized_length = payload_length + 1;
+        let mut oversized_message = vec![0xdb];
+        oversized_message.extend_from_slice(&(oversized_length as u32).to_be_bytes());
+        assert!(decode(&mut Cursor::new(oversized_message)).is_err());
+
+        let mut exact_depth = vec![0x91; MAX_DEPTH];
+        exact_depth.push(0xc0);
+        assert!(decode(&mut Cursor::new(exact_depth)).is_ok());
+        let mut excessive_depth = vec![0x91; MAX_DEPTH + 1];
+        excessive_depth.push(0xc0);
+        assert!(
+            decode(&mut Cursor::new(excessive_depth))
+                .unwrap_err()
+                .contains("nesting")
+        );
+
+        let mut exact_container = vec![0xdd];
+        exact_container.extend_from_slice(&(MAX_CONTAINER_ITEMS as u32).to_be_bytes());
+        exact_container.extend(vec![0xc0; MAX_CONTAINER_ITEMS]);
+        assert_eq!(
+            decode(&mut Cursor::new(exact_container))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_CONTAINER_ITEMS
+        );
+        let mut excessive_container = vec![0xdd];
+        excessive_container.extend_from_slice(&((MAX_CONTAINER_ITEMS + 1) as u32).to_be_bytes());
+        assert!(
+            decode(&mut Cursor::new(excessive_container))
+                .unwrap_err()
+                .contains("container")
+        );
+
+        let mut excessive_nodes = vec![0xdf];
+        excessive_nodes.extend_from_slice(&(MAX_CONTAINER_ITEMS as u32).to_be_bytes());
+        excessive_nodes.push(0xc0);
+        excessive_nodes.push(0xdd);
+        excessive_nodes.extend_from_slice(&(100_000_u32).to_be_bytes());
+        excessive_nodes.extend(vec![0xc0; 100_000]);
+        excessive_nodes.extend(vec![0xc0; (MAX_CONTAINER_ITEMS - 1) * 2]);
+        assert!(
+            decode(&mut Cursor::new(excessive_nodes))
+                .unwrap_err()
+                .contains("node bound")
+        );
+    }
+
     #[test]
     fn rejects_reserved_truncated_deep_and_oversized_values() {
         assert!(
