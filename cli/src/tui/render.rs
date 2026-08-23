@@ -440,7 +440,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                     "Sends selected statement/current source/bounded test output/transcript/question to Pi's selected provider.",
                 ));
                 lines.push(Line::from(
-                    "Reads Pi settings/models/auth and allowlisted provider credential environment.",
+                    "Reads Pi settings/models/auth and allowlisted provider credential environment; auth !command entries execute.",
                 ));
                 lines.push(Line::from(
                     "Disables sessions, tools/bash, extensions, skills, templates, themes,",
@@ -468,6 +468,9 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                         lines.push(Line::from(
                         "Pi may read its settings, models, auth file, and allowlisted provider auth environment.",
                     ));
+                        lines.push(Line::from(
+                            "Leading !command credentials in auth.json execute via Pi's shell.",
+                        ));
                         lines.push(Line::from(
                         "Sessions, tools/bash, extensions, skills, templates, themes, context files,",
                     ));
@@ -1146,6 +1149,7 @@ mod tests {
         assert!(disclosure.contains("Privacy disclosure"));
         assert!(disclosure.contains("selected provider"));
         assert!(disclosure.contains("settings"));
+        assert!(disclosure.contains("!command"));
         assert!(disclosure.contains("tools/bash"));
         assert!(disclosure.contains("provenance"));
         let compact_disclosure = rendered(&state, 80, 24);
