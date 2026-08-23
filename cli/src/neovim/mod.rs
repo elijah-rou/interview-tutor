@@ -1446,6 +1446,55 @@ mod tests {
     }
 
     #[test]
+    fn queued_tutor_back_and_edit_are_serialized_before_a_fresh_source_barrier() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://back-barrier.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        wait_until_started(&worker, deadline);
+
+        worker.input("iZ<Esc><Space>b".into()).unwrap();
+        worker.input("A!<Esc>".into()).unwrap();
+        worker.barrier(43).unwrap();
+
+        let mut back = None;
+        let mut barrier = None;
+        while back.is_none() || barrier.is_none() {
+            for event in worker.poll().events {
+                match event {
+                    WorkerEvent::Source(SourceEvent::Action(update)) => {
+                        assert_eq!(update.action, TutorAction::Back);
+                        back = Some(update);
+                    }
+                    WorkerEvent::Source(SourceEvent::Barrier(update)) => barrier = Some(update),
+                    WorkerEvent::Failed(error) => panic!("queued TutorBack failed: {error}"),
+                    WorkerEvent::Document(_)
+                    | WorkerEvent::Started(_)
+                    | WorkerEvent::Warning(_) => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "queued TutorBack timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let back = back.unwrap();
+        assert_eq!(back.document.text, "Zx\n");
+        let barrier = barrier.unwrap();
+        assert_eq!(barrier.id, 43);
+        assert_eq!(barrier.document.text, "Zx!\n");
+        assert!(barrier.document.changedtick > back.document.changedtick);
+        worker.shutdown();
+    }
+
+    #[test]
     fn over_four_mib_native_read_restarts_without_decoding_or_host_mutation() {
         let executable = resolve_executable(None).unwrap();
         let worker = Worker::start(executable);
