@@ -12,10 +12,12 @@ pub fn routes_to_neovim(key: KeyEvent, state: &AppState) -> bool {
     if state.screen != Screen::Solve
         || solve.pane != crate::app::model::SolvePane::Editor
         || solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed
+        || state.show_help
     {
         return false;
     }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if matches!(key.code, KeyCode::Char('c' | 'q')) && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
         return false;
     }
     if matches!(key.code, KeyCode::F(5 | 9))
@@ -38,6 +40,18 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     let pane = solve.pane;
     let editor_failed = solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed;
 
+    if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        state.leader_pending = false;
+        return Some(Action::Quit);
+    }
+    if state.show_help {
+        state.leader_pending = false;
+        return match key.code {
+            KeyCode::Esc => Some(Action::Back),
+            KeyCode::Char('?') => Some(Action::Help),
+            _ => None,
+        };
+    }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         state.leader_pending = false;
         return Some(Action::Cancel);
@@ -88,6 +102,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             KeyCode::Char('b') => Some(Action::Back),
             KeyCode::Char('c') => Some(Action::ToggleCollapse),
             KeyCode::Char('h') => Some(Action::Hint),
+            KeyCode::Char('?') => Some(Action::Help),
             KeyCode::Char('r') if pane == crate::app::model::SolvePane::Interview => {
                 Some(Action::ResetInterview)
             }
@@ -457,6 +472,73 @@ mod tests {
                 &mut state
             ),
             Some(Action::Editor(EditorAction::Insert(' ')))
+        );
+    }
+
+    #[test]
+    fn global_solve_quit_reaches_every_pane_and_editor_mode() {
+        let mut state = solve_state();
+        let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        for pane in [
+            SolvePane::Editor,
+            SolvePane::Problem,
+            SolvePane::Output,
+            SolvePane::Interview,
+        ] {
+            state.solve.as_mut().unwrap().pane = pane;
+            for mode in ["n", "i", "v", "c"] {
+                state
+                    .solve
+                    .as_mut()
+                    .unwrap()
+                    .editor
+                    .update_neovim_mode(mode);
+                assert!(!routes_to_neovim(quit, &state), "pane {pane:?} mode {mode}");
+                assert_eq!(
+                    action_for_key(quit, &mut state),
+                    Some(Action::Quit),
+                    "pane {pane:?} mode {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn solve_help_uses_accessory_leader_and_modal_keys_precede_solve_routing() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::Help)
+        );
+
+        state.show_help = true;
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        assert!(!routes_to_neovim(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &state
+        ));
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state),
+            Some(Action::Back)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &mut state
+            ),
+            None,
+            "ordinary solve commands must not pass through the help modal"
         );
     }
 

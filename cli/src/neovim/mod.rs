@@ -27,6 +27,7 @@ pub enum TutorAction {
     Collapse,
     Quit,
     Hint,
+    Help,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -648,6 +649,7 @@ fn parse_action(action: &str) -> Result<TutorAction, String> {
         "collapse" => Ok(TutorAction::Collapse),
         "quit" => Ok(TutorAction::Quit),
         "hint" => Ok(TutorAction::Hint),
+        "help" => Ok(TutorAction::Help),
         _ => Err("Neovim emitted an unknown Tutor action".into()),
     }
 }

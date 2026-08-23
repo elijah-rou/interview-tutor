@@ -54,7 +54,7 @@ Browse a set, inspect progress, open a problem, then solve it in the TUI:
 ./interview --set blind75 --language python --no-codex
 ```
 
-In `./interview`, choose a set and problem with `j`/`k` and Enter, then press Enter from problem detail to open the planned source in required clean embedded Neovim. `Space t` atomically saves and tests without recording progress; `Space s` saves, tests, and records exactly one attempt after execution terminates. `Space b` atomically autosaves a dirty draft without testing or recording and returns to the selected set's problem list. `Space c` toggles the focused Problem, Output, or Interview accessory. F5/F9 remain test/submit compatibility aliases. See [the TUI guide](docs/interview-tui.md) for the full Neovim surface, integration commands, responsive layouts, stale/error states, and guarded exit behavior.
+In `./interview`, choose a set and problem with `j`/`k` and Enter, then press Enter from problem detail to open the planned source in required clean embedded Neovim. `Space t` atomically saves and tests without recording progress; `Space s` saves, tests, and records exactly one attempt after execution terminates. `Space b` or `:TutorBack` atomically autosaves a dirty draft without testing or recording and returns to the selected set's problem list. `Space c` toggles the focused Problem, Output, or Interview accessory, `Space ?` opens Solve help, and Ctrl-Q provides a guarded quit from every solve context. F5/F9 remain test/submit compatibility aliases. See [the TUI guide](docs/interview-tui.md) for the full Neovim surface, integration commands, responsive layouts, stale/error states, and guarded exit behavior.
 
 Run a problem directly by global slug, or by set plus slug/1-based index:
 

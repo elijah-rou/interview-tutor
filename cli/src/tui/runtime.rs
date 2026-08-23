@@ -1278,6 +1278,38 @@ fn action_requires_neovim_barrier(state: &AppState, action: &crate::app::Action)
         )
 }
 
+fn resolve_tutor_action(
+    update: crate::neovim::ActionUpdate,
+    coalesced_document: &mut Option<crate::neovim::DocumentUpdate>,
+) -> (crate::neovim::DocumentUpdate, crate::app::Action) {
+    let crate::neovim::ActionUpdate { action, document } = update;
+    let app_action = match action {
+        crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
+        crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
+        crate::neovim::TutorAction::Back => crate::app::Action::Back,
+        crate::neovim::TutorAction::Collapse => crate::app::Action::EditorCollapse,
+        crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
+        crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
+        crate::neovim::TutorAction::Help => crate::app::Action::Help,
+    };
+    if action != crate::neovim::TutorAction::Back {
+        return (document, app_action);
+    }
+    if let Some(newest) = coalesced_document.as_ref() {
+        assert!(
+            newest.changedtick >= document.changedtick,
+            "coalesced Neovim document precedes its source action"
+        );
+        return (
+            coalesced_document
+                .take()
+                .expect("coalesced Neovim document exists"),
+            app_action,
+        );
+    }
+    (document, app_action)
+}
+
 fn matching_save_acknowledgement(state: &AppState, event: &Event) -> Option<(u64, String)> {
     let Event::RunFinished(operation, revision, intent, Some(source), _) = event else {
         return None;
@@ -1436,6 +1468,7 @@ pub fn run(
                 );
                 needs_draw = true;
             }
+            let mut coalesced_document = neovim_poll.document;
             for worker_event in neovim_poll.events {
                 match worker_event {
                     crate::neovim::WorkerEvent::Started(started) => {
@@ -1503,23 +1536,15 @@ pub fn run(
                             );
                         }
                         crate::neovim::SourceEvent::Action(action_update) => {
+                            let (document, action) =
+                                resolve_tutor_action(action_update, &mut coalesced_document);
                             apply_event(
                                 &mut state,
                                 &repository,
                                 &root,
                                 &mut workers,
-                                Event::NeovimDocument(action_update.document),
+                                Event::NeovimDocument(document),
                             );
-                            let action = match action_update.action {
-                                crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
-                                crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
-                                crate::neovim::TutorAction::Back => crate::app::Action::Back,
-                                crate::neovim::TutorAction::Collapse => {
-                                    crate::app::Action::ToggleCollapse
-                                }
-                                crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
-                                crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
-                            };
                             apply_event(
                                 &mut state,
                                 &repository,
@@ -1539,7 +1564,7 @@ pub fn run(
             {
                 return Err("Neovim source barrier timed out".into());
             }
-            if let Some(document) = neovim_poll.document {
+            if let Some(document) = coalesced_document {
                 apply_event(
                     &mut state,
                     &repository,
@@ -1775,6 +1800,106 @@ mod tests {
             &state,
             &crate::app::Action::SaveTest
         ));
+    }
+
+    #[test]
+    fn tutor_back_uses_newest_coalesced_document_without_changing_run_key_moments() {
+        use crate::neovim::{ActionUpdate, DocumentUpdate, TutorAction};
+
+        let mut back_state = codex_solve_state();
+        let mut coalesced = Some(DocumentUpdate {
+            text: "newest accepted bytes".into(),
+            mode: "n".into(),
+            changedtick: 3,
+        });
+        let (document, action) = resolve_tutor_action(
+            ActionUpdate {
+                action: TutorAction::Back,
+                document: DocumentUpdate {
+                    text: "bytes at back notification".into(),
+                    mode: "n".into(),
+                    changedtick: 2,
+                },
+            },
+            &mut coalesced,
+        );
+        reduce(&mut back_state, Event::NeovimDocument(document));
+        let effects = reduce(&mut back_state, Event::Command(action));
+        assert!(coalesced.is_none());
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Effect::SaveDraft { source, .. },
+                Effect::LeaveSolve
+            ] if source == "newest accepted bytes"
+        ));
+
+        for (tutor_action, expected_action, expected_intent) in [
+            (
+                TutorAction::Test,
+                crate::app::Action::SaveTest,
+                RunIntent::Test,
+            ),
+            (
+                TutorAction::Submit,
+                crate::app::Action::Submit,
+                RunIntent::Submit,
+            ),
+        ] {
+            let mut state = codex_solve_state();
+            let mut coalesced = Some(DocumentUpdate {
+                text: "bytes accepted after key moment".into(),
+                mode: "n".into(),
+                changedtick: 3,
+            });
+            let (document, action) = resolve_tutor_action(
+                ActionUpdate {
+                    action: tutor_action,
+                    document: DocumentUpdate {
+                        text: "exact bytes at key moment".into(),
+                        mode: "n".into(),
+                        changedtick: 2,
+                    },
+                },
+                &mut coalesced,
+            );
+            assert_eq!(action, expected_action);
+            reduce(&mut state, Event::NeovimDocument(document));
+            let effects = reduce(&mut state, Event::Command(action));
+            assert!(coalesced.is_some());
+            assert!(matches!(
+                effects.as_slice(),
+                [Effect::SaveRun {
+                    source,
+                    intent,
+                    ..
+                }] if source == "exact bytes at key moment" && *intent == expected_intent
+            ));
+        }
+    }
+
+    #[test]
+    fn tutor_collapse_and_help_keep_their_editor_origin() {
+        use crate::neovim::{ActionUpdate, DocumentUpdate, TutorAction};
+
+        for (tutor_action, expected) in [
+            (TutorAction::Collapse, crate::app::Action::EditorCollapse),
+            (TutorAction::Help, crate::app::Action::Help),
+        ] {
+            let mut coalesced = None;
+            let (_, action) = resolve_tutor_action(
+                ActionUpdate {
+                    action: tutor_action,
+                    document: DocumentUpdate {
+                        text: "source".into(),
+                        mode: "n".into(),
+                        changedtick: 2,
+                    },
+                },
+                &mut coalesced,
+            );
+            assert_eq!(action, expected);
+        }
     }
 
     #[test]

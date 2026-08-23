@@ -63,7 +63,7 @@
 1. Add independent Problem/Output/Interview expanded state. Tab always visits all panes. Collapsing Interview closes its composer but preserves transcript and active operation. Interview focus expands Interview. Updates never auto-expand panes.
 2. Implement leader precedence: Ctrl-C; F aliases; Tab; composer; eligible leader; disclosure; accessory navigation; Vim. Leader is eligible only in editor Normal mode or accessory panes. Unknown second keys clear leader and continue normal routing.
 3. Add `Effect::SaveDraft` and `Event::DraftSaved`. Dirty Back must first stop/join any runner (`LeaveSolve`), then atomically save the newest source without execution/attempt recording. On matching success, reset interviewer, reload the scoped list, and enter `ProblemList`. On failure/newer edits, remain in Solve with the buffer dirty and a precise retry message.
-4. Clean Back returns directly to `ProblemList`. `Space-b` works from every pane. `:back` maps to the same behavior. Dirty process quit remains separately guarded.
+4. Clean Back returns directly to `ProblemList`. `Space-b` works from every pane. `:TutorBack` maps to the same behavior because native lowercase `:back` cannot be safely overridden. Dirty process quit remains separately guarded.
 5. Full layout starts at 100×30. Collapsed side panes render narrow titled rails; collapsed Output renders a three-row rail. Expanded panes redistribute freed area to Editor. Compact layouts keep collapse-marked tabs and render Editor as fallback when a collapsed accessory is focused. Resize preserves all state.
 6. Replace F-key-centric footer/help text with width-bounded Space leader guidance while retaining F5/F9 aliases in detailed help.
 

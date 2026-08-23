@@ -164,10 +164,10 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     state.error = None;
     solve.editor.error = None;
 
-    if action == Action::Quit && solve.editor.mode == Mode::Normal && solve.editor.dirty() {
+    if action == Action::Quit && solve.editor.dirty() {
         if solve.discard_confirmation != Some(DiscardAction::Quit) {
             solve.discard_confirmation = Some(DiscardAction::Quit);
-            state.status = "Unsaved changes · Space-q again to quit".into();
+            state.status = "Unsaved changes · Ctrl-Q again to quit".into();
             state.error = Some("unsaved changes; repeat quit to discard".into());
             return Vec::new();
         }
@@ -199,6 +199,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::InterviewDisclosure(accepted) if state.codex.status == CodexStatus::Disclosure => {
             if accepted {
+                solve.accessory_panes.interview_expanded = true;
                 state.codex.disclosure_accepted = true;
                 state.codex.composer_focused = true;
                 start_codex_connect(state)
@@ -392,6 +393,10 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 Effect::LeaveSolve,
             ]
         }
+        Action::EditorCollapse => {
+            state.status = "Editor cannot be collapsed".into();
+            Vec::new()
+        }
         Action::ToggleCollapse => {
             match solve.pane {
                 SolvePane::Editor => {
@@ -534,9 +539,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Quit
-            if solve.editor.mode == Mode::Normal
-                && (!solve.editor.dirty()
-                    || solve.discard_confirmation == Some(DiscardAction::Quit)) =>
+            if !solve.editor.dirty() || solve.discard_confirmation == Some(DiscardAction::Quit) =>
         {
             state.codex.clear_session();
             state.quit = true;
@@ -572,6 +575,30 @@ fn start_pending_test(state: &mut AppState) -> Vec<Effect> {
 }
 
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
+    if state.show_help {
+        match &event {
+            Event::Command(Action::Quit) if state.screen == Screen::Solve => {
+                state.show_help = false;
+                return solve_command(state, Action::Quit);
+            }
+            Event::Command(Action::Quit) => {
+                state.codex.clear_session();
+                state.quit = true;
+                return vec![Effect::ResetCodex];
+            }
+            Event::Command(Action::Back | Action::Help) => {
+                state.show_help = false;
+                return Vec::new();
+            }
+            Event::Command(_) => return Vec::new(),
+            _ => {}
+        }
+    }
+    if matches!(&event, Event::Command(Action::Help)) {
+        state.show_help = true;
+        state.leader_pending = false;
+        return Vec::new();
+    }
     if state.screen == Screen::Solve {
         match event {
             Event::Command(action) => return solve_command(state, action),
@@ -915,19 +942,6 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             Event::SolveOpened(_, _) | Event::OpenSet(_) => return Vec::new(),
         }
     }
-    if state.show_help {
-        match event {
-            Event::Command(Action::Quit) => {
-                state.codex.clear_session();
-                state.quit = true;
-                return vec![Effect::ResetCodex];
-            }
-            Event::Command(Action::Back | Action::Help) => state.show_help = false,
-            _ => {}
-        }
-        return Vec::new();
-    }
-
     match event {
         Event::Command(Action::Up) if state.focus == Focus::Progress => {
             state.progress_scroll = state.progress_scroll.saturating_sub(1);
@@ -1097,6 +1111,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             | Action::Hint
             | Action::ResetInterview
             | Action::ToggleCollapse
+            | Action::EditorCollapse
             | Action::Editor(_),
         ) => {}
         Event::SolveOpened(operation, result) => {
@@ -1376,6 +1391,99 @@ mod tests {
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
         reduce(&mut state, Event::Command(Action::ToggleCollapse));
         assert_eq!(state.status, "Editor cannot be collapsed");
+    }
+
+    #[test]
+    fn disclosure_acceptance_expands_a_collapsed_interview_before_focusing_composer() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .interview_expanded = false;
+        state.codex.status = CodexStatus::Disclosure;
+
+        let effects = reduce(
+            &mut state,
+            Event::Command(Action::InterviewDisclosure(true)),
+        );
+
+        assert!(
+            state
+                .solve
+                .as_ref()
+                .unwrap()
+                .accessory_panes
+                .interview_expanded
+        );
+        assert!(state.codex.composer_focused);
+        assert!(matches!(effects.as_slice(), [Effect::ConnectCodex { .. }]));
+    }
+
+    #[test]
+    fn delayed_editor_collapse_never_toggles_the_pane_that_gained_focus() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        let before = state.solve.as_ref().unwrap().accessory_panes;
+
+        reduce(&mut state, Event::Command(Action::EditorCollapse));
+
+        assert_eq!(state.solve.as_ref().unwrap().accessory_panes, before);
+        assert_eq!(state.status, "Editor cannot be collapsed");
+    }
+
+    #[test]
+    fn solve_help_is_modal_before_ordinary_commands() {
+        let mut state = solve_state();
+        reduce(&mut state, Event::Command(Action::Help));
+        assert!(state.show_help);
+
+        let effects = reduce(&mut state, Event::Command(Action::SaveTest));
+        assert!(effects.is_empty());
+        assert!(state.solve.as_ref().unwrap().running.is_none());
+        assert!(state.show_help);
+
+        reduce(
+            &mut state,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "edit accepted behind help".into(),
+                mode: "n".into(),
+                changedtick: 2,
+            }),
+        );
+        assert_eq!(
+            state.solve.as_ref().unwrap().editor.text(),
+            "edit accepted behind help"
+        );
+        assert!(state.show_help);
+
+        reduce(&mut state, Event::Command(Action::Back));
+        assert!(!state.show_help);
+        assert_eq!(state.screen, Screen::Solve);
+    }
+
+    #[test]
+    fn dirty_quit_is_guarded_in_non_normal_editor_modes() {
+        let mut state = solve_state();
+        reduce(
+            &mut state,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "dirty source".into(),
+                mode: "i".into(),
+                changedtick: 2,
+            }),
+        );
+
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(!state.quit);
+        assert_eq!(
+            state.solve.as_ref().unwrap().discard_confirmation,
+            Some(DiscardAction::Quit)
+        );
+        reduce(&mut state, Event::Command(Action::Quit));
+        assert!(state.quit);
     }
 
     #[test]

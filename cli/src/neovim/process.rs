@@ -507,7 +507,8 @@ vim.api.nvim_buf_create_user_command(buf, "TutorBack", function() tutor("back") 
 vim.api.nvim_buf_create_user_command(buf, "TutorCollapse", function() tutor("collapse") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorQuit", function() tutor("quit") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorHint", function() tutor("hint") end, {})
-for lhs, action in pairs({ ["<Space>t"] = "test", ["<Space>s"] = "submit", ["<Space>b"] = "back", ["<Space>c"] = "collapse", ["<Space>q"] = "quit", ["<Space>h"] = "hint" }) do
+vim.api.nvim_buf_create_user_command(buf, "TutorHelp", function() tutor("help") end, {})
+for lhs, action in pairs({ ["<Space>t"] = "test", ["<Space>s"] = "submit", ["<Space>b"] = "back", ["<Space>c"] = "collapse", ["<Space>q"] = "quit", ["<Space>h"] = "hint", ["<Space>?"] = "help" }) do
   vim.keymap.set("n", lhs, function() tutor(action) end, { buffer = buf, silent = true, nowait = true })
 end
 for _, mode in ipairs({ "n", "i", "x" }) do
@@ -2163,6 +2164,7 @@ end, { buffer = buf, expr = true })
             "TutorCollapse",
             "TutorQuit",
             "TutorHint",
+            "TutorHelp",
         ] {
             process.feed_key(&format!(":{command}<CR>")).unwrap();
         }
@@ -2176,7 +2178,7 @@ end, { buffer = buf, expr = true })
                     .iter()
                     .filter(|event| matches!(event, OriginEvent::Action { .. }))
                     .count();
-                (action_count == 6).then(|| {
+                (action_count == 7).then(|| {
                     std::mem::take(&mut reader.origin_events)
                         .into_iter()
                         .filter_map(|event| match event {
@@ -2200,7 +2202,7 @@ end, { buffer = buf, expr = true })
         }
         assert_eq!(
             actions,
-            ["test", "submit", "back", "collapse", "quit", "hint"]
+            ["test", "submit", "back", "collapse", "quit", "hint", "help"]
         );
 
         process.feed_key(":enew<CR>iALTERNATE<Esc>").unwrap();

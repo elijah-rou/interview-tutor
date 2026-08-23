@@ -121,6 +121,7 @@ pub enum Action {
     Hint,
     ResetInterview,
     ToggleCollapse,
+    EditorCollapse,
     Editor(EditorAction),
 }
 

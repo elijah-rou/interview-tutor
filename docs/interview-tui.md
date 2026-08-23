@@ -31,10 +31,12 @@ Global solve actions are:
 - `Space b`: leave solve from Editor Normal mode or any accessory pane
 - `Space c`: collapse or expand the focused accessory; Editor reports that it cannot collapse
 - `Space q`: quit from Editor Normal mode
+- `Space ?`: open Solve help from Editor Normal mode or any accessory; Esc or `?` dismisses it
+- Ctrl-Q: quit from every pane and Neovim mode, including the undersized resize screen
 
-F5 and F9 remain compatibility aliases for test and submit. In accessories, the Space leader precedes disclosure and scrolling; the active Interview composer instead receives typed spaces. Unknown leader keys clear the leader and continue normal accessory routing.
+F5 and F9 remain compatibility aliases for test and submit. In accessories, the Space leader precedes disclosure and scrolling; the active Interview composer instead receives typed spaces. Unknown leader keys clear the leader and continue normal accessory routing. Solve help is modal, so dismissal keys are handled before ordinary solve input.
 
-Back atomically autosaves a dirty draft without running tests or recording an attempt, then opens the selected set's problem list directly. It first cancels and joins an active local runner. Save failure or an edit newer than the captured save keeps Solve open and dirty for retry. Clean Back opens the problem list without a save. Application quit remains separately guarded when dirty: repeat `Space q` to discard and quit. Esc never discards solve changes. `:TutorBack` uses the same Back behavior; native `:q` applies Neovim's own buffer/window rules and does not replace application navigation.
+Back atomically autosaves a dirty draft without running tests or recording an attempt, then opens the selected set's problem list directly. It first cancels and joins an active local runner. Save failure or an edit newer than the captured save keeps Solve open and dirty for retry. Clean Back opens the problem list without a save. Application quit remains separately guarded when dirty: repeat either `Space q` or Ctrl-Q to discard and quit. Esc never discards solve changes. `:TutorBack` uses the same Back behavior; native lowercase `:back` is not overridden, and native `:q` applies Neovim's own buffer/window rules rather than application navigation.
 
 ## Embedded Neovim
 
@@ -42,7 +44,7 @@ Solve requires a compatible trusted Neovim (`>=0.9`, `<2.0`) and starts it with 
 
 Select the executable with `--neovim PATH`, then `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`; otherwise `nvim` is resolved on `PATH`. The canonical target must be a regular executable owned by the effective user or root and not group/world writable. Missing, incompatible, or failed Neovim is an explicit solve error; there is no manual-editor fallback.
 
-The actual solution path is never given to Neovim. Source is loaded over RPC into a synthetic `acwrite` scratch buffer with swap, persistent undo files, modelines, automatic writes, and clipboard-provider integration disabled. `:TutorTest`, `:TutorSubmit`, `:TutorBack`, and `:TutorCollapse` expose application actions; Normal-mode `Space t/s/b/c`, guarded `Space q`, hints, and F5/F9 are reserved integration mappings. Interview Tutor remains authoritative for exact bytes, revision identity, atomic saving, tests, and submissions.
+The actual solution path is never given to Neovim. Source is loaded over RPC into a synthetic `acwrite` scratch buffer with swap, persistent undo files, modelines, automatic writes, and clipboard-provider integration disabled. `:TutorTest`, `:TutorSubmit`, `:TutorBack`, `:TutorCollapse`, and `:TutorHelp` expose application actions; Normal-mode `Space t/s/b/c/?`, guarded `Space q`, hints, and F5/F9 are reserved integration mappings. Interview Tutor remains authoritative for exact bytes, revision identity, atomic saving, tests, and submissions.
 
 The host accepts at most 1 MiB and 100,000 logical lines. If a native Neovim operation transiently exceeds that bound, Interview Tutor rejects the candidate and restarts Neovim from the last valid exact source. Application bytes and revision remain unchanged; Neovim-local undo/register/repeat state may reset only on that overflow recovery path. RPC values, nesting, nodes, grids, highlights, queues, stderr, process memory, calls, and teardown are bounded.
 
@@ -60,7 +62,7 @@ Output is bounded and sanitized. `STALE` appears only when displayed output belo
 
 - At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become narrow titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space.
 - At 80x24: one selected pane appears behind collapse-marked tabs. A collapsed accessory keeps focus on its tab while Editor renders as the content fallback.
-- Below 60x20: only a resize panel appears. It still reports the guarded `Space q` behavior and any active error.
+- Below 60x20: only a resize panel appears. Ctrl-Q remains available from every focused pane and Neovim mode; dirty source requires a second Ctrl-Q confirmation.
 
 Resizing preserves the editor buffer, cursor state, operations, focused pane, each independent collapse state, and displayed status.
 

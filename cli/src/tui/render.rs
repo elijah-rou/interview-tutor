@@ -135,8 +135,8 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
         && state.codex.status == crate::app::model::CodexStatus::Disclosure
     {
         vec![
-            "y/Enter accept · n/Esc decline · Space t/s/b/c".to_string(),
-            "y accept · n decline · Space actions".to_string(),
+            "y/Enter accept · n/Esc decline · Space t/s/b/c/?".to_string(),
+            "y accept · n decline · Space actions/?".to_string(),
             "y accept · n decline".to_string(),
         ]
     } else if solve.pane == SolvePane::Interview && state.codex.composer_focused {
@@ -147,20 +147,20 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
     } else {
         match (solve.pane, solve.editor.mode) {
             (SolvePane::Editor, Mode::Normal) => vec![
-                "Space t test · s submit · b back · Tab panes".to_string(),
-                "Space t/s/b · Tab panes".to_string(),
+                "Space t test · s submit · b back · ? help · Tab panes".to_string(),
+                "Space t/s/b/? · Tab panes".to_string(),
             ],
             (SolvePane::Editor, Mode::Insert) => vec![
-                "Esc returns to Normal for Space actions · Tab panes".to_string(),
-                "Esc normal · Tab panes".to_string(),
+                "Esc returns to Normal for Space actions · Ctrl-Q quit · Tab panes".to_string(),
+                "Esc normal · Ctrl-Q quit · Tab panes".to_string(),
             ],
             (SolvePane::Editor, Mode::Visual) => vec![
-                "Neovim Visual · Esc then Space actions · Tab panes".to_string(),
-                "Visual · Esc normal · Tab panes".to_string(),
+                "Neovim Visual · Esc then Space actions · Ctrl-Q quit · Tab panes".to_string(),
+                "Visual · Esc normal · Ctrl-Q quit · Tab panes".to_string(),
             ],
             (SolvePane::Editor, Mode::Command) => vec![
-                "Neovim command · Esc then Space actions · Tab panes".to_string(),
-                "Command · Esc normal · Tab panes".to_string(),
+                "Neovim command · Esc then Space actions · Ctrl-Q quit · Tab panes".to_string(),
+                "Command · Esc normal · Ctrl-Q quit · Tab panes".to_string(),
             ],
             (SolvePane::Interview, _)
                 if matches!(
@@ -171,22 +171,22 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             {
                 vec![
                     format!(
-                        "i retry · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                        "i retry · Space t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
                     ),
-                    format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+                    format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
                 ]
             }
             (SolvePane::Interview, _) => vec![
                 format!(
-                    "i ask · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                    "i ask · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
                 ),
-                format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+                format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
             ],
             (SolvePane::Problem | SolvePane::Output, _) => vec![
                 format!(
-                    "i interview · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · Tab panes"
+                    "i interview · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
                 ),
-                format!("Space t/s/b · c {collapse_verb} · Tab panes"),
+                format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
             ],
         }
     };
@@ -208,7 +208,7 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
         with_cancel.append(&mut candidates);
         candidates = with_cancel;
     }
-    candidates.push("Space actions · Tab panes".into());
+    candidates.push("Space actions/? · Tab panes".into());
     candidates.push("Tab panes".into());
     first_fitting_footer(candidates, width)
 }
@@ -689,7 +689,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let undersized = area.width < 60 || area.height < 20;
     if undersized {
         let quit_key = if state.screen == Screen::Solve {
-            "Space-q"
+            "Ctrl-Q"
         } else {
             "q"
         };
@@ -768,7 +768,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         frame.render_widget(Clear, popup);
         let help = if state.screen == Screen::Solve {
             format!(
-                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane\nEditor cannot collapse; Tab/Shift-Tab visits collapsed rails\nProblem/Output/Interview: i expands and focuses Interview\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
+                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab visits collapsed rails\nProblem/Output/Interview: i expands and focuses Interview\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
@@ -1046,6 +1046,33 @@ mod tests {
             submitted_source: None,
         });
         state
+    }
+
+    #[test]
+    fn undersized_solve_instructs_the_global_guarded_quit_binding() {
+        let mut state = solve_state();
+        for pane in [
+            SolvePane::Editor,
+            SolvePane::Problem,
+            SolvePane::Output,
+            SolvePane::Interview,
+        ] {
+            state.solve.as_mut().unwrap().pane = pane;
+            for mode in ["n", "i", "v", "c"] {
+                state
+                    .solve
+                    .as_mut()
+                    .unwrap()
+                    .editor
+                    .update_neovim_mode(mode);
+                let view = rendered(&state, 59, 19);
+                assert!(
+                    view.contains("Press Ctrl-Q to quit"),
+                    "pane {pane:?} mode {mode}"
+                );
+                assert!(view.contains("press twice to confirm"));
+            }
+        }
     }
 
     #[test]

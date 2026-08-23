@@ -23,6 +23,7 @@ F5 = b"\x1b[15~"
 F9 = b"\x1b[20~"
 SHIFT_TAB = b"\x1b[Z"
 CTRL_C = b"\x03"
+CTRL_Q = b"\x11"
 CTRL_R = b"\x12"
 CTRL_S = b"\x13"
 CTRL_V = b"\x16"
@@ -529,6 +530,16 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         open_solve(session)
         session.wait_screen("print('initial')")
 
+        session.send(b" ?")
+        session.wait_screen("Keyboard help")
+        session.send(b"j")
+        session.wait_screen("Keyboard help")
+        session.send(ESCAPE)
+        session.wait_predicate(
+            "Neovim Solve help dismissal",
+            lambda: "Keyboard help" not in session.screen.text(),
+        )
+
         session.send(b"0v2ld")
         session.wait_screen("nt('initial')")
         session.send(b"u")
@@ -627,6 +638,13 @@ def compact_case(fixture: MatrixFixture) -> str:
 
         session.send(b"\t")
         session.wait_screen("Problem / Examples [active]")
+        session.send(b" ?")
+        session.wait_screen("Keyboard help")
+        session.send(ESCAPE)
+        session.wait_predicate(
+            "accessory Solve help dismissal",
+            lambda: "Keyboard help" not in session.screen.text(),
+        )
         session.send(b"j" * 45)
         session.wait_screen("DETAIL-END-SENTINEL")
         session.send(b"\t")
@@ -635,7 +653,11 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.wait_screen("Interview [active]")
         session.send(b"i")
         session.wait_screen("Privacy disclosure")
-        accept_disclosure(session)
+        session.send(b" c")
+        session.wait_screen("Interview [+]")
+        session.send(b"y")
+        session.wait_screen("Codex: ready")
+        session.wait_screen("Interview [active] [-]")
         for index in range(6):
             if index > 0:
                 session.send(b"i")
@@ -697,7 +719,9 @@ def autosave_back_case(fixture: MatrixFixture) -> str:
         session.wait_predicate("active test runner", pid_file.exists)
         session.send(b"iACTIVE-DRAFT-" + ESCAPE)
         session.wait_screen("ACTIVE-DRAFT-")
-        session.send(b":TutorBack" + ENTER)
+        session.send(b":TutorBack")
+        session.wait_screen(":TutorBack")
+        session.send(ENTER)
         session.wait_screen("Problems [active]")
         assert fixture.solution.read_text(encoding="utf-8").startswith(
             "ACTIVE-DRAFT-"
@@ -781,6 +805,7 @@ def resize_case(fixture: MatrixFixture) -> str:
         session.resize(59, 19)
         session.wait_screen("Terminal too small")
         session.wait_screen("Resize to at least 60 × 20")
+        session.wait_screen("Press Ctrl-Q to quit")
         session.wait_screen("Dirty editor: press twice to confirm")
         assert session.process.poll() is None
         session.resize(80, 24)
@@ -797,9 +822,16 @@ def resize_case(fixture: MatrixFixture) -> str:
         session.wait_screen("RESIZE-界")
         session.send(b"\t")
         session.wait_screen("Editor · Neovim [active]")
-        quit_from_editor(session, dirty=True)
+        session.send(b"i")
+        session.resize(59, 19)
+        session.wait_screen("Press Ctrl-Q to quit")
+        session.send(CTRL_Q)
+        session.settle()
+        assert session.process.poll() is None
+        session.send(CTRL_Q)
+        session.wait_exit(0)
     assert not (home / "fake-version-probe").exists()
-    return "collapse_masks=8 sizes=120x40,100x30,59x19,80x24 state+focus=preserved"
+    return "collapse_masks=8 sizes=120x40,100x30,59x19,80x24 state+focus=preserved insert-Ctrl-Q=guarded"
 
 
 def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
