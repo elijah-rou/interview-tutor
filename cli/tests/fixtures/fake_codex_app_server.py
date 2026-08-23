@@ -362,3 +362,6 @@ for raw in sys.stdin:
         )
         continue
     print(json.dumps({"id": request_id, "result": result}), flush=True)
+    if mode == "no-read-after-thread-starts" and method == "thread/start" and thread_number == 2:
+        record({"kind": "stdin-blocked"})
+        time.sleep(30)

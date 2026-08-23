@@ -112,7 +112,8 @@ impl CodexProcess {
                     ));
                 }
             };
-        if let Err(primary) = set_nonblocking(output.as_raw_fd(), "Codex stdout")
+        if let Err(primary) = set_nonblocking(input.as_raw_fd(), "Codex stdin")
+            .and_then(|()| set_nonblocking(output.as_raw_fd(), "Codex stdout"))
             .and_then(|()| set_nonblocking(error.as_raw_fd(), "Codex stderr"))
         {
             drop(input);
@@ -166,7 +167,12 @@ impl CodexProcess {
             cancellation,
         )?;
         let initialized = protocol::notification("initialized", json!({}))?;
-        self.send(&initialized)?;
+        self.send(
+            &initialized,
+            Some(cancellation),
+            Instant::now() + STARTUP_TIMEOUT,
+            "initialize",
+        )?;
         Ok(())
     }
 
@@ -257,7 +263,7 @@ impl CodexProcess {
         let result = self.call(
             "turn/start",
             json!({"threadId":thread_id,"input":[{"type":"text","text":input}],"outputSchema":output_schema,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly","networkAccess":false}}),
-            STARTUP_TIMEOUT,
+            turn_timeout,
             cancellation,
         )?;
         let turn_id = match result.pointer("/turn/id").and_then(Value::as_str) {
@@ -276,14 +282,17 @@ impl CodexProcess {
                 } else {
                     InterruptReason::TimedOut
                 };
+                let interrupt_deadline = now + INTERRUPT_TIMEOUT;
                 let request_id = self.send_request(
                     "turn/interrupt",
                     json!({"threadId":thread_id,"turnId":turn_id}),
+                    None,
+                    interrupt_deadline,
                 )?;
                 interruption = Some(Interruption {
                     reason,
                     request_id,
-                    deadline: now + INTERRUPT_TIMEOUT,
+                    deadline: interrupt_deadline,
                     response_received: false,
                     turn_completed: false,
                 });
@@ -328,7 +337,13 @@ impl CodexProcess {
                     state.response_received = true;
                 }
                 Incoming::ServerRequest { id, method, params } => {
-                    self.handle_server_request(&id, &method, &params)?;
+                    self.handle_server_request(
+                        &id,
+                        &method,
+                        &params,
+                        Some(cancellation),
+                        deadline,
+                    )?;
                     return self.protocol_failure(&format!(
                         "Codex requested forbidden operation {method}"
                     ));
@@ -476,8 +491,8 @@ impl CodexProcess {
         timeout: Duration,
         cancellation: &CancellationToken,
     ) -> Result<Value, String> {
-        let id = self.send_request(method, params)?;
         let deadline = Instant::now() + timeout;
+        let id = self.send_request(method, params, Some(cancellation), deadline)?;
         loop {
             if cancellation.is_cancelled() {
                 return self.protocol_failure(&format!("Codex {method} cancelled"));
@@ -502,7 +517,13 @@ impl CodexProcess {
                     return result;
                 }
                 Incoming::ServerRequest { id, method, params } => {
-                    self.handle_server_request(&id, &method, &params)?;
+                    self.handle_server_request(
+                        &id,
+                        &method,
+                        &params,
+                        Some(cancellation),
+                        deadline,
+                    )?;
                     return self.protocol_failure(&format!(
                         "Codex requested forbidden operation {method}"
                     ));
@@ -553,6 +574,8 @@ impl CodexProcess {
         id: &RequestId,
         method: &str,
         params: &Value,
+        cancellation: Option<&CancellationToken>,
+        deadline: Instant,
     ) -> Result<(), String> {
         if !params.is_object() {
             return self.protocol_failure("malformed Codex server request params");
@@ -561,17 +584,23 @@ impl CodexProcess {
             return self.protocol_failure(&format!("unknown Codex server request {method}"));
         };
         let response = protocol::server_response(id, result)?;
-        self.send(&response)
+        self.send(&response, cancellation, deadline, method)
     }
 
-    fn send_request(&mut self, method: &str, params: Value) -> Result<u64, String> {
+    fn send_request(
+        &mut self,
+        method: &str,
+        params: Value,
+        cancellation: Option<&CancellationToken>,
+        deadline: Instant,
+    ) -> Result<u64, String> {
         if self.pending_ids.len() >= MAX_PENDING_IDS {
             return self.protocol_failure("Codex pending request limit exceeded");
         }
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).expect("request id overflow");
         let bytes = protocol::request(id, method, params)?;
-        self.send(&bytes)?;
+        self.send(&bytes, cancellation, deadline, method)?;
         assert!(self.pending_ids.insert(id));
         assert!(self.pending_ids.len() <= MAX_PENDING_IDS);
         Ok(id)
@@ -622,15 +651,21 @@ impl CodexProcess {
         }
     }
 
-    fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
+    fn send(
+        &mut self,
+        bytes: &[u8],
+        cancellation: Option<&CancellationToken>,
+        deadline: Instant,
+        operation: &str,
+    ) -> Result<(), String> {
+        assert!(!bytes.is_empty());
         let result = self
             .input
             .as_mut()
-            .ok_or_else(|| "Codex stdin unavailable".to_string())?
-            .write_all(bytes)
-            .and_then(|_| self.input.as_mut().expect("input checked").flush());
+            .ok_or_else(|| "Codex stdin unavailable".to_string())
+            .and_then(|input| write_bounded(input, bytes, cancellation, deadline, operation));
         if let Err(error) = result {
-            return self.protocol_failure(&format!("cannot write to Codex: {error}"));
+            return self.protocol_failure(&error);
         }
         Ok(())
     }
@@ -1196,6 +1231,40 @@ fn configure_process_group(command: &mut Command) {
     }
 }
 
+fn write_bounded(
+    input: &mut ChildStdin,
+    bytes: &[u8],
+    cancellation: Option<&CancellationToken>,
+    deadline: Instant,
+    operation: &str,
+) -> Result<(), String> {
+    assert!(!bytes.is_empty());
+    let mut written = 0;
+    while written < bytes.len() {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(format!("Codex {operation} cancelled while writing stdin"));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!("Codex {operation} timed out while writing stdin"));
+        }
+        match input.write(&bytes[written..]) {
+            Ok(0) => return Err("cannot write to Codex: write returned zero bytes".into()),
+            Ok(count) => {
+                assert!(count <= bytes.len() - written);
+                written += count;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+            }
+            Err(error) => return Err(format!("cannot write to Codex: {error}")),
+        }
+    }
+    assert_eq!(written, bytes.len());
+    Ok(())
+}
+
 fn set_nonblocking(file_descriptor: i32, name: &str) -> Result<(), String> {
     let flags = unsafe { libc::fcntl(file_descriptor, libc::F_GETFL) };
     if flags == -1 {
@@ -1744,6 +1813,72 @@ mod tests {
         assert!(response.contains("What invariant holds?"));
         drop(process);
         assert!(!cwd.exists());
+    }
+
+    #[test]
+    fn large_valid_prompt_write_deadline_cleans_a_nonreading_app_server() {
+        let (environment, mut process) = fake_process("no-read-after-thread-starts");
+        assert!(process.account_ready().unwrap());
+        let thread_id = process.start_thread().unwrap();
+        process.start_thread().unwrap();
+        let cwd = process.cwd_path();
+        let capture = environment.directory.join("fake-capture.jsonl");
+        let blocked_deadline = Instant::now() + Duration::from_secs(2);
+        while !fs::read_to_string(&capture).is_ok_and(|text| text.contains("stdin-blocked")) {
+            assert!(
+                Instant::now() < blocked_deadline,
+                "fixture did not block stdin"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        let error = process
+            .turn_with_timeout(
+                &thread_id,
+                "x".repeat(protocol::MAX_JSON_LINE_BYTES / 2),
+                json!({"type":"object"}),
+                &CancellationToken::new(),
+                Duration::from_millis(50),
+            )
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(!cwd.exists());
+        assert!(!process.is_usable());
+    }
+
+    #[test]
+    fn large_valid_prompt_write_cancellation_cleans_a_nonreading_app_server() {
+        let (environment, mut process) = fake_process("no-read-after-thread-starts");
+        assert!(process.account_ready().unwrap());
+        let thread_id = process.start_thread().unwrap();
+        process.start_thread().unwrap();
+        let cwd = process.cwd_path();
+        let capture = environment.directory.join("fake-capture.jsonl");
+        let blocked_deadline = Instant::now() + Duration::from_secs(2);
+        while !fs::read_to_string(&capture).is_ok_and(|text| text.contains("stdin-blocked")) {
+            assert!(
+                Instant::now() < blocked_deadline,
+                "fixture did not block stdin"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let started = Instant::now();
+        let error = process
+            .turn_with_timeout(
+                &thread_id,
+                "x".repeat(protocol::MAX_JSON_LINE_BYTES / 2),
+                json!({"type":"object"}),
+                &cancellation,
+                Duration::from_secs(10),
+            )
+            .unwrap_err();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(!cwd.exists());
+        assert!(!process.is_usable());
     }
 
     #[test]
