@@ -60,7 +60,7 @@ Output is bounded and sanitized. `STALE` appears only when displayed output belo
 
 ## Layout
 
-- At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become approximately five-column titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space. Expanded side panes widen with focus: Interview uses about 45% when focused, and focused Problem is materially wider than its resting width.
+- At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become six-column titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space. Expanded side panes widen with focus: Interview uses about 45% when focused, and focused Problem is materially wider than its resting width.
 - At 80x24: one selected pane appears behind collapse-marked tabs. A collapsed accessory keeps focus on its tab while Editor renders as the content fallback.
 - Below 60x20: only a resize panel appears. Ctrl-Q remains available from every focused pane and Neovim mode; dirty source requires a second Ctrl-Q confirmation.
 
