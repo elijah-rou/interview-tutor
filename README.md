@@ -86,7 +86,7 @@ Problem metadata is independent of ordered set membership:
 
 ## Optional interviewer
 
-`./interview` defaults to Pi after an in-app disclosure. Install trusted Pi 0.84.2 and configure its selected model provider. Each accepted application turn uses a fresh no-session RPC process with tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations disabled. Pi reads its own bounded configuration/auth inputs and may contact the selected model provider for the disclosed turn.
+`./interview` defaults to Pi after an in-app disclosure. Install trusted Pi 0.84.2 and configure its selected model provider. Each accepted application turn uses a fresh no-session RPC process with tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations disabled. Pi reads its own bounded configuration/auth inputs and may contact the selected model provider for the disclosed turn. Pi `auth.json` credentials beginning with `!command` execute that command through a shell, per Pi's credential resolution contract.
 
 Codex remains available only through `--interviewer codex` or `INTERVIEW_TUTOR_INTERVIEWER=codex`. Install a trusted Codex CLI and authenticate with `codex login`; versions 0.146.0 and 0.147.0 remain accepted exactly. There is no silent Pi/Codex fallback.
 

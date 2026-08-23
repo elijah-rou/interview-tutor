@@ -1,6 +1,6 @@
 # Interview TUI
 
-Run `./interview` in an interactive Linux terminal. Optional startup flags are `--db PATH`, `--set ID`, `--language ID`, and `--no-codex`. Without `--set`, the TUI opens the set menu; otherwise it opens that set's problem list.
+Run `./interview` in an interactive Linux terminal. Optional startup flags are `--db PATH`, `--set ID`, `--language ID`, `--neovim PATH`, and `--interviewer pi|codex|none`; `--no-codex` remains a legacy alias for `--interviewer none`. Without `--set`, the TUI opens the set menu; otherwise it opens that set's problem list.
 
 ## Browser keys
 
@@ -72,15 +72,15 @@ Source loading and saving are Linux-specific. The application anchors the canoni
 
 The local runner starts one direct child in a new process group with no shell. Defaults are a 30-second wall timeout, 250-ms TERM grace, 256-KiB displayed output, 8-KiB pipe reads, and 64 queued events. Timeout, cancellation, and cleanup failures send TERM and then KILL to the group; the direct child is reaped and reader threads have bounded drains and joins. A descendant that deliberately calls `setsid` escapes process-group containment and may continue after its pipes are closed. The PTY fixture records, kills, and reaps that escaped PID; this is a tested boundary, not a containment claim.
 
-## Codex interaction
+## Interviewer interaction
 
-The first Codex action per launch shows a disclosure. Enter/`y` accepts; Esc/`n` declines. After acceptance, `i` opens the composer, Enter sends a nonempty question, and Esc leaves it. `Space h` provides at most three progressively stronger hints per source revision: invariant/question, technique/counterexample, then pseudocode direction. Editing resets that revision's hint allowance. Hints use a separate ephemeral Codex thread and receive no interviewer transcript.
+The first action for the selected Pi or Codex backend shows a backend-specific disclosure. Enter/`y` accepts; Esc/`n` declines. After acceptance, `i` opens the composer, Enter sends a nonempty question, and Esc leaves it. `Space h` provides at most three progressively stronger hints per source revision: invariant/question, technique/counterexample, then pseudocode direction. Editing resets that revision's hint allowance. Hints receive no interviewer transcript and use an ephemeral operation.
 
-The interviewer asks one focused question at a time. Automatic submission review starts only after the attempt row is recorded and receives the exact captured source, revision, and bounded test output from that submission. If Codex is connecting, recovering, or handling another turn, at most the newest recorded submission review waits; a newer successful submit replaces it. Ready Codex dispatches that review before another question or hint. Declined, disabled, and authentication-required sessions never send it.
+The interviewer asks one focused question at a time. Automatic submission review starts only after the attempt row is recorded and receives the exact captured source, revision, and bounded test output from that submission. If the interviewer is connecting, recovering, or handling another turn, at most the newest recorded submission review waits; a newer successful submit replaces it. A ready interviewer dispatches that review before another question or hint. Declined, disabled, and authentication-required sessions never send it.
 
 Interviewer and hint responses are accepted only if operation ID, role, captured source revision, and current editor revision still match. A submission-review response instead matches the active review's operation, role, and recorded revision, so editing during review does not relabel it as feedback on current source. The UI labels it `Submission review · recorded revision N`; it cannot change the authoritative local result. The transcript and queued review are bounded and memory-only; `Space r`, leaving solve mode, and process exit clear them. No transcript is written by Interview Tutor.
 
-Protocol/authentication/turn failures show an error without disabling local solve. Press `i` to explicitly reconnect for the next distinct operation. Failed content is not replayed, and a session gets at most one replacement process. Ctrl-C requests a bounded app-server turn interrupt; a missing acknowledgement invalidates and kills the process. Use `--no-codex` to disable all probing and spawning. See [Codex setup, privacy, and troubleshooting](codex-compatibility.md).
+Protocol/authentication/turn failures show an error without disabling local solve. Press `i` to explicitly reconnect for the next distinct operation. Failed content is not replayed. Pi uses a fresh no-session RPC process per application turn; Codex permits at most one replacement app-server process. Ctrl-C sends the selected transport's bounded abort/interrupt and requires both acknowledgement and terminal settlement. Use `--interviewer none` to disable all probing and spawning. See [interviewer setup, privacy, and troubleshooting](codex-compatibility.md).
 
 ## Signals and verification
 

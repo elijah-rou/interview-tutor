@@ -23,7 +23,7 @@ Runs, in order:
 6. the Rust adapter registry test
 7. root Python administrative/catalog/CLI unit tests
 
-The language starter implementations are intentionally incomplete, so running every Python or Rust problem case is expected to fail. That is not a repository gate. The relevant distribution invariant is the registry/catalog gate: all 82 global problems must have coherent Python and Rust adapters, slugs, metadata, and dispatch, while the Blind 75, Convex, Core, anti-metal, and Depot seeds retain their independent ordered membership.
+The complete `make check` target has a 900-second hard deadline with a 10-second kill-after grace. The language starter implementations are intentionally incomplete, so running every Python or Rust problem case is expected to fail. That is not a repository gate. The relevant distribution invariant is the registry/catalog gate: all 82 global problems must have coherent Python and Rust adapters, slugs, metadata, and dispatch, while the Blind 75, Convex, Core, anti-metal, and Depot seeds retain their independent ordered membership.
 
 ### `make test-harness`
 
@@ -31,9 +31,9 @@ Exercises the Python PTY harness itself: an injected hard timeout with child cle
 
 ### `make test-pty`
 
-Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mode, then runs the serial Linux PTY matrix. Its 33 cases are:
+Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mode, then runs the serial Linux PTY matrix. Its 34 cases are:
 
-- three full/compact/resize workflows
+- four full/compact/autosave/resize workflows
 - one real-Neovim full-surface workflow covering Visual/count/operator/text-object, macro, dot-repeat, search, named-register, Tutor-command, exact-save, and process-reap behavior
 - six local-runner fail/timeout/cancel/output/process-boundary cases
 - four SIGINT/SIGTERM attempt-recording lock cases
@@ -43,7 +43,7 @@ Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mo
 
 Each ordinary PTY case has a 20-second hard deadline. Lifecycle cases use 4 seconds. The Python matrix has a 90-second hard deadline and asserts its own total is at most 90 seconds; the Make command adds GNU `timeout` at 95 seconds with a 5-second kill-after grace.
 
-The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, real clean embedded-Neovim editing/UI behavior, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, terminal mode/cursor/alternate-screen/mouse/bracketed-paste restoration, prior signal dispositions, Neovim and runner direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
+The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, real clean embedded-Neovim editing/UI behavior, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, explicit `--interviewer none`, terminal mode/cursor/alternate-screen/mouse/bracketed-paste restoration, prior signal dispositions, Neovim and runner direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
 
 ### `make test-race`
 
@@ -65,7 +65,7 @@ make test-race
 cargo check --manifest-path cli/Cargo.toml --bins --release --locked --offline
 ```
 
-The explicit `make test-harness` repeats the self-test already entered by `make check` because it is a named CI gate. Cargo target directories remain in the same job, so debug artifacts from `make check` are reused by both PTY gates rather than rebuilt from scratch. Only the final release check uses the separate release profile. `make check`, harness self-tests, Cargo tests, and the release check have no narrower workflow timeout; the 20-minute job ceiling applies.
+`make test-pty` has a 180-second outer deadline around fetch, build, and its 95-second PTY deadline. `make test-race` has a 300-second outer deadline around fetch, build, its 95-second PTY deadline, and repeated unit checks. The explicit `make test-harness` repeats the self-test already entered by `make check` because it is a named CI gate. Cargo target directories remain in the same job, so debug artifacts from `make check` are reused by both PTY gates rather than rebuilt from scratch. Only the final release check uses the separate release profile. The standalone harness self-test and release check rely on the 20-minute workflow ceiling; the three Make gates have the narrower deadlines documented above.
 
 CI passes no GitHub or OpenAI secrets. `INTERVIEW_TUTOR_CODEX_EXECUTABLE` points to the checked-in fake app-server. PTY environments remove `OPENAI_API_KEY`, and the fake fixture fails if it receives that variable. No gate performs a live Codex/model turn. Fixture isolation is not a kernel network namespace and does not claim to contain a compromised arbitrary executable.
 

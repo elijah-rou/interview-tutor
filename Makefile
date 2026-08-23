@@ -5,17 +5,23 @@ PTY_GATE ?= $(TIMEOUT) --signal=TERM --kill-after=5s 95s env TERM=xterm-256color
 PTY_RACE_GATE ?= $(TIMEOUT) --signal=TERM --kill-after=5s 95s env TERM=xterm-256color python3 cli/tests/pty_matrix.py --race cli/target/debug/interview-tutor cli/target/debug/practice $(CURDIR)
 RACE_UNIT_COMMAND ?= $(CARGO) test --manifest-path cli/Cargo.toml --locked --offline --lib tui::runtime::tests::queued_completion_cancel_race_discards_pending_and_next_turn_succeeds -- --exact --test-threads=1 && $(CARGO) test --manifest-path cli/Cargo.toml --locked --offline --test runner_bounded explicit_cancellation_wins_at_timeout_boundary -- --exact --test-threads=1
 
-.PHONY: check clean test-harness test-pty test-race
+.PHONY: check check-inner clean test-harness test-pty test-pty-inner test-race test-race-inner
 
 test-harness:
 	python3 cli/tests/pty_harness_self_test.py $(CURDIR)
 
 test-pty:
+	$(TIMEOUT) --signal=TERM --kill-after=5s 180s $(MAKE) --no-print-directory test-pty-inner
+
+test-pty-inner:
 	$(CARGO) fetch --manifest-path cli/Cargo.toml --locked
 	$(CARGO) build --manifest-path cli/Cargo.toml --bins --locked --offline
 	$(PTY_GATE)
 
 test-race:
+	$(TIMEOUT) --signal=TERM --kill-after=5s 300s $(MAKE) --no-print-directory test-race-inner
+
+test-race-inner:
 	$(CARGO) fetch --manifest-path cli/Cargo.toml --locked
 	$(CARGO) build --manifest-path cli/Cargo.toml --bins --locked --offline
 	$(PTY_RACE_GATE)
@@ -28,7 +34,10 @@ test-race:
 		i=$$((i + 1)); \
 	done
 
-check: test-harness
+check:
+	$(TIMEOUT) --signal=TERM --kill-after=10s 900s $(MAKE) --no-print-directory check-inner
+
+check-inner: test-harness
 	python3 -m compileall -q python tests cli/tests
 	@if command -v ruff >/dev/null 2>&1; then ruff format --check python tests && ruff check python tests; fi
 	$(CARGO) fetch --manifest-path cli/Cargo.toml --locked

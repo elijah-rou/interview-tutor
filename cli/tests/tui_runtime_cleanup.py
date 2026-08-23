@@ -62,7 +62,8 @@ def run_case(
         "blind75",
         "--language",
         "python",
-        "--no-codex",
+        "--interviewer",
+        "none",
     ]
     with PtySession(
         command,

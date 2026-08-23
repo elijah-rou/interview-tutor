@@ -260,7 +260,7 @@ else:
             command += ["--set", "a00-matrix"]
         command += ["--language", "python"]
         if no_codex:
-            command.append("--no-codex")
+            command += ["--interviewer", "none"]
         session = PtySession(command, environment, columns, rows, case_timeout)
         self.case_sessions.append(session)
         return session
@@ -839,6 +839,9 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
     fixture.set_runner(mode)
     database = fixture.database(f"runner-{mode}")
     pid_file = fixture.temporary / f"runner-{mode}.pid"
+    # Repeats reuse one pid-file path; clear the previous case's file so the
+    # existence predicate only fires once this case's runner has spawned.
+    pid_file.unlink(missing_ok=True)
     environment, home = fixture.environment(
         no_codex=True,
         timeout_ms=200 if mode == "timeout" else None,
@@ -1127,7 +1130,7 @@ def config_case(fixture: MatrixFixture) -> str:
             session.wait_screen(expected)
             codex_local_recovery(session, case_database)
         assert_codex_cleanup(home)
-    return "db/set/language invalid+valid=6 no_codex_probes=0 incompatible+untrusted local_test=pass statuses=1/0"
+    return "db/set/language invalid+valid=6 interviewer-none-probes=0 incompatible+untrusted local_test=pass statuses=1/0"
 
 
 class Matrix:
