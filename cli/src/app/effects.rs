@@ -146,6 +146,7 @@ pub enum Event {
         Result<ExecutionResult, String>,
     ),
     DraftSaved(OperationId, u64, String, Result<(), String>),
+    RunnerLeftSolve(Result<(), String>),
     InterviewerConnected(
         OperationId,
         Result<(), crate::interviewer::InterviewerError>,

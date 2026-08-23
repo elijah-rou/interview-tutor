@@ -1003,6 +1003,9 @@ impl RunnerWorker {
         source: String,
         write_source: bool,
     ) -> Result<(), String> {
+        if self.active.is_some() {
+            return Err("runner worker still owns an active Solve operation".into());
+        }
         let cancellation = RunCancellation::with_signal_state(self.signal_state.clone());
         self.sender
             .send(WorkerCommand::Run {
@@ -1371,22 +1374,14 @@ fn apply_effects(
                 let _ = interviewer_worker.send(InterviewerWorkerCommand::Cancel { operation });
             }
             Effect::ResetInterviewer => interviewer_worker.reset(),
-            Effect::LeaveSolve => match worker.leave() {
-                Ok(()) => {
-                    if let Some(solve) = state.solve.as_mut() {
-                        solve.running = None;
-                        solve.cancellation = None;
-                    }
-                }
-                Err(error) => {
-                    if let Some(solve) = state.solve.as_mut() {
-                        solve.pending_draft_save = None;
-                    }
-                    state.status = "Runner cancellation failed · still in Solve".into();
-                    state.error = Some(error);
+            Effect::LeaveSolve => {
+                let result = worker.leave();
+                let failed = result.is_err();
+                effects.extend(reduce(state, Event::RunnerLeftSolve(result)));
+                if failed {
                     return;
                 }
-            },
+            }
             Effect::StopNeovim { generation } => {
                 if let Err(error) = neovim_worker.stop_session_for_generation(generation) {
                     state.error = Some(error);
@@ -2173,15 +2168,15 @@ mod tests {
                 changedtick: 3,
             }),
             events: vec![
-            WorkerEvent::Source(SourceEvent::Action(ActionUpdate {
-                generation: SessionGeneration(1),
-                action: TutorAction::Back,
-                document: DocumentUpdate {
-                    text: "bytes at back notification".into(),
-                    mode: "n".into(),
-                    changedtick: 2,
-                },
-            })),
+                WorkerEvent::Source(SourceEvent::Action(ActionUpdate {
+                    generation: SessionGeneration(1),
+                    action: TutorAction::Back,
+                    document: DocumentUpdate {
+                        text: "bytes at back notification".into(),
+                        mode: "n".into(),
+                        changedtick: 2,
+                    },
+                })),
                 WorkerEvent::Document(DocumentUpdate {
                     text: "newest accepted bytes".into(),
                     mode: "n".into(),
@@ -2250,6 +2245,8 @@ mod tests {
         assert!(accepts_neovim_generation(&state, old_generation));
 
         reduce(&mut state, Event::Command(crate::app::Action::Back));
+        assert_eq!(state.screen, Screen::Solve);
+        reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
         assert_eq!(state.screen, Screen::ProblemList);
         assert!(!accepts_neovim_generation(&state, old_generation));
         if accepts_neovim_generation(&state, old_generation) {
@@ -3083,7 +3080,11 @@ mod tests {
         state
             .interviewer
             .push_message("Interviewer".into(), "private".into());
-        let effects = reduce(&mut state, Event::Command(crate::app::Action::Back));
+        assert!(matches!(
+            reduce(&mut state, Event::Command(crate::app::Action::Back)).as_slice(),
+            [Effect::LeaveSolve]
+        ));
+        let effects = reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
         assert!(state.interviewer.messages.is_empty());
         assert!(
             effects
@@ -3189,14 +3190,42 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
 
+        let mut state = interviewer_solve_state();
+        state.solve.as_mut().unwrap().running = Some((OperationId(71), 1, RunIntent::Test));
+        let generation = state.solve.as_ref().unwrap().generation;
+        let source = state.solve.as_ref().unwrap().editor.text().to_string();
+        assert!(matches!(
+            reduce(&mut state, Event::Command(crate::app::Action::Back)).as_slice(),
+            [Effect::LeaveSolve]
+        ));
+
         let started = Instant::now();
-        assert!(
-            worker
-                .leave_with_timeout(Duration::from_millis(20))
-                .is_err()
-        );
+        let error = worker
+            .leave_with_timeout(Duration::from_millis(20))
+            .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(worker.active.is_some());
+        reduce(&mut state, Event::RunnerLeftSolve(Err(error)));
+        assert_eq!(state.screen, crate::app::Screen::Solve);
+        let solve = state.solve.as_ref().unwrap();
+        assert_eq!(solve.generation, generation);
+        assert_eq!(solve.editor.text(), source);
+        assert_eq!(solve.running, Some((OperationId(71), 1, RunIntent::Test)));
+        assert!(state.error.as_deref().unwrap().contains("timed out"));
+        assert!(
+            worker
+                .run(
+                    OperationId(72),
+                    2,
+                    RunIntent::Test,
+                    plan(),
+                    "replacement".into(),
+                    false,
+                )
+                .unwrap_err()
+                .contains("still owns")
+        );
+        assert_eq!(worker.active.as_ref().unwrap().0, OperationId(71));
 
         let started = Instant::now();
         worker.shutdown_with_timeout(Duration::from_millis(20));

@@ -147,7 +147,7 @@ fn finalize_interviewer_turn_and_dispatch_review(
     effects
 }
 
-fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
+fn enter_problem_list(state: &mut AppState) -> Vec<Effect> {
     let neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
     state.solve = None;
     state.interviewer.clear_session();
@@ -159,9 +159,6 @@ fn enter_problem_list(state: &mut AppState, drain_runner: bool) -> Vec<Effect> {
     effects.push(Effect::ResetInterviewer);
     if let Some(generation) = neovim_generation {
         effects.push(Effect::StopNeovim { generation });
-    }
-    if drain_runner {
-        effects.push(Effect::LeaveSolve);
     }
     effects
 }
@@ -384,7 +381,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::Back => {
             if !solve.editor.dirty() {
-                return enter_problem_list(state, true);
+                return vec![Effect::LeaveSolve];
             }
             if solve.pending_draft_save.is_some() {
                 state.status = "Draft save already in progress…".into();
@@ -774,6 +771,25 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.error = Some(error);
                 return Vec::new();
             }
+            Event::RunnerLeftSolve(result) => match result {
+                Err(error) => {
+                    if let Some(solve) = state.solve.as_mut() {
+                        solve.pending_draft_save = None;
+                    }
+                    state.status = "Runner cancellation failed · still in Solve".into();
+                    state.error = Some(error);
+                    return Vec::new();
+                }
+                Ok(())
+                    if state
+                        .solve
+                        .as_ref()
+                        .is_some_and(|solve| solve.pending_draft_save.is_some()) =>
+                {
+                    return Vec::new();
+                }
+                Ok(()) => return enter_problem_list(state),
+            },
             Event::DraftSaved(operation, revision, source, result) => {
                 let Some(solve) = state.solve.as_mut() else {
                     return Vec::new();
@@ -796,7 +812,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Ok(()) => {
                         solve.editor.mark_saved(revision, &source);
                         if solve.editor.revision == revision && solve.editor.text() == source {
-                            return enter_problem_list(state, false);
+                            return enter_problem_list(state);
                         }
                         state.status = "Older draft saved · newer edits remain in Solve".into();
                         state.error = Some(
@@ -1181,7 +1197,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         | Event::NeovimView(_)
         | Event::NeovimWarning(_)
         | Event::NeovimFailed(_) => {}
-        Event::RunFinished(_, _, _, _, _) | Event::DraftSaved(_, _, _, _) => {}
+        Event::RunFinished(_, _, _, _, _)
+        | Event::DraftSaved(_, _, _, _)
+        | Event::RunnerLeftSolve(_) => {}
         Event::Loaded(operation, result) => {
             if state.active_operation != Some(operation) {
                 return Vec::new();
@@ -1689,16 +1707,30 @@ mod tests {
     }
 
     #[test]
-    fn clean_back_enters_selected_set_problem_list_directly() {
+    fn clean_back_waits_for_runner_drain_before_leaving_solve() {
         let mut state = solve_state();
+        let generation = state.solve.as_ref().unwrap().generation;
         let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(state.screen, Screen::Solve);
+        assert_eq!(state.solve.as_ref().unwrap().generation, generation);
+        assert!(matches!(effects.as_slice(), [Effect::LeaveSolve]));
+
+        let completion = reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
         assert_eq!(state.screen, Screen::ProblemList);
         assert!(state.solve.is_none());
-        assert!(effects.iter().any(|effect| matches!(effect, Effect::Load {
+        assert!(
+            completion
+                .iter()
+                .any(|effect| matches!(effect, Effect::Load {
             scope: LoadScope::ProblemSet(slug),
             ..
-        } if slug == "a")));
-        assert!(matches!(effects.last(), Some(Effect::LeaveSolve)));
+        } if slug == "a"))
+        );
+        assert!(
+            !completion
+                .iter()
+                .any(|effect| matches!(effect, Effect::LeaveSolve))
+        );
     }
 
     #[test]
@@ -1969,6 +2001,9 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::LeaveSolve))
         );
+        assert!(state.solve.is_some());
+        assert_eq!(state.screen, Screen::Solve);
+        reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
         assert!(state.solve.is_none());
         assert_eq!(state.screen, Screen::ProblemList);
     }
@@ -2512,7 +2547,7 @@ mod tests {
             "output".into(),
         ));
         reduce(&mut state, Event::Command(Action::Back));
-        reduce(&mut state, Event::Command(Action::Back));
+        reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
         assert!(state.interviewer.pending_submission_review.is_none());
         assert!(state.solve.is_none());
     }
