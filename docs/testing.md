@@ -1,6 +1,6 @@
 # Testing
 
-All repository gates are Linux-first and deterministic. Install stable Rust with rustfmt/Clippy, Python 3.12+, GNU Make/coreutils, and the pinned CI formatter/linter when reproducing CI:
+All repository gates are Linux-first and deterministic. Install stable Rust with rustfmt/Clippy, Python 3.12+, GNU Make/coreutils, compatible Neovim 0.9 through 1.x, and the pinned CI formatter/linter when reproducing CI:
 
 ```console
 python3 -m pip install ruff==0.14.10
@@ -31,9 +31,10 @@ Exercises the Python PTY harness itself: an injected hard timeout with child cle
 
 ### `make test-pty`
 
-Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mode, then runs the serial Linux PTY matrix. Its 32 cases are:
+Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mode, then runs the serial Linux PTY matrix. Its 33 cases are:
 
 - three full/compact/resize workflows
+- one real-Neovim full-surface workflow covering Visual/count/operator/text-object, macro, dot-repeat, search, named-register, Tutor-command, exact-save, and process-reap behavior
 - six local-runner fail/timeout/cancel/output/process-boundary cases
 - four SIGINT/SIGTERM attempt-recording lock cases
 - thirteen Codex auth/decline/protocol/approval/reconnect/backpressure cases
@@ -42,7 +43,7 @@ Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mo
 
 Each ordinary PTY case has a 20-second hard deadline. Lifecycle cases use 4 seconds. The Python matrix has a 90-second hard deadline and asserts its own total is at most 90 seconds; the Make command adds GNU `timeout` at 95 seconds with a 5-second kill-after grace.
 
-The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, terminal mode/cursor/alternate-screen restoration, prior signal dispositions, direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
+The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, real clean embedded-Neovim editing/UI behavior, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, terminal mode/cursor/alternate-screen/mouse/bracketed-paste restoration, prior signal dispositions, Neovim and runner direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
 
 ### `make test-race`
 
@@ -54,7 +55,7 @@ After the PTY matrix, Make runs ten fail-fast iterations. Each iteration runs th
 
 `.github/workflows/ci.yml` runs for every pull request and push on `ubuntu-latest`. Workflow permissions are `contents: read`; concurrency is grouped by workflow/ref and older in-progress runs are cancelled. The single Linux job has a 20-minute timeout and sets `TERM=xterm-256color` plus `RUSTFLAGS=-Dwarnings`.
 
-CI installs stable Rust with rustfmt/Clippy, Python 3.12, and exactly Ruff 0.14.10. Its Cargo cache contains download indexes/archives and Git databases only, uses an exact OS/architecture/lockfile key, and never caches Cargo credentials or build outputs. CI fetches both lockfiles online once, then sets `CARGO_NET_OFFLINE=true` for these exact gates:
+CI installs stable Rust with rustfmt/Clippy, Python 3.12, exactly Ruff 0.14.10, and checksum-verified Neovim 0.11.5. Its Cargo cache contains download indexes/archives and Git databases only, uses an exact OS/architecture/lockfile key, and never caches Cargo credentials or build outputs. CI fetches both lockfiles online once, then sets `CARGO_NET_OFFLINE=true` for these exact gates:
 
 ```console
 make check

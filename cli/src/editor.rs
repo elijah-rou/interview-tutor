@@ -11,6 +11,7 @@ pub const MAX_COMMAND_BYTES: usize = 256;
 pub enum Mode {
     Normal,
     Insert,
+    Visual,
     Command,
 }
 
@@ -61,6 +62,7 @@ pub struct EditorDocument {
     redo: VecDeque<Snapshot>,
     pending_g: bool,
     pending_d: bool,
+    neovim_changedtick: Option<u64>,
 }
 
 impl EditorDocument {
@@ -81,6 +83,7 @@ impl EditorDocument {
             redo: VecDeque::new(),
             pending_g: false,
             pending_d: false,
+            neovim_changedtick: None,
         })
     }
 
@@ -95,6 +98,35 @@ impl EditorDocument {
         if revision <= self.revision {
             self.saved_text = saved_text.to_string();
         }
+    }
+
+    pub fn update_neovim_mode(&mut self, mode: &str) {
+        self.mode = mode_from_neovim(mode);
+    }
+
+    pub fn install_neovim_snapshot(
+        &mut self,
+        text: String,
+        mode: &str,
+        changedtick: u64,
+    ) -> Result<(), String> {
+        validate_text(&text)?;
+        self.update_neovim_mode(mode);
+        if text != self.text {
+            let revision_steps = self
+                .neovim_changedtick
+                .and_then(|previous| changedtick.checked_sub(previous))
+                .unwrap_or(1)
+                .max(1);
+            self.revision = self
+                .revision
+                .checked_add(revision_steps)
+                .ok_or_else(|| "editor revision overflow".to_string())?;
+            self.text = text;
+        }
+        self.neovim_changedtick = Some(changedtick);
+        self.error = None;
+        Ok(())
     }
 
     pub fn line_count(&self) -> usize {
@@ -163,7 +195,7 @@ impl EditorDocument {
         let count = self.line_graphemes();
         self.column = match self.mode {
             Mode::Insert => self.column.min(count),
-            Mode::Normal | Mode::Command => self.column.min(count.saturating_sub(1)),
+            Mode::Normal | Mode::Visual | Mode::Command => self.column.min(count.saturating_sub(1)),
         };
     }
 
@@ -346,7 +378,7 @@ impl EditorDocument {
     pub fn move_right(&mut self) {
         let maximum = match self.mode {
             Mode::Insert => self.line_graphemes(),
-            Mode::Normal | Mode::Command => self.line_graphemes().saturating_sub(1),
+            Mode::Normal | Mode::Visual | Mode::Command => self.line_graphemes().saturating_sub(1),
         };
         self.column = self.column.saturating_add(1).min(maximum);
         self.error = None;
@@ -477,6 +509,15 @@ impl EditorDocument {
     }
 }
 
+fn mode_from_neovim(mode: &str) -> Mode {
+    match mode.chars().next() {
+        Some('i' | 'R' | 'r' | 't') => Mode::Insert,
+        Some('v' | 'V' | 's' | 'S' | '\u{16}') => Mode::Visual,
+        Some('c') => Mode::Command,
+        Some(_) | None => Mode::Normal,
+    }
+}
+
 fn word_grapheme(grapheme: &str) -> bool {
     grapheme == "_" || grapheme.chars().next().is_some_and(char::is_alphanumeric)
 }
@@ -490,6 +531,10 @@ fn validate_text(text: &str) -> Result<(), String> {
         return Err(format!("document exceeds {MAX_DOCUMENT_LINES} lines"));
     }
     Ok(())
+}
+
+pub fn validate_document(text: &str) -> Result<(), String> {
+    validate_text(text)
 }
 
 pub fn offset(text: &str, row: usize, column: usize) -> usize {
@@ -618,6 +663,32 @@ pub fn highlight_style(kind: HighlightKind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neovim_snapshots_preserve_exact_bytes_modes_and_monotonic_revisions() {
+        let mut document = EditorDocument::new("x\n".into()).unwrap();
+        document
+            .install_neovim_snapshot("x\n".into(), "i", 10)
+            .unwrap();
+        assert_eq!(document.mode, Mode::Insert);
+        assert_eq!(document.revision, 0);
+        document
+            .install_neovim_snapshot("x界\n".into(), "v", 11)
+            .unwrap();
+        assert_eq!(document.mode, Mode::Visual);
+        assert_eq!(document.revision, 1);
+        assert!(document.dirty());
+        document
+            .install_neovim_snapshot("x\n".into(), "n", 12)
+            .unwrap();
+        assert_eq!(document.mode, Mode::Normal);
+        assert_eq!(document.revision, 2);
+        assert!(!document.dirty());
+        document
+            .install_neovim_snapshot("y\n".into(), "n", 15)
+            .unwrap();
+        assert_eq!(document.revision, 5);
+    }
 
     #[test]
     fn revisions_never_repeat_and_saved_bytes_define_dirty() {

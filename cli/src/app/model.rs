@@ -5,6 +5,7 @@ use crate::database::{
 };
 use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES};
 use crate::runner::{CancellationToken, ExecutionPlan};
+use std::sync::Arc;
 
 pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
@@ -228,6 +229,13 @@ impl Drop for SubmittedSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorRuntimeStatus {
+    Starting,
+    Ready,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub struct SolveSession {
     pub problem_id: i64,
@@ -237,6 +245,8 @@ pub struct SolveSession {
     pub language: String,
     pub plan: ExecutionPlan,
     pub editor: EditorDocument,
+    pub editor_view: Option<Arc<crate::neovim::grid::GridSnapshot>>,
+    pub editor_status: EditorRuntimeStatus,
     pub pane: SolvePane,
     pub output: String,
     pub output_scroll: u16,
@@ -456,6 +466,8 @@ mod tests {
                 solution_path: PathBuf::from("/tmp/p.py"),
             },
             editor: EditorDocument::new(String::new()).unwrap(),
+            editor_view: None,
+            editor_status: EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
             output: String::new(),
             output_scroll: 0,

@@ -4,6 +4,7 @@ pub mod codex;
 pub mod config;
 pub mod database;
 pub mod editor;
+pub mod neovim;
 pub mod runner;
 pub mod signals;
 pub mod source;

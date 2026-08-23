@@ -28,6 +28,11 @@ pub enum Effect {
         set_slug: Option<String>,
         language_slug: String,
     },
+    StartNeovim {
+        source: String,
+        synthetic_name: String,
+        language: String,
+    },
     SaveRun {
         operation: OperationId,
         plan: ExecutionPlan,
@@ -116,6 +121,11 @@ pub enum Event {
     OpenSet(String),
     Loaded(OperationId, Result<Box<AppData>, String>),
     SolveOpened(OperationId, Result<Box<super::model::SolveSession>, String>),
+    NeovimStarted(Result<(), String>),
+    NeovimDocument(crate::neovim::DocumentUpdate),
+    NeovimView(std::sync::Arc<crate::neovim::grid::GridSnapshot>),
+    NeovimWarning(String),
+    NeovimFailed(String),
     RunFinished(
         OperationId,
         u64,

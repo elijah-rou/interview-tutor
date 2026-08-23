@@ -23,33 +23,33 @@ Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. Tab a
 
 Global solve actions are:
 
-- Ctrl-S or F5: save the current revision atomically and run local tests
-- F9: submit the current revision
+- Ctrl-S, F5, or `Space t`: save the current revision atomically and run local tests
+- F9 or `Space s`: submit the current revision
 - Ctrl-C: cancel the operation selected by focus; Interview wins when it is focused and both Codex and the local runner are active, otherwise the local runner is cancelled
 - `Space h`: request a hint outside Editor Insert/Command mode and outside the active composer
 - `Space r`: clear the Interview session when Interview is focused
 - `Space b`: go back from Editor Normal mode
 - `Space q`: quit from Editor Normal mode
 
-Back and quit are guarded when the buffer is dirty. The first identical action warns; the second discards. An edit or different action clears the confirmation. Esc never discards solve changes. `:q` rejects a dirty buffer.
+Back and application quit are guarded when the buffer is dirty. The first identical action warns; the second discards. An edit or different action clears the confirmation. Esc never discards solve changes. Use `:TutorBack` or the reserved Normal-mode leader mappings for application navigation; native `:q` applies Neovim's own buffer/window rules and does not replace application navigation.
 
-## Native editor subset
+## Embedded Neovim
 
-No Vim or Neovim process is launched. The built-in editor supports this exact subset:
+Solve requires a compatible trusted Neovim (`>=0.9`, `<2.0`) and starts it with `nvim --clean --embed`. Interview Tutor attaches through Neovim's external-UI MessagePack-RPC protocol and renders the real Neovim grid inside the Editor pane. Normal, Insert, Visual, operator-pending, command/search, registers, macros, counts, text objects, undo/redo, dot-repeat, completion, Lua, shell, job, terminal, split, and tab behavior therefore comes from clean Neovim rather than an emulation. User initialization and user plugins are not loaded.
 
-- Normal mode: arrow keys, `h j k l`, `w b`, `0 $`, `gg G`, `i a o O`, `x`, `dd`, `u`, Ctrl-R, and `:`
-- Insert mode: Unicode text and paste, arrows, Backspace, Delete, Enter, and Esc
-- Command mode: `:w`, `:wq`, `:q`, and `:submit`; Esc cancels command entry
+Select the executable with `--neovim PATH`, then `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`; otherwise `nvim` is resolved on `PATH`. The canonical target must be a regular executable owned by the effective user or root and not group/world writable. Missing, incompatible, or failed Neovim is an explicit solve error; there is no manual-editor fallback.
 
-Visual mode, search, macros, registers, counts, plugins, Vimscript, and every other command are unsupported and produce an error where applicable. Cursor motion, insertion, deletion, and display use Unicode grapheme clusters, including combining marks and emoji ZWJ sequences. Normal mode addresses a grapheme; Insert mode addresses an insertion point. The document is bounded to 1 MiB, 100,000 lines, 32 undo snapshots, and a 256-byte command.
+The actual solution path is never given to Neovim. Source is loaded over RPC into a synthetic `acwrite` scratch buffer with swap, persistent undo files, modelines, automatic writes, and clipboard-provider integration disabled. `:TutorTest`, `:TutorSubmit`, `:TutorBack`, and `:TutorCollapse` expose application actions; Normal-mode `Space t/s/b/c`, guarded `Space q`, hints, and F5/F9 are reserved integration mappings. Interview Tutor remains authoritative for exact bytes, revision identity, atomic saving, tests, and submissions.
+
+The host accepts at most 1 MiB and 100,000 logical lines. If a native Neovim operation transiently exceeds that bound, Interview Tutor rejects the candidate and restarts Neovim from the last valid exact source. Application bytes and revision remain unchanged; Neovim-local undo/register/repeat state may reset only on that overflow recovery path. RPC values, nesting, nodes, grids, highlights, queues, stderr, process memory, calls, and teardown are bounded.
 
 ## Test, save, and submit semantics
 
-Ctrl-S, F5, and `:w` atomically save if dirty and run the local suite. They never create an attempt row. A clean buffer still runs. If another local run is active, only the newest requested save/test revision is retained; submit is rejected until that run completes. A failed save starts no runner.
+Ctrl-S, F5, `Space t`, `:TutorTest`, and a plain `:write` atomically save if dirty and run the local suite. They never create an attempt row. A clean buffer still runs. If another local run is active, only the newest requested save/test revision is retained; submit is rejected until that run completes. A failed save starts no runner.
 
-F9 and `:submit` save, run, then record exactly one attempt after the runner returns an execution result. Pass, fail, timeout, and explicit cancellation outcomes are recorded; preflight/spawn failures that produce no execution result are not. Repeating submit records another attempt. Local runner results remain authoritative even when Codex is enabled.
+F9, `Space s`, and `:TutorSubmit` save, run, then record exactly one attempt after the runner returns an execution result. Pass, fail, timeout, and explicit cancellation outcomes are recorded; preflight/spawn failures that produce no execution result are not. Repeating submit records another attempt. Local runner results remain authoritative even when Codex is enabled.
 
-`:wq` starts save/test and exits only after that operation returns and the saved/tested bytes still equal the current buffer. It does not require a passing test. If the buffer changes while the run is active, the newer dirty revision stays open. Edits are allowed during any run. Revisions increase monotonically across edits, undo, and redo, while dirty state compares bytes against the last saved bytes.
+Edits are allowed during any run. Revisions increase monotonically across accepted Neovim source snapshots, while dirty state compares exact bytes against the last saved bytes. Source-consuming Tutor mappings are delivered after preceding Neovim input and bind the run to that accepted snapshot.
 
 Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, Codex errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
 
@@ -81,4 +81,4 @@ Protocol/authentication/turn failures show an error without disabling local solv
 
 SIGINT and SIGTERM cancel active work, join workers, restore terminal state and prior signal dispositions, and exit with 130 or 143. For submit, the runner worker checks shared signal state immediately after recording and before publishing completion. A signal observed by that cutoff rewrites that exact attempt to Cancelled; a later signal applies only to runtime teardown.
 
-Run `make test-pty` for the 32-case serial acceptance matrix and `make test-race` for the 20-case cancellation matrix plus repeated Rust race tests. Both use only local fake fixtures, including an explicitly configured fake Codex executable. Exact bounds and gate contents are documented in [testing](testing.md).
+Run `make test-pty` for the 33-case serial acceptance matrix and `make test-race` for the 20-case cancellation matrix plus repeated Rust race tests. Both use only local fake fixtures, including an explicitly configured fake Codex executable. Exact bounds and gate contents are documented in [testing](testing.md).

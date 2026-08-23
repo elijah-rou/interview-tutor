@@ -5,7 +5,10 @@ use crate::signals::{ScopedSignalHandlers, SignalState};
 use crate::source;
 use crate::tui::{input, render};
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event as TerminalEvent};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as TerminalEvent,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -23,9 +26,21 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self, String> {
         enable_raw_mode().map_err(|e| format!("cannot enable terminal raw mode: {e}"))?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
+        if let Err(e) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            Hide,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+            let _ = execute!(
+                io::stdout(),
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                Show,
+                LeaveAlternateScreen
+            );
             return Err(format!("cannot enter terminal screen: {e}"));
         }
         Ok(Self)
@@ -34,7 +49,13 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -974,6 +995,7 @@ impl RunnerWorker {
 struct RuntimeWorkers {
     runner: Option<RunnerWorker>,
     codex: Option<CodexWorker>,
+    neovim: Option<crate::neovim::Worker>,
 }
 
 impl RuntimeWorkers {
@@ -982,10 +1004,12 @@ impl RuntimeWorkers {
         database_path: PathBuf,
         codex_enabled: bool,
         signal_state: SignalState,
+        neovim_executable: PathBuf,
     ) -> Self {
         let mut workers = Self {
             runner: Some(RunnerWorker::start(root, database_path, signal_state)),
             codex: None,
+            neovim: Some(crate::neovim::Worker::start(neovim_executable)),
         };
         workers.codex = Some(if codex_enabled {
             CodexWorker::start()
@@ -995,10 +1019,17 @@ impl RuntimeWorkers {
         workers
     }
 
-    fn parts(&mut self) -> (&mut RunnerWorker, &mut CodexWorker) {
+    fn parts(
+        &mut self,
+    ) -> (
+        &mut RunnerWorker,
+        &mut CodexWorker,
+        &mut crate::neovim::Worker,
+    ) {
         (
             self.runner.as_mut().expect("runtime runner exists"),
             self.codex.as_mut().expect("runtime Codex worker exists"),
+            self.neovim.as_mut().expect("runtime Neovim worker exists"),
         )
     }
 
@@ -1007,6 +1038,9 @@ impl RuntimeWorkers {
             worker.shutdown();
         }
         if let Some(worker) = self.codex.take() {
+            worker.shutdown();
+        }
+        if let Some(worker) = self.neovim.take() {
             worker.shutdown();
         }
     }
@@ -1024,6 +1058,7 @@ fn apply_effects(
     root: &Path,
     worker: &mut RunnerWorker,
     codex_worker: &mut CodexWorker,
+    neovim_worker: &mut crate::neovim::Worker,
     mut effects: Vec<Effect>,
 ) {
     while let Some(effect) = effects.pop() {
@@ -1070,6 +1105,8 @@ fn apply_effects(
                         language: language_slug,
                         plan,
                         editor,
+                        editor_view: None,
+                        editor_status: crate::app::model::EditorRuntimeStatus::Starting,
                         pane: SolvePane::Editor,
                         output: "No test run yet".into(),
                         output_scroll: 0,
@@ -1086,6 +1123,17 @@ fn apply_effects(
                     }))
                 })();
                 effects.extend(reduce(state, Event::SolveOpened(operation, result)));
+            }
+            Effect::StartNeovim {
+                source,
+                synthetic_name,
+                language,
+            } => {
+                if let Err(error) =
+                    neovim_worker.start_session(source, synthetic_name, language, 78, 14)
+                {
+                    effects.extend(reduce(state, Event::NeovimStarted(Err(error))));
+                }
             }
             Effect::SaveRun {
                 operation,
@@ -1158,9 +1206,56 @@ fn apply_effects(
                 let _ = codex_worker.send(CodexWorkerCommand::Cancel { operation });
             }
             Effect::ResetCodex => codex_worker.reset(),
-            Effect::LeaveSolve => worker.leave(),
+            Effect::LeaveSolve => {
+                worker.leave();
+                if let Err(error) = neovim_worker.stop_session() {
+                    state.error = Some(error);
+                }
+            }
         }
     }
+}
+
+fn neovim_mouse_kind(
+    kind: crossterm::event::MouseEventKind,
+) -> Option<(&'static str, &'static str)> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => Some(("left", "press")),
+        MouseEventKind::Down(MouseButton::Right) => Some(("right", "press")),
+        MouseEventKind::Down(MouseButton::Middle) => Some(("middle", "press")),
+        MouseEventKind::Up(MouseButton::Left) => Some(("left", "release")),
+        MouseEventKind::Up(MouseButton::Right) => Some(("right", "release")),
+        MouseEventKind::Up(MouseButton::Middle) => Some(("middle", "release")),
+        MouseEventKind::Drag(MouseButton::Left) => Some(("left", "drag")),
+        MouseEventKind::Drag(MouseButton::Right) => Some(("right", "drag")),
+        MouseEventKind::Drag(MouseButton::Middle) => Some(("middle", "drag")),
+        MouseEventKind::ScrollUp => Some(("wheel", "up")),
+        MouseEventKind::ScrollDown => Some(("wheel", "down")),
+        MouseEventKind::ScrollLeft => Some(("wheel", "left")),
+        MouseEventKind::ScrollRight => Some(("wheel", "right")),
+        MouseEventKind::Moved => None,
+    }
+}
+
+fn apply_event(
+    state: &mut AppState,
+    repository: &Repository,
+    root: &Path,
+    workers: &mut RuntimeWorkers,
+    event: Event,
+) {
+    let effects = reduce(state, event);
+    let (runner_worker, codex_worker, neovim_worker) = workers.parts();
+    apply_effects(
+        state,
+        repository,
+        root,
+        runner_worker,
+        codex_worker,
+        neovim_worker,
+        effects,
+    );
 }
 
 pub fn run(
@@ -1169,6 +1264,7 @@ pub fn run(
     requested_set: Option<String>,
     root: PathBuf,
     database_path: PathBuf,
+    neovim_executable: PathBuf,
 ) -> Result<u8, String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("interview requires an interactive terminal".into());
@@ -1180,16 +1276,18 @@ pub fn run(
         database_path,
         state.codex.enabled,
         signal_state.clone(),
+        neovim_executable,
     );
     let initial = requested_set.map_or(Event::Command(crate::app::Action::Reload), Event::OpenSet);
     let effects = reduce(&mut state, initial);
-    let (runner_worker, codex_worker) = workers.parts();
+    let (runner_worker, codex_worker, neovim_worker) = workers.parts();
     apply_effects(
         &mut state,
         &repository,
         &root,
         runner_worker,
         codex_worker,
+        neovim_worker,
         effects,
     );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1209,16 +1307,18 @@ pub fn run(
             .clear()
             .map_err(|e| format!("cannot clear terminal: {e}"))?;
         let mut needs_draw = true;
+        let mut pending_neovim_run_action = false;
+        let mut cancel_after_neovim_run_action = false;
         while !state.quit {
             if let Some(signal) = signal_state.received() {
-                let (runner_worker, codex_worker) = workers.parts();
+                let (runner_worker, codex_worker, _) = workers.parts();
                 runner_worker.interrupt_active(128 + signal);
                 codex_worker.reset();
                 state.quit = true;
                 continue;
             }
             let events = {
-                let (runner_worker, codex_worker) = workers.parts();
+                let (runner_worker, codex_worker, _) = workers.parts();
                 runner_worker
                     .poll()
                     .into_iter()
@@ -1226,23 +1326,109 @@ pub fn run(
                     .collect::<Vec<_>>()
             };
             for event in events {
-                let effects = reduce(&mut state, event);
-                let (runner_worker, codex_worker) = workers.parts();
-                apply_effects(
+                apply_event(&mut state, &repository, &root, &mut workers, event);
+                needs_draw = true;
+            }
+            let neovim_poll = workers
+                .neovim
+                .as_ref()
+                .expect("runtime Neovim worker exists")
+                .poll();
+            if let Some(document) = neovim_poll.document {
+                apply_event(
                     &mut state,
                     &repository,
                     &root,
-                    runner_worker,
-                    codex_worker,
-                    effects,
+                    &mut workers,
+                    Event::NeovimDocument(document),
                 );
-                needs_draw = true
+                needs_draw = true;
+            }
+            if let Some(view) = neovim_poll.grid {
+                apply_event(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut workers,
+                    Event::NeovimView(view),
+                );
+                needs_draw = true;
+            }
+            if let Some(started) = neovim_poll.started {
+                apply_event(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut workers,
+                    Event::NeovimStarted(started),
+                );
+                needs_draw = true;
+            }
+            if let Some(error) = neovim_poll.warning {
+                apply_event(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut workers,
+                    Event::NeovimWarning(error),
+                );
+                needs_draw = true;
+            }
+            if let Some(error) = neovim_poll.failure {
+                pending_neovim_run_action = false;
+                cancel_after_neovim_run_action = false;
+                apply_event(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut workers,
+                    Event::NeovimFailed(error),
+                );
+                needs_draw = true;
+            }
+            for action in neovim_poll.actions {
+                let source_action = matches!(
+                    action,
+                    crate::neovim::TutorAction::Test | crate::neovim::TutorAction::Submit
+                );
+                let action = match action {
+                    crate::neovim::TutorAction::Test => crate::app::Action::SaveTest,
+                    crate::neovim::TutorAction::Submit => crate::app::Action::Submit,
+                    crate::neovim::TutorAction::Back => crate::app::Action::Back,
+                    crate::neovim::TutorAction::Collapse => {
+                        state.status = "Editor cannot be collapsed".into();
+                        continue;
+                    }
+                    crate::neovim::TutorAction::Quit => crate::app::Action::Quit,
+                    crate::neovim::TutorAction::Hint => crate::app::Action::Hint,
+                };
+                apply_event(
+                    &mut state,
+                    &repository,
+                    &root,
+                    &mut workers,
+                    Event::Command(action),
+                );
+                if source_action {
+                    pending_neovim_run_action = false;
+                    if cancel_after_neovim_run_action {
+                        cancel_after_neovim_run_action = false;
+                        apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::Command(crate::app::Action::Cancel),
+                        );
+                    }
+                }
+                needs_draw = true;
             }
             if needs_draw {
                 terminal
                     .draw(|frame| render::render(frame, &state))
                     .map_err(|e| format!("cannot draw terminal: {e}"))?;
-                needs_draw = false
+                needs_draw = false;
             }
             if !event::poll(Duration::from_millis(50))
                 .map_err(|e| format!("cannot poll terminal: {e}"))?
@@ -1251,41 +1437,124 @@ pub fn run(
             }
             match event::read().map_err(|e| format!("cannot read terminal: {e}"))? {
                 TerminalEvent::Key(key) => {
-                    if let Some(action) = input::action_for_key(key, &mut state) {
-                        let effects = reduce(&mut state, Event::Command(action));
-                        let (runner_worker, codex_worker) = workers.parts();
-                        apply_effects(
+                    if input::routes_to_neovim(key, &state) {
+                        let leader_pending = state.leader_pending
+                            && state.solve.as_ref().is_some_and(|solve| {
+                                solve.pane == SolvePane::Editor
+                                    && solve.editor.mode == crate::editor::Mode::Normal
+                            });
+                        if leader_pending {
+                            state.leader_pending = false;
+                        }
+                        if let Some(mut encoded) = crate::neovim::key::encode_key(key)? {
+                            let source_action =
+                                matches!(key.code, crossterm::event::KeyCode::F(5 | 9))
+                                    || leader_pending
+                                        && matches!(
+                                            key.code,
+                                            crossterm::event::KeyCode::Char('t' | 's')
+                                        )
+                                    || key.code == crossterm::event::KeyCode::Char('s')
+                                        && key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::CONTROL);
+                            if leader_pending {
+                                encoded.insert_str(0, "<Space>");
+                            }
+                            workers
+                                .neovim
+                                .as_ref()
+                                .expect("runtime Neovim worker exists")
+                                .input(encoded)?;
+                            pending_neovim_run_action |= source_action;
+                        }
+                        needs_draw = true;
+                    } else if let Some(action) = input::action_for_key(key, &mut state) {
+                        if action == crate::app::Action::Cancel && pending_neovim_run_action {
+                            cancel_after_neovim_run_action = true;
+                            continue;
+                        }
+                        apply_event(
                             &mut state,
                             &repository,
                             &root,
-                            runner_worker,
-                            codex_worker,
-                            effects,
+                            &mut workers,
+                            Event::Command(action),
                         );
-                        needs_draw = true
+                        needs_draw = true;
                     }
                 }
-                TerminalEvent::Resize(_, _) => needs_draw = true,
+                TerminalEvent::Resize(width, height) => {
+                    if let Some((grid_width, grid_height)) =
+                        render::neovim_grid_size(&state, width, height)
+                    {
+                        workers
+                            .neovim
+                            .as_ref()
+                            .expect("runtime Neovim worker exists")
+                            .resize(grid_width, grid_height)?;
+                    }
+                    needs_draw = true;
+                }
                 TerminalEvent::Paste(text) => {
-                    let effects = reduce(
-                        &mut state,
-                        Event::Command(crate::app::Action::Editor(
-                            crate::app::EditorAction::Paste(text),
-                        )),
-                    );
-                    let (runner_worker, codex_worker) = workers.parts();
-                    apply_effects(
-                        &mut state,
-                        &repository,
-                        &root,
-                        runner_worker,
-                        codex_worker,
-                        effects,
-                    );
-                    needs_draw = true
+                    if state.screen == crate::app::Screen::Solve
+                        && state
+                            .solve
+                            .as_ref()
+                            .is_some_and(|solve| solve.pane == SolvePane::Editor)
+                    {
+                        workers
+                            .neovim
+                            .as_ref()
+                            .expect("runtime Neovim worker exists")
+                            .paste(text)?;
+                        needs_draw = true;
+                    }
                 }
-                TerminalEvent::FocusGained | TerminalEvent::FocusLost | TerminalEvent::Mouse(_) => {
+                TerminalEvent::Mouse(mouse) => {
+                    let size = terminal
+                        .size()
+                        .map_err(|error| format!("cannot read terminal size: {error}"))?;
+                    if let Some(area) = render::neovim_grid_area(&state, size.width, size.height)
+                        && mouse.column >= area.x
+                        && mouse.column < area.right()
+                        && mouse.row >= area.y
+                        && mouse.row < area.bottom()
+                        && let Some((button, action)) = neovim_mouse_kind(mouse.kind)
+                    {
+                        let mut modifiers = String::new();
+                        if mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::SHIFT)
+                        {
+                            modifiers.push('S');
+                        }
+                        if mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                        {
+                            modifiers.push('C');
+                        }
+                        if mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::ALT)
+                        {
+                            modifiers.push('A');
+                        }
+                        workers
+                            .neovim
+                            .as_ref()
+                            .expect("runtime Neovim worker exists")
+                            .mouse(
+                                button.into(),
+                                action.into(),
+                                modifiers,
+                                mouse.row - area.y,
+                                mouse.column - area.x,
+                            )?;
+                    }
                 }
+                TerminalEvent::FocusGained | TerminalEvent::FocusLost => {}
             }
         }
         Ok(())
@@ -1310,6 +1579,24 @@ mod tests {
     use crate::app::model::OperationId;
     use crate::runner::{ExecutionPlan, ExecutionResult, Termination};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn mouse_events_map_to_neovim_protocol_actions() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        assert_eq!(
+            neovim_mouse_kind(MouseEventKind::Down(MouseButton::Left)),
+            Some(("left", "press"))
+        );
+        assert_eq!(
+            neovim_mouse_kind(MouseEventKind::Drag(MouseButton::Right)),
+            Some(("right", "drag"))
+        );
+        assert_eq!(
+            neovim_mouse_kind(MouseEventKind::ScrollUp),
+            Some(("wheel", "up"))
+        );
+        assert_eq!(neovim_mouse_kind(MouseEventKind::Moved), None);
+    }
 
     fn plan() -> ExecutionPlan {
         ExecutionPlan {
@@ -1566,6 +1853,8 @@ mod tests {
             language: "python".into(),
             plan: plan(),
             editor: EditorDocument::new("source".into()).unwrap(),
+            editor_view: None,
+            editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Interview,
             output: String::new(),
             output_scroll: 0,
@@ -1754,6 +2043,8 @@ mod tests {
             language: "python".into(),
             plan: plan(),
             editor: EditorDocument::new("source".into()).unwrap(),
+            editor_view: None,
+            editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
             output: String::new(),
             output_scroll: 0,

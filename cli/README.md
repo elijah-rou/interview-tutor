@@ -32,13 +32,13 @@ cargo test --manifest-path cli/Cargo.toml --locked -- --test-threads=1
 
 `--db` is a global `practice` flag and an `interview` flag. Resolution is `--db` > `PRACTICE_DATABASE_URL` > `PRACTICE_DB_PATH` > legacy `BLIND75_DATABASE_URL`/`BLIND75_DB_PATH` > `.turso/progress.db`. On first open the CLI creates the parent directory and database, migrates a supported older schema, and reconciles `catalog/problems.json` plus `problem_sets/*.json`.
 
-`./interview --set ID --language ID --no-codex` selects an initial set and enabled language and disables all Codex probing/spawning. Without `--set`, the TUI starts at the set menu. Without `--language`, it selects Python when enabled and otherwise the first enabled language. `--no-codex` overrides the default available Codex integration; local solve does not depend on it.
+`./interview --set ID --language ID --neovim PATH --no-codex` selects an initial set, enabled language, required clean Neovim executable, and disables all Codex probing/spawning. Without `--set`, the TUI starts at the set menu. Without `--language`, it selects Python when enabled and otherwise the first enabled language. Neovim resolves from `--neovim`, `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`, then `PATH`; a compatible trusted executable is required to solve. `--no-codex` overrides the default available Codex integration; local solve does not depend on it.
 
 ## Solve behavior
 
-From problem detail, Enter loads the catalog-planned source into the native editor. Ctrl-S/F5 atomically save and test without an attempt. F9/`:submit` save, test, and record one attempt after the runner terminates. A failed save starts no child. Explicit submit can request Codex review only after recording succeeds, and review uses that operation's exact captured source revision. See [the TUI guide](../docs/interview-tui.md).
+From problem detail, Enter loads the catalog-planned source over bounded MessagePack-RPC into a host-owned scratch buffer rendered by required clean embedded Neovim. Ctrl-S/F5/`Space t` atomically save and test without an attempt. F9/`Space s`/`:TutorSubmit` save, test, and record one attempt after the runner terminates. A failed save starts no child. Explicit submit can request Codex review only after recording succeeds, and review uses that operation's exact captured source revision. See [the TUI guide](../docs/interview-tui.md).
 
-The editor accepts at most 1 MiB, 100,000 lines, 32 undo snapshots, and a 256-byte command. Linux `openat2` resolution confines loads and same-directory atomic saves to the planned regular source beneath the canonical project root.
+The host accepts at most 1 MiB and 100,000 logical lines. An oversized native operation is rejected by restarting Neovim from the last valid exact source without changing the application revision. Linux `openat2` resolution confines loads and same-directory atomic saves to the planned regular source beneath the canonical project root; Neovim never receives that path.
 
 ## Components
 

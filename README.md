@@ -11,7 +11,7 @@ Required on Linux:
 - GNU Make and GNU coreutils (`timeout` and `readlink -f`)
 - a UTF-8, `xterm-256color`-compatible terminal for the TUI
 
-SQLite is bundled into the Rust CLI. Turso and Codex are optional.
+SQLite is bundled into the Rust CLI. Neovim 0.9 through 1.x is required for the embedded interview editor; Turso and Codex are optional.
 
 ```console
 git clone https://github.com/elijah-rou/interview-tutor.git
@@ -37,7 +37,7 @@ Database precedence is:
 4. legacy `BLIND75_DATABASE_URL` and `BLIND75_DB_PATH`
 5. `.turso/progress.db`
 
-Relative paths are resolved from the repository root; `file:` URLs and `~/` are accepted. TUI startup flags take precedence over defaults: `--set ID` opens that set instead of the set menu, `--language ID` selects an enabled language instead of Python (or the first enabled language), and `--no-codex` prevents any Codex version probe or process spawn. The `./run` launcher also accepts `--db`.
+Relative paths are resolved from the repository root; `file:` URLs and `~/` are accepted. TUI startup flags take precedence over defaults: `--set ID` opens that set instead of the set menu, `--language ID` selects an enabled language instead of Python (or the first enabled language), `--neovim PATH` selects the required clean embedded Neovim executable, and `--no-codex` prevents any Codex version probe or process spawn. `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE` is the Neovim environment fallback. The `./run` launcher also accepts `--db`.
 
 ## Practice flow
 
@@ -54,7 +54,7 @@ Browse a set, inspect progress, open a problem, then solve it in the TUI:
 ./interview --set blind75 --language python --no-codex
 ```
 
-In `./interview`, choose a set and problem with `j`/`k` and Enter, then press Enter from problem detail to open the planned source. F5 or Ctrl-S atomically saves and tests without recording progress. F9 or `:submit` saves, tests, and records exactly one attempt after execution terminates. See [the TUI guide](docs/interview-tui.md) for all keys, responsive layouts, stale/error states, and guarded exit behavior.
+In `./interview`, choose a set and problem with `j`/`k` and Enter, then press Enter from problem detail to open the planned source in required clean embedded Neovim. F5, Ctrl-S, or `Space t` atomically saves and tests without recording progress. F9, `Space s`, or `:TutorSubmit` saves, tests, and records exactly one attempt after execution terminates. See [the TUI guide](docs/interview-tui.md) for the full Neovim surface, integration commands, responsive layouts, stale/error states, and guarded exit behavior.
 
 Run a problem directly by global slug, or by set plus slug/1-based index:
 

@@ -1,7 +1,7 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
 use super::model::{
-    AppState, CodexStatus, DiscardAction, Focus, MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId,
-    RecordedSubmissionReview, Screen, SolvePane,
+    AppState, CodexStatus, DiscardAction, EditorRuntimeStatus, Focus, MAX_COMPOSER_BYTES,
+    MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
 };
 use crate::codex::prompt::Mode as CodexMode;
 use crate::editor::{EditorCommand, Mode};
@@ -391,7 +391,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 EditorAction::Paste(text) => match solve.editor.mode {
                     Mode::Insert => solve.editor.insert_text(&text),
                     Mode::Command => solve.editor.command_text(&text),
-                    Mode::Normal => Err("paste ignored in Normal mode".into()),
+                    Mode::Normal | Mode::Visual => Err("paste ignored outside Insert mode".into()),
                 },
                 EditorAction::CommandChar(character) => {
                     solve.editor.command_text(&character.to_string())
@@ -529,6 +529,60 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     if state.screen == Screen::Solve {
         match event {
             Event::Command(action) => return solve_command(state, action),
+            Event::NeovimStarted(result) => {
+                let solve = state.solve.as_mut().expect("solve exists");
+                match result {
+                    Ok(()) => {
+                        solve.editor_status = EditorRuntimeStatus::Ready;
+                        if state.status == "Starting Neovim…" {
+                            state.status = "Neovim ready".into();
+                        }
+                    }
+                    Err(error) => {
+                        solve.editor_status = EditorRuntimeStatus::Failed;
+                        state.status = "Neovim failed".into();
+                        state.error = Some(error);
+                    }
+                }
+                return Vec::new();
+            }
+            Event::NeovimDocument(update) => {
+                let solve = state.solve.as_mut().expect("solve exists");
+                let revision_before = solve.editor.revision;
+                if let Err(error) = solve.editor.install_neovim_snapshot(
+                    update.text,
+                    &update.mode,
+                    update.changedtick,
+                ) {
+                    solve.editor_status = EditorRuntimeStatus::Failed;
+                    state.error = Some(error);
+                } else if solve.editor.revision != revision_before {
+                    solve.stale = solve
+                        .latest_run_revision
+                        .is_some_and(|revision| revision != solve.editor.revision);
+                }
+                return Vec::new();
+            }
+            Event::NeovimView(view) => {
+                let solve = state.solve.as_mut().expect("solve exists");
+                solve.editor.update_neovim_mode(&view.mode);
+                solve.editor_view = Some(view);
+                return Vec::new();
+            }
+            Event::NeovimWarning(error) => {
+                state.solve.as_mut().expect("solve exists").editor_status =
+                    EditorRuntimeStatus::Ready;
+                state.status = "Neovim edit rejected".into();
+                state.error = Some(error);
+                return Vec::new();
+            }
+            Event::NeovimFailed(error) => {
+                state.solve.as_mut().expect("solve exists").editor_status =
+                    EditorRuntimeStatus::Failed;
+                state.status = "Neovim failed".into();
+                state.error = Some(error);
+                return Vec::new();
+            }
             Event::CodexConnected(operation, result) => {
                 if state.codex.connecting != Some(operation) {
                     return Vec::new();
@@ -972,10 +1026,19 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             state.active_operation = None;
             match result {
                 Ok(solve) => {
+                    let effect = Effect::StartNeovim {
+                        source: solve.editor.text().to_string(),
+                        synthetic_name: format!(
+                            "interview://{}.{}",
+                            solve.problem_slug, solve.language
+                        ),
+                        language: solve.language.clone(),
+                    };
                     state.solve = Some(*solve);
                     state.screen = Screen::Solve;
-                    state.status = "Ready".into();
-                    state.error = None
+                    state.status = "Starting Neovim…".into();
+                    state.error = None;
+                    return vec![effect];
                 }
                 Err(error) => {
                     state.status = "Source load failed".into();
@@ -983,6 +1046,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
             }
         }
+        Event::NeovimStarted(_)
+        | Event::NeovimDocument(_)
+        | Event::NeovimView(_)
+        | Event::NeovimWarning(_)
+        | Event::NeovimFailed(_) => {}
         Event::RunFinished(_, _, _, _, _) => {}
         Event::Loaded(operation, result) => {
             if state.active_operation != Some(operation) {
@@ -1154,6 +1222,8 @@ mod tests {
                 solution_path: PathBuf::from("/tmp/p.py"),
             },
             editor: EditorDocument::new("print(1)".into()).unwrap(),
+            editor_view: None,
+            editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
             output: String::new(),
             output_scroll: 0,

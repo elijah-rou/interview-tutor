@@ -2,6 +2,29 @@ use crate::app::{Action, AppState, EditorAction, Screen};
 use crate::editor::Mode;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+pub fn routes_to_neovim(key: KeyEvent, state: &AppState) -> bool {
+    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return false;
+    }
+    let Some(solve) = state.solve.as_ref() else {
+        return false;
+    };
+    if state.screen != Screen::Solve
+        || solve.pane != crate::app::model::SolvePane::Editor
+        || solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed
+    {
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if solve.editor.mode == Mode::Normal && !state.leader_pending && key.code == KeyCode::Char(' ')
+    {
+        return false;
+    }
+    !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+}
+
 pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
@@ -13,6 +36,30 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
     let mode = solve.editor.mode;
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Action::Cancel);
+    }
+    if solve.pane == crate::app::model::SolvePane::Editor
+        && solve.editor_status == crate::app::model::EditorRuntimeStatus::Failed
+    {
+        if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
+            || key.code == KeyCode::BackTab
+        {
+            return Some(Action::PreviousFocus);
+        }
+        if key.code == KeyCode::Tab {
+            return Some(Action::NextFocus);
+        }
+        if state.leader_pending {
+            state.leader_pending = false;
+            return match key.code {
+                KeyCode::Char('b') => Some(Action::Back),
+                KeyCode::Char('q') => Some(Action::Quit),
+                _ => None,
+            };
+        }
+        if key.code == KeyCode::Char(' ') {
+            state.leader_pending = true;
+        }
+        return None;
     }
     if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Action::SaveTest);
@@ -49,6 +96,8 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         if state.leader_pending {
             state.leader_pending = false;
             return match key.code {
+                KeyCode::Char('t') => Some(Action::SaveTest),
+                KeyCode::Char('s') => Some(Action::Submit),
                 KeyCode::Char('h') => Some(Action::Hint),
                 KeyCode::Char('r') if solve.pane == crate::app::model::SolvePane::Interview => {
                     Some(Action::ResetInterview)
@@ -114,7 +163,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             }
             _ => None,
         },
-        Mode::Normal => {
+        Mode::Normal | Mode::Visual => {
             if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Some(Action::Editor(EditorAction::Redo));
             }
@@ -173,6 +222,8 @@ mod tests {
                 solution_path: PathBuf::from("/tmp/p.py"),
             },
             editor: EditorDocument::new("x".into()).unwrap(),
+            editor_view: None,
+            editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
             output: String::new(),
             output_scroll: 0,
@@ -188,6 +239,45 @@ mod tests {
             submitted_source: None,
         });
         state
+    }
+
+    #[test]
+    fn focused_editor_routes_full_neovim_surface_except_outer_app_keys() {
+        let mut state = solve_state();
+        for key in [
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            assert!(routes_to_neovim(key, &state));
+        }
+        for key in [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert!(!routes_to_neovim(key, &state));
+        }
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        assert!(!routes_to_neovim(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            &state
+        ));
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        state.solve.as_mut().unwrap().editor_status =
+            crate::app::model::EditorRuntimeStatus::Failed;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use clap::Parser;
 use practice_cli::app::{AppState, Repository};
 use practice_cli::{config, database, tui};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -20,6 +21,12 @@ struct Cli {
     problem_set: Option<String>,
     #[arg(long, value_name = "ID", help = "select an enabled language")]
     language: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "required clean Neovim executable used by the embedded editor"
+    )]
+    neovim: Option<PathBuf>,
     #[arg(
         long,
         help = "disable Codex without probing or spawning its executable"
@@ -52,6 +59,7 @@ fn run() -> Result<ExitCode, String> {
             .position(|item| item.slug == "python")
             .unwrap_or(0),
     };
+    let neovim_executable = practice_cli::neovim::resolve_executable(cli.neovim.as_deref())?;
     let mut state = AppState::new(languages, language_index);
     if cli.no_codex {
         state.disable_codex();
@@ -65,6 +73,7 @@ fn run() -> Result<ExitCode, String> {
         cli.problem_set,
         root,
         database_path,
+        neovim_executable,
     );
     #[cfg(debug_assertions)]
     if let Some(probe) = disposition_probe {
@@ -96,5 +105,12 @@ mod tests {
             Cli::try_parse_from(["interview-tutor", "--language", "python", "--no-codex"]).unwrap();
         assert!(disabled.no_codex);
         assert_eq!(disabled.language.as_deref(), Some("python"));
+
+        let selected =
+            Cli::try_parse_from(["interview-tutor", "--neovim", "/usr/bin/nvim"]).unwrap();
+        assert_eq!(
+            selected.neovim.as_deref(),
+            Some(std::path::Path::new("/usr/bin/nvim"))
+        );
     }
 }

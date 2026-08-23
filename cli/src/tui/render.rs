@@ -1,13 +1,12 @@
 use crate::app::model::{
     AppState, Focus, MAX_RENDERED_MARKDOWN_CHARS, MAX_ROWS, Screen, SolvePane,
 };
-use crate::editor::{Mode, highlight_line, highlight_style};
+use crate::editor::Mode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 fn block(title: &str) -> Block<'static> {
@@ -132,7 +131,10 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             (SolvePane::Editor, Mode::Insert) => {
                 "Esc normal · F5 test · F9 submit · Tab panes".into()
             }
-            (SolvePane::Editor, Mode::Command) => "Enter command · Esc normal · Tab panes".into(),
+            (SolvePane::Editor, Mode::Visual) => {
+                "Neovim Visual · F5 test · F9 submit · Tab panes".into()
+            }
+            (SolvePane::Editor, Mode::Command) => "Neovim command · Esc normal · Tab panes".into(),
             (SolvePane::Interview, _)
                 if matches!(
                     state.codex.status,
@@ -316,92 +318,47 @@ fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
     }
 }
 
-fn highlighted_crop(language: &str, line: &str, start: usize, width: usize) -> Line<'static> {
-    let highlights = highlight_line(language, line);
-    let mut used: usize = 0;
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (grapheme_index, (byte_index, grapheme)) in line.grapheme_indices(true).enumerate() {
-        if grapheme_index < start {
-            continue;
-        }
-        let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if used.saturating_add(grapheme_width) > width {
-            break;
-        }
-        let kind = highlights
-            .iter()
-            .find(|span| span.start <= byte_index && byte_index < span.end)
-            .map_or(crate::editor::HighlightKind::Plain, |span| span.kind);
-        spans.push(Span::styled(grapheme.to_string(), highlight_style(kind)));
-        used += grapheme_width;
-    }
-    Line::from(spans)
-}
-
 fn solve_editor(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
     let Some(solve) = &state.solve else { return };
-    let visible = usize::from(area.height.saturating_sub(3)).max(1);
-    let start = if solve.editor.row >= solve.editor.viewport_row.saturating_add(visible) {
-        solve.editor.row.saturating_add(1).saturating_sub(visible)
+    let title = if solve.pane == SolvePane::Editor {
+        "Editor · Neovim [active]"
     } else {
-        solve.editor.viewport_row.min(solve.editor.row)
+        "Editor · Neovim"
     };
-    let visible_columns = usize::from(area.width.saturating_sub(2)).max(1);
-    let cursor_line = solve.editor.line(solve.editor.row);
-    let mut viewport_column = solve.editor.viewport_column.min(solve.editor.column);
-    while viewport_column < solve.editor.column {
-        let visible_prefix = cursor_line
-            .graphemes(true)
-            .skip(viewport_column)
-            .take(solve.editor.column - viewport_column)
-            .collect::<String>();
-        if UnicodeWidthStr::width(visible_prefix.as_str()) < visible_columns {
-            break;
+    let editor_block = block(title);
+    let inner = editor_block.inner(area);
+    frame.render_widget(editor_block, area);
+    let Some(view) = solve.editor_view.as_ref() else {
+        let message = match solve.editor_status {
+            crate::app::model::EditorRuntimeStatus::Starting => "Starting required Neovim…",
+            crate::app::model::EditorRuntimeStatus::Ready => "Waiting for Neovim redraw…",
+            crate::app::model::EditorRuntimeStatus::Failed => "Neovim unavailable",
+        };
+        frame.render_widget(Paragraph::new(message), inner);
+        return;
+    };
+    let rows = usize::from(inner.height).min(view.height);
+    let columns = usize::from(inner.width).min(view.width);
+    let buffer = frame.buffer_mut();
+    for row in 0..rows {
+        for column in 0..columns {
+            let cell = view.cell(row, column).expect("bounded Neovim grid cell");
+            let x = inner.x + u16::try_from(column).expect("grid column fits u16");
+            let y = inner.y + u16::try_from(row).expect("grid row fits u16");
+            buffer[(x, y)]
+                .set_symbol(&cell.text)
+                .set_style(view.style(cell.highlight));
         }
-        viewport_column += 1;
     }
-    let mut lines = solve
-        .editor
-        .text()
-        .split('\n')
-        .skip(start)
-        .take(visible)
-        .map(|line| highlighted_crop(&solve.language, line, viewport_column, visible_columns))
-        .collect::<Vec<_>>();
-    let inline = if solve.editor.mode == Mode::Command {
-        format!(":{}", solve.editor.command_buffer)
-    } else if let Some(error) = &solve.editor.error {
-        format!("Error: {error}")
-    } else {
-        String::new()
-    };
-    lines.push(Line::styled(inline, Style::default().fg(Color::Red)));
-    frame.render_widget(
-        Paragraph::new(lines).block(block(if solve.pane == SolvePane::Editor {
-            "Editor [active]"
-        } else {
-            "Editor"
-        })),
-        area,
-    );
-    if solve.pane == SolvePane::Editor && matches!(solve.editor.mode, Mode::Insert | Mode::Normal) {
-        let visible_prefix = cursor_line
-            .graphemes(true)
-            .skip(viewport_column)
-            .take(solve.editor.column.saturating_sub(viewport_column))
-            .collect::<String>();
-        let cursor_width = UnicodeWidthStr::width(visible_prefix.as_str());
-        let x = area
-            .x
-            .saturating_add(1)
-            .saturating_add(u16::try_from(cursor_width).unwrap_or(u16::MAX))
-            .min(area.right().saturating_sub(2));
-        let y = area
-            .y
-            .saturating_add(1)
-            .saturating_add(solve.editor.row.saturating_sub(start) as u16)
-            .min(area.bottom().saturating_sub(2));
-        frame.set_cursor_position((x, y));
+    if solve.pane == SolvePane::Editor
+        && view.cursor_visible
+        && view.cursor_row < rows
+        && view.cursor_column < columns
+    {
+        frame.set_cursor_position((
+            inner.x + u16::try_from(view.cursor_column).expect("cursor column fits u16"),
+            inner.y + u16::try_from(view.cursor_row).expect("cursor row fits u16"),
+        ));
     }
 }
 fn solve_problem(state: &AppState) -> Paragraph<'static> {
@@ -552,6 +509,38 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             }
         }
     }
+}
+
+pub fn neovim_grid_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
+    let solve = state.solve.as_ref()?;
+    if width < 60 || height < 20 {
+        return None;
+    }
+    let content = Rect::new(0, 2, width, height.saturating_sub(3));
+    let editor = if content.width >= 100 && content.height >= 28 {
+        let vertical = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(content);
+        Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(45),
+            Constraint::Percentage(25),
+        ])
+        .split(vertical[0])[1]
+    } else if solve.pane == SolvePane::Editor {
+        Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(content)[1]
+    } else {
+        return None;
+    };
+    Some(Rect::new(
+        editor.x.saturating_add(1),
+        editor.y.saturating_add(1),
+        editor.width.saturating_sub(2).max(1),
+        editor.height.saturating_sub(2).max(1),
+    ))
+}
+
+pub fn neovim_grid_size(state: &AppState, width: u16, height: u16) -> Option<(u16, u16)> {
+    neovim_grid_area(state, width, height).map(|area| (area.width, area.height))
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -914,6 +903,8 @@ mod tests {
             },
             editor: EditorDocument::new("def solve():\n    return \"界\" # comment".into())
                 .unwrap(),
+            editor_view: None,
+            editor_status: crate::app::model::EditorRuntimeStatus::Ready,
             pane: SolvePane::Editor,
             output: "compiler error".into(),
             output_scroll: 0,
@@ -969,9 +960,42 @@ mod tests {
     }
 
     #[test]
-    fn solve_layouts_interview_privacy_badge_and_syntax_style() {
-        use crate::editor::EditorDocument;
+    fn solve_layouts_render_neovim_grid_and_native_highlights() {
+        use crate::neovim::grid::{GridCell, GridSnapshot, Highlight};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
         let mut state = solve_state();
+        let width = 20;
+        let height = 3;
+        let mut cells = vec![GridCell::default(); width * height];
+        for (column, character) in "def solve():".chars().enumerate() {
+            cells[column] = GridCell {
+                text: character.to_string(),
+                highlight: if column < 3 { 7 } else { 0 },
+            };
+        }
+        let mut highlights = HashMap::new();
+        highlights.insert(
+            7,
+            Highlight {
+                foreground: Some(0xff00ff),
+                ..Highlight::default()
+            },
+        );
+        state.solve.as_mut().unwrap().editor_view = Some(Arc::new(GridSnapshot {
+            width,
+            height,
+            cells,
+            highlights: Arc::new(highlights),
+            default_foreground: None,
+            default_background: None,
+            cursor_row: 0,
+            cursor_column: 0,
+            cursor_visible: true,
+            mode: "normal".into(),
+        }));
+
         let full = rendered(&state, 120, 40);
         assert!(full.contains("Problem / Examples"));
         assert!(full.contains("compiler error"));
@@ -985,11 +1009,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &state)).unwrap();
         let keyword = &terminal.backend().buffer()[(37, 3)];
         assert_eq!(keyword.symbol(), "d");
-        assert_eq!(keyword.fg, Color::Magenta);
-        state.solve.as_mut().unwrap().editor =
-            EditorDocument::new(format!("{}END", "界".repeat(100))).unwrap();
-        state.solve.as_mut().unwrap().editor.normal('$').unwrap();
-        assert!(rendered(&state, 80, 24).contains("END"));
+        assert_eq!(keyword.fg, Color::Rgb(0xff, 0x00, 0xff));
     }
 
     #[test]
@@ -1103,32 +1123,6 @@ mod tests {
             let view = rendered(&state, 80, 24);
             assert!(view.contains(expected));
         }
-    }
-
-    #[test]
-    fn horizontal_crop_preserves_style_from_offscreen_openers() {
-        let comment = highlighted_crop("python", "# hidden comment", 9, 7);
-        assert!(
-            comment
-                .spans
-                .iter()
-                .all(|span| span.style.fg == Some(Color::DarkGray))
-        );
-        assert_eq!(
-            comment
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            "comment"
-        );
-        let string = highlighted_crop("python", "\"hidden string\"", 8, 6);
-        assert!(
-            string
-                .spans
-                .iter()
-                .all(|span| span.style.fg == Some(Color::Green))
-        );
     }
 
     #[test]

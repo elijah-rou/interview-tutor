@@ -391,7 +391,7 @@ def local_test_after_interview(session: PtySession) -> None:
     session.send(ESCAPE)
     session.settle()
     session.send(b"\t")
-    session.wait_screen("Editor [active]")
+    session.wait_screen("Editor · Neovim [active]")
     session.send(F5)
     session.wait_screen("Run complete")
 
@@ -424,12 +424,8 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
         session.send(ESCAPE)
         session.wait_screen("Normal · DIRTY")
         session.send(b":bogus" + ENTER)
-        session.wait_screen("unsupported command: :bogus")
-        session.send(b"h")
-        session.wait_predicate(
-            "command error dismissal",
-            lambda: "unsupported command" not in session.screen.text(),
-        )
+        session.wait_screen("E492: Not an editor command: bogus")
+        session.send(ENTER)
         session.send(b"u")
         session.wait_predicate(
             "Unicode insertion undo",
@@ -514,6 +510,47 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
     )
 
 
+def broad_neovim_case(fixture: MatrixFixture) -> str:
+    fixture.set_runner("normal")
+    database = fixture.database("neovim")
+    environment, _ = fixture.environment()
+    pid_file = fixture.temporary / "embedded-neovim.pid"
+    environment["INTERVIEW_TUTOR_TEST_NEOVIM_PID_FILE"] = str(pid_file)
+    fixture.cleanup.register_pid_file(pid_file)
+    with fixture.launch(database, environment) as session:
+        open_solve(session)
+        session.wait_screen("print('initial')")
+
+        session.send(b"0v2ld")
+        session.wait_screen("nt('initial')")
+        session.send(b"u")
+        session.wait_screen("print('initial')")
+
+        session.send(b"0f'ci'VALUE" + ESCAPE)
+        session.wait_screen("VALUE")
+        session.send(b"u")
+        session.wait_screen("print('initial')")
+
+        session.send(b"qaA!" + ESCAPE + b"q@a.")
+        session.wait_screen("print('initial')!!!")
+        session.send(b"/initial" + ENTER + b"n")
+        session.send(b"gg\"ayyGp")
+        session.send(b":TutorTest" + ENTER)
+        session.wait_screen("Run complete")
+        assert fixture.solution.read_text(encoding="utf-8") == (
+            "print('initial')!!!\nprint('initial')!!!\n"
+        )
+        assert query_attempts(database) == []
+
+        session.send(b":TutorSubmit" + ENTER)
+        session.wait_screen("Submit recorded")
+        assert query_attempts(database) == [("pass", 0)]
+        quit_from_editor(session)
+
+    assert pid_file.exists()
+    return "visual+count+text-object+macro+dot+search+named-register+Tutor commands"
+
+
 def compact_case(fixture: MatrixFixture) -> str:
     fixture.set_runner("normal")
     database = fixture.database("compact")
@@ -559,7 +596,7 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.wait_screen("compact-question-5-")
 
         session.send(b"\t")
-        session.wait_screen("Editor [active]")
+        session.wait_screen("Editor · Neovim [active]")
         session.send(F5)
         session.wait_screen("Run complete")
         assert query_attempts(database) == []
@@ -591,7 +628,7 @@ def compact_case(fixture: MatrixFixture) -> str:
         assert len(captured_turns(home)) == 7
         session.wait_screen("Submit recorded")
         session.send(b"\t")
-        session.wait_screen("Editor [active]")
+        session.wait_screen("Editor · Neovim [active]")
         quit_from_editor(session)
     assert_codex_cleanup(home)
     return "attempts test=0 submit=1(pass) turns=7 compact=80x24 status=0"
@@ -948,6 +985,7 @@ class Matrix:
 
 def full_matrix(fixture: MatrixFixture, matrix: Matrix) -> None:
     matrix.run("workflow-120x40", lambda: full_workflow_case(fixture))
+    matrix.run("neovim-full-surface", lambda: broad_neovim_case(fixture))
     matrix.run("compact-80x24", lambda: compact_case(fixture))
     matrix.run("resize-preservation", lambda: resize_case(fixture))
 
