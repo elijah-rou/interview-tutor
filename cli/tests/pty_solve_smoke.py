@@ -242,6 +242,39 @@ def main() -> int:
         assert len(pi_processes) == 1, pi_processes
         assert all(not Path(record["cwd"]).exists() for record in pi_processes)
 
+        large_source = "payload = '" + ("x" * (256 * 1024)) + "'\n"
+        solution.write_text(large_source)
+        (pi_home / "fake-mode").write_text("no-read-after-get-state")
+        master, process, output, screen = launch(interview_binary, database, pi_env)
+        try:
+            open_solve(master, process, output, screen, deadline)
+            os.write(master, b"\t\t\ti")
+            wait_for(master, process, output, screen, "Privacy disclosure", deadline)
+            os.write(master, b"y")
+            wait_for(master, process, output, screen, "Pi: ready", deadline)
+            os.write(master, b"Why?\r")
+            capture_path = pi_home / "fake-capture.jsonl"
+            while '"kind": "state-sent"' not in capture_path.read_text():
+                if time.monotonic() >= deadline:
+                    raise AssertionError("fake Pi did not send state before Ctrl-C")
+                time.sleep(0.01)
+            process.send_signal(signal.SIGINT)
+            process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            assert process.returncode == 130, process.returncode
+        finally:
+            stop_process(master, process)
+        blocked_records = [
+            json.loads(line)
+            for line in (pi_home / "fake-capture.jsonl").read_text().splitlines()
+        ]
+        blocked_process = [
+            record for record in blocked_records if record.get("kind") == "process"
+        ][-1]
+        assert not Path(blocked_process["cwd"]).exists(), blocked_process
+        assert not Path(f"/proc/{blocked_process['pid']}").exists(), blocked_process
+        solution.write_text(recorded_source)
+        (pi_home / "fake-mode").write_text("normal")
+
         master, process, output, screen = launch(interview_binary, database, env)
         try:
             open_solve(master, process, output, screen, deadline)
@@ -342,7 +375,7 @@ def main() -> int:
 
         assert solution.read_text() == recorded_source
         assert time.monotonic() - started <= 24
-        print("default_pi_turns=1 explicit_codex_turns=2 attempts=1 recorded_revision=0 transcript_after_relaunch=0")
+        print("default_pi_turns=1 pi_blocked_write_sigint=130 explicit_codex_turns=2 attempts=1 recorded_revision=0 transcript_after_relaunch=0")
     return 0
 
 

@@ -150,7 +150,10 @@ for raw in sys.stdin:
     command = json.loads(raw)
     command_type = command.get("type")
     command_id = command.get("id")
-    record({"kind": "command", "command_type": command_type, "id": command_id})
+    command_record = {"kind": "command", "command_type": command_type, "id": command_id}
+    if command_type == "prompt":
+        command_record["message"] = command.get("message")
+    record(command_record)
     if command_type == "get_state":
         if mode == "malformed":
             sys.stdout.write("{not-json}\n")
@@ -191,6 +194,10 @@ for raw in sys.stdin:
                 "data": state,
             }
         )
+        if mode == "no-read-after-get-state":
+            record({"kind": "state-sent"})
+            while True:
+                time.sleep(60)
     elif command_type == "prompt":
         prompt_count += 1
         if mode == "prompt-auth":

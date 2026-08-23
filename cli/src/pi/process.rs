@@ -133,7 +133,8 @@ impl PiProcess {
                     ));
                 }
             };
-        if let Err(primary) = set_nonblocking(output.as_raw_fd(), "Pi stdout")
+        if let Err(primary) = set_nonblocking(input.as_raw_fd(), "Pi stdin")
+            .and_then(|()| set_nonblocking(output.as_raw_fd(), "Pi stdout"))
             .and_then(|()| set_nonblocking(error.as_raw_fd(), "Pi stderr"))
         {
             drop(input);
@@ -201,8 +202,19 @@ impl PiProcess {
         if self.provider.is_none() {
             self.load_state(cancellation)?;
         }
-        let prompt_id = self.send_command(json!({"type":"prompt","message":&input}))?;
         let deadline = Instant::now() + timeout;
+        let prompt_id = self.send_command(
+            json!({"type":"prompt","message":&input}),
+            Some((
+                cancellation,
+                InterviewerError::cancelled(Backend::Pi, "Pi turn cancelled"),
+            )),
+            deadline,
+            InterviewerError::timeout(
+                Backend::Pi,
+                format!("Pi turn timed out after {}ms", timeout.as_millis()),
+            ),
+        )?;
         let mut prompt_accepted = false;
         let mut observation = TurnObservation::default();
         let mut interruption: Option<Interruption> = None;
@@ -217,13 +229,25 @@ impl PiProcess {
                 if !prompt_accepted {
                     return self.fail(reason.error());
                 }
-                let abort_id = self.send_command(json!({"type":"abort"}))?;
+                let abort_deadline = now + ABORT_TIMEOUT;
+                let abort_id = self.send_command(
+                    json!({"type":"abort"}),
+                    None,
+                    abort_deadline,
+                    InterviewerError::protocol(
+                        Backend::Pi,
+                        format!(
+                            "{}; Pi did not acknowledge abort and settle within 2s",
+                            reason.message()
+                        ),
+                    ),
+                )?;
                 interruption = Some(Interruption {
                     reason,
                     abort_id,
                     acknowledged: false,
                     settled: false,
-                    deadline: now + ABORT_TIMEOUT,
+                    deadline: abort_deadline,
                 });
             }
             if let Some(interruption) = interruption.as_ref()
@@ -364,8 +388,16 @@ impl PiProcess {
     }
 
     fn load_state(&mut self, cancellation: &CancellationToken) -> Result<(), InterviewerError> {
-        let id = self.send_command(json!({"type":"get_state"}))?;
         let deadline = Instant::now() + Duration::from_secs(10);
+        let id = self.send_command(
+            json!({"type":"get_state"}),
+            Some((
+                cancellation,
+                InterviewerError::cancelled(Backend::Pi, "Pi startup cancelled"),
+            )),
+            deadline,
+            InterviewerError::timeout(Backend::Pi, "Pi get_state timed out"),
+        )?;
         loop {
             if cancellation.is_cancelled() {
                 return self.fail(InterviewerError::cancelled(
@@ -441,8 +473,16 @@ impl PiProcess {
         &mut self,
         cancellation: &CancellationToken,
     ) -> Result<String, InterviewerError> {
-        let id = self.send_command(json!({"type":"get_last_assistant_text"}))?;
         let deadline = Instant::now() + Duration::from_secs(10);
+        let id = self.send_command(
+            json!({"type":"get_last_assistant_text"}),
+            Some((
+                cancellation,
+                InterviewerError::cancelled(Backend::Pi, "Pi turn cancelled after settlement"),
+            )),
+            deadline,
+            InterviewerError::timeout(Backend::Pi, "Pi get_last_assistant_text timed out"),
+        )?;
         loop {
             if cancellation.is_cancelled() {
                 return Err(InterviewerError::cancelled(
@@ -498,7 +538,13 @@ impl PiProcess {
         }
     }
 
-    fn send_command(&mut self, mut command: Value) -> Result<String, InterviewerError> {
+    fn send_command(
+        &mut self,
+        mut command: Value,
+        cancellation: Option<(&CancellationToken, InterviewerError)>,
+        deadline: Instant,
+        timeout_error: InterviewerError,
+    ) -> Result<String, InterviewerError> {
         let id = format!("interview-tutor-{}", self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("Pi request id overflow");
         let object = command.as_object_mut().expect("Pi command object");
@@ -520,14 +566,10 @@ impl PiProcess {
         let result = self
             .input
             .as_mut()
-            .ok_or_else(|| InterviewerError::transport(Backend::Pi, "Pi stdin unavailable"))?
-            .write_all(&bytes)
-            .and_then(|_| self.input.as_mut().expect("input checked").flush());
+            .ok_or_else(|| InterviewerError::transport(Backend::Pi, "Pi stdin unavailable"))
+            .and_then(|input| write_bounded(input, &bytes, cancellation, deadline, timeout_error));
         if let Err(error) = result {
-            return self.fail(InterviewerError::transport(
-                Backend::Pi,
-                format!("cannot write to Pi: {error}"),
-            ));
+            return self.fail(error);
         }
         Ok(id)
     }
@@ -1594,6 +1636,7 @@ fn provider_auth_environment_names() -> &'static [&'static str] {
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_OAUTH_TOKEN",
+        "COPILOT_GITHUB_TOKEN",
         "ANT_LING_API_KEY",
         "OPENAI_API_KEY",
         "AZURE_OPENAI_API_KEY",
@@ -1638,8 +1681,13 @@ fn provider_auth_environment_names() -> &'static [&'static str] {
         "AWS_SESSION_TOKEN",
         "AWS_BEARER_TOKEN_BEDROCK",
         "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_ROLE_ARN",
+        "AWS_ROLE_SESSION_NAME",
         "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
         "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
         "AWS_WEB_IDENTITY_TOKEN_FILE",
         "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
         "AWS_BEDROCK_FORCE_CACHE",
@@ -1676,6 +1724,52 @@ fn configure_process_group(command: &mut Command) {
             Ok(())
         });
     }
+}
+
+fn write_bounded(
+    input: &mut ChildStdin,
+    bytes: &[u8],
+    cancellation: Option<(&CancellationToken, InterviewerError)>,
+    deadline: Instant,
+    timeout_error: InterviewerError,
+) -> Result<(), InterviewerError> {
+    assert!(!bytes.is_empty());
+    let mut written = 0;
+    while written < bytes.len() {
+        if let Some((token, error)) = cancellation.as_ref()
+            && token.is_cancelled()
+        {
+            return Err(error.clone());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(timeout_error);
+        }
+        match input.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(InterviewerError::transport(
+                    Backend::Pi,
+                    "cannot write to Pi: write returned zero bytes",
+                ));
+            }
+            Ok(count) => {
+                assert!(count <= bytes.len() - written);
+                written += count;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+            }
+            Err(error) => {
+                return Err(InterviewerError::transport(
+                    Backend::Pi,
+                    format!("cannot write to Pi: {error}"),
+                ));
+            }
+        }
+    }
+    assert_eq!(written, bytes.len());
+    Ok(())
 }
 
 fn set_nonblocking(file_descriptor: i32, name: &str) -> Result<(), String> {
@@ -2058,20 +2152,92 @@ print("0.84.2")
             assert_eq!(process["forced_offline"], true);
             assert_eq!(process["forced_telemetry_off"], true);
         }
-        for documented in [
-            "RADIUS_API_KEY",
-            "HF_TOKEN",
-            "MINIMAX_CN_API_KEY",
-            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-            "AWS_WEB_IDENTITY_TOKEN_FILE",
-            "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
-            "GOOGLE_CLOUD_PROJECT",
-            "GOOGLE_CLOUD_LOCATION",
-            "PI_CACHE_RETENTION",
-        ] {
-            assert!(provider_auth_environment_names().contains(&documented));
-        }
+        let schema = serde_json::to_string(&crate::interviewer::prompt::output_schema(
+            crate::interviewer::Mode::Interviewer,
+        ))
+        .unwrap();
+        let schema_suffix = format!("\nOUTPUT_SCHEMA_JSON:{schema}");
+        let prompts = records
+            .iter()
+            .filter(|record| record["kind"] == "command" && record["command_type"] == "prompt")
+            .map(|record| record["message"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts
+                .iter()
+                .all(|prompt| prompt.ends_with(&schema_suffix))
+        );
+        assert_eq!(
+            provider_auth_environment_names(),
+            &[
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_OAUTH_TOKEN",
+                "COPILOT_GITHUB_TOKEN",
+                "ANT_LING_API_KEY",
+                "OPENAI_API_KEY",
+                "AZURE_OPENAI_API_KEY",
+                "AZURE_OPENAI_BASE_URL",
+                "AZURE_OPENAI_RESOURCE_NAME",
+                "AZURE_OPENAI_API_VERSION",
+                "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+                "DEEPSEEK_API_KEY",
+                "NVIDIA_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_CLOUD_API_KEY",
+                "GROQ_API_KEY",
+                "CEREBRAS_API_KEY",
+                "XAI_API_KEY",
+                "FIREWORKS_API_KEY",
+                "TOGETHER_API_KEY",
+                "BASETEN_API_KEY",
+                "OPENROUTER_API_KEY",
+                "AI_GATEWAY_API_KEY",
+                "ZAI_API_KEY",
+                "ZAI_CODING_CN_API_KEY",
+                "MISTRAL_API_KEY",
+                "MINIMAX_API_KEY",
+                "MINIMAX_CN_API_KEY",
+                "MOONSHOT_API_KEY",
+                "OPENCODE_API_KEY",
+                "KIMI_API_KEY",
+                "RADIUS_API_KEY",
+                "HF_TOKEN",
+                "CLOUDFLARE_API_KEY",
+                "CLOUDFLARE_ACCOUNT_ID",
+                "CLOUDFLARE_GATEWAY_ID",
+                "QWEN_TOKEN_PLAN_API_KEY",
+                "QWEN_TOKEN_PLAN_CN_API_KEY",
+                "XIAOMI_API_KEY",
+                "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+                "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+                "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+                "AWS_PROFILE",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+                "AWS_BEARER_TOKEN_BEDROCK",
+                "AWS_REGION",
+                "AWS_DEFAULT_REGION",
+                "AWS_ROLE_ARN",
+                "AWS_ROLE_SESSION_NAME",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+                "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+                "AWS_BEDROCK_FORCE_CACHE",
+                "AWS_BEDROCK_SKIP_AUTH",
+                "AWS_BEDROCK_FORCE_HTTP1",
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GOOGLE_CLOUD_PROJECT",
+                "GCLOUD_PROJECT",
+                "GOOGLE_CLOUD_LOCATION",
+                "PI_CACHE_RETENTION",
+            ]
+        );
     }
 
     #[test]
@@ -2190,9 +2356,36 @@ print("0.84.2")
             .unwrap();
         assert_eq!(response, "Corrected question");
         drop(session);
-        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl")).unwrap();
-        assert_eq!(records.matches("\"kind\": \"process\"").count(), 1);
-        assert_eq!(records.matches("\"command_type\": \"prompt\"").count(), 2);
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["kind"] == "process")
+                .count(),
+            1
+        );
+        let prompts = records
+            .iter()
+            .filter(|record| record["kind"] == "command" && record["command_type"] == "prompt")
+            .map(|record| record["message"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        let schema = serde_json::to_string(&crate::interviewer::prompt::output_schema(
+            crate::interviewer::Mode::Interviewer,
+        ))
+        .unwrap();
+        let suffix = format!("\nOUTPUT_SCHEMA_JSON:{schema}");
+        assert!(prompts[0].ends_with(&suffix));
+        assert_eq!(
+            prompts[1],
+            format!(
+                "Your prior response did not match the required JSON envelope. Return only one corrected JSON object, with no markdown or commentary.{suffix}"
+            )
+        );
     }
 
     #[test]
@@ -2223,6 +2416,64 @@ print("0.84.2")
                 "{mode}"
             );
         }
+    }
+
+    #[test]
+    fn large_prompt_ctrl_c_during_nonreading_stdin_is_bounded_and_cleans_process() {
+        let (environment, mut process) = fake_process("no-read-after-get-state");
+        let cwd = process.cwd_path();
+        let cancellation = CancellationToken::new();
+        let other = cancellation.clone();
+        let capture_path = environment.directory.join("fake-capture.jsonl");
+        let cancel = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if fs::read_to_string(&capture_path)
+                    .is_ok_and(|capture| capture.contains("\"kind\": \"state-sent\""))
+                {
+                    other.cancel();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("Pi get_state was not sent before cancellation deadline");
+        });
+        let started = Instant::now();
+        let error = process
+            .turn("x".repeat(MAX_JSON_RECORD_BYTES / 2 - 1), &cancellation)
+            .unwrap_err();
+        cancel.join().unwrap();
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(!cwd.exists());
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let pid = records
+            .iter()
+            .find(|record| record["kind"] == "process")
+            .and_then(|record| record["pid"].as_i64())
+            .unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
+
+    #[test]
+    fn turn_deadline_includes_nonblocking_prompt_write_and_cleans_process() {
+        let (_environment, mut process) = fake_process("no-read-after-get-state");
+        let cwd = process.cwd_path();
+        let started = Instant::now();
+        let error = process
+            .turn_with_timeout(
+                "x".repeat(MAX_JSON_RECORD_BYTES / 2 - 1),
+                &CancellationToken::new(),
+                Duration::from_millis(50),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(!cwd.exists());
     }
 
     #[test]

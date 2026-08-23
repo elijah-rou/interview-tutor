@@ -68,12 +68,21 @@ impl Transport for PiTransport {
 
     fn raw_turn(
         &mut self,
-        _mode: Mode,
-        input: String,
-        _output_schema: Value,
+        mode: Mode,
+        mut input: String,
+        output_schema: Value,
         correction: bool,
         cancellation: &CancellationToken,
     ) -> Result<String, InterviewerError> {
+        assert_eq!(
+            output_schema,
+            crate::interviewer::prompt::output_schema(mode)
+        );
+        let output_schema = serde_json::to_string(&output_schema).map_err(|_| {
+            InterviewerError::configuration(Backend::Pi, "cannot encode Pi output schema")
+        })?;
+        input.push_str("\nOUTPUT_SCHEMA_JSON:");
+        input.push_str(&output_schema);
         if correction {
             let process = self.process.as_mut().ok_or_else(|| {
                 InterviewerError::protocol(Backend::Pi, "Pi correction has no active process")

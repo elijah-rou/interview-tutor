@@ -30,11 +30,45 @@ pi --mode rpc --no-session --no-tools --no-extensions --no-skills \
 
 The process is retained only for one structured-output correction, then terminated and reaped. The environment is cleared. Interview Tutor restores a bounded allowlist for `HOME`, `PATH`, locale, proxy, certificate, Pi agent/package directories, documented provider credential variables, and cloud-provider authentication variables. It forces `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`, and `NO_COLOR=1`. Secrets are never placed on argv or application logs.
 
+The exact Pi 0.84.2 provider credential allowlist is:
+
+```text
+ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN
+COPILOT_GITHUB_TOKEN ANT_LING_API_KEY OPENAI_API_KEY AZURE_OPENAI_API_KEY
+DEEPSEEK_API_KEY NVIDIA_API_KEY GEMINI_API_KEY GOOGLE_CLOUD_API_KEY
+GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY FIREWORKS_API_KEY
+TOGETHER_API_KEY BASETEN_API_KEY OPENROUTER_API_KEY AI_GATEWAY_API_KEY
+ZAI_API_KEY ZAI_CODING_CN_API_KEY MISTRAL_API_KEY MINIMAX_API_KEY
+MINIMAX_CN_API_KEY MOONSHOT_API_KEY OPENCODE_API_KEY KIMI_API_KEY
+RADIUS_API_KEY HF_TOKEN CLOUDFLARE_API_KEY QWEN_TOKEN_PLAN_API_KEY
+QWEN_TOKEN_PLAN_CN_API_KEY XIAOMI_API_KEY XIAOMI_TOKEN_PLAN_CN_API_KEY
+XIAOMI_TOKEN_PLAN_AMS_API_KEY XIAOMI_TOKEN_PLAN_SGP_API_KEY
+```
+
+The exact provider configuration and ambient cloud-auth allowlist is:
+
+```text
+AZURE_OPENAI_BASE_URL AZURE_OPENAI_RESOURCE_NAME AZURE_OPENAI_API_VERSION
+AZURE_OPENAI_DEPLOYMENT_NAME_MAP CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_GATEWAY_ID
+AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+AWS_BEARER_TOKEN_BEDROCK AWS_REGION AWS_DEFAULT_REGION AWS_ROLE_ARN
+AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN
+AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE AWS_WEB_IDENTITY_TOKEN_FILE
+AWS_ENDPOINT_URL_BEDROCK_RUNTIME AWS_BEDROCK_FORCE_CACHE
+AWS_BEDROCK_SKIP_AUTH AWS_BEDROCK_FORCE_HTTP1 GOOGLE_APPLICATION_CREDENTIALS
+GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT GOOGLE_CLOUD_LOCATION PI_CACHE_RETENTION
+```
+
+This list follows the pinned provider key map, provider implementations, and cloud-provider requirements. IRSA requires `AWS_ROLE_ARN` plus `AWS_WEB_IDENTITY_TOKEN_FILE`; `AWS_ROLE_SESSION_NAME` is optional. Vertex ADC requires its credentials path or default ADC under `HOME`, project, and location. No arbitrary environment variables are inherited.
+
 Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. A credential whose `auth.json` key begins with `!command` causes Pi to execute that command through a shell and use its stdout, as documented by Pi 0.84.2. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
 
 ### Pi RPC contract
 
-Commands and responses use correlated string IDs and strict LF-only JSONL. Records, the bounded protocol queue, and total accepted protocol output are capped at 2 MiB; assistant text is capped at 64 KiB. Prompt completion requires all of:
+Commands and responses use correlated string IDs and strict LF-only JSONL. Pi RPC has no native output-schema command, so every initial and correction prompt ends with `OUTPUT_SCHEMA_JSON:` followed immediately by the exact compact mode-specific JSON schema. Codex continues using its native `outputSchema` request field.
+
+Pi stdin, stdout, and stderr are nonblocking. State, prompt, final-text, abort, and turn deadlines include command writes; writes poll cancellation and their deadline instead of blocking cleanup on a child that stops reading. Records, the bounded protocol queue, and total accepted protocol output are capped at 2 MiB; assistant text is capped at 64 KiB. Prompt completion requires all of:
 
 - a matching successful `prompt` response before events
 - ordered `agent_start`, `turn_start`, correlated user message start/end, assistant message lifecycle, `turn_end`, and two-message user-plus-assistant `agent_end`, with no tool calls or tool results
