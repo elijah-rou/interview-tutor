@@ -129,6 +129,12 @@ impl InterviewerSession {
                 "question exceeds 16 KiB",
             ));
         }
+        if request.latest_output.len() > transcript::MAX_LATEST_OUTPUT_BYTES {
+            return Err(InterviewerError::configuration(
+                backend,
+                "latest output exceeds 16 KiB",
+            ));
+        }
         let mode = request.mode;
         if let Mode::Hint(level) = mode {
             if !(1..=3).contains(&level) {

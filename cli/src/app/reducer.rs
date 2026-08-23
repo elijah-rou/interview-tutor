@@ -84,14 +84,17 @@ fn start_interviewer_connect(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn interviewer_output_tail(output: &str) -> String {
-    output
-        .chars()
-        .rev()
-        .take(16 * 1024)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect()
+    const MAX_INTERVIEWER_OUTPUT_BYTES: usize = 16 * 1024;
+    if output.len() <= MAX_INTERVIEWER_OUTPUT_BYTES {
+        return output.to_string();
+    }
+    let mut start = output.len() - MAX_INTERVIEWER_OUTPUT_BYTES;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = output[start..].to_string();
+    assert!(tail.len() <= MAX_INTERVIEWER_OUTPUT_BYTES);
+    tail
 }
 
 fn dispatch_pending_submission_review(state: &mut AppState) -> Vec<Effect> {
@@ -2776,6 +2779,16 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn interviewer_output_tail_is_bounded_by_utf8_bytes() {
+        let output = format!("discard{}", "界".repeat(16 * 1024));
+        let tail = interviewer_output_tail(&output);
+        assert!(tail.len() <= 16 * 1024);
+        assert!(output.ends_with(&tail));
+        assert!(!tail.starts_with("discard"));
+        assert!(16 * 1024 - tail.len() < "界".len());
     }
 
     #[test]

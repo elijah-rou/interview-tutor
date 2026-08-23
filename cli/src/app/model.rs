@@ -186,7 +186,7 @@ pub struct RecordedSubmissionReview {
 impl RecordedSubmissionReview {
     pub fn new(revision: u64, source: String, output: String) -> Self {
         assert!(source.len() <= MAX_DOCUMENT_BYTES);
-        assert!(output.chars().count() <= 16 * 1024);
+        assert!(output.len() <= 16 * 1024);
         Self {
             revision,
             replaced_older: false,

@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 pub const MAX_TRANSCRIPT_ENTRIES: usize = 128;
 pub const MAX_USER_BYTES: usize = 16 * 1024;
+pub const MAX_LATEST_OUTPUT_BYTES: usize = 16 * 1024;
 pub const MAX_ASSISTANT_BYTES: usize = 64 * 1024;
 pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 
