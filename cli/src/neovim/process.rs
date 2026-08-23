@@ -17,7 +17,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_STDERR_BYTES: usize = 64 * 1024;
-const MAX_ACTIONS: usize = 8;
+const MAX_ORIGIN_EVENTS: usize = 32;
 const MIN_API_LEVEL: u64 = 11;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -34,11 +34,27 @@ struct ExecutableIdentity {
     changed_nanoseconds: i64,
 }
 
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub buffer: Value,
+    pub text: Option<String>,
+    pub mode: String,
+    pub changedtick: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum OriginEvent {
+    Dirty { buffer: Value, changedtick: u64 },
+    Action { action: String, snapshot: Snapshot },
+    Barrier { id: u64, snapshot: Snapshot },
+}
+
 #[derive(Default)]
 pub struct ReaderShared {
     pub latest_grid: Option<Arc<GridSnapshot>>,
-    pub document_dirty: bool,
-    pub pending_actions: VecDeque<String>,
+    pub solution_buffer: Option<u64>,
+    pub origin_events: VecDeque<OriginEvent>,
+    pub multipart_changedtick: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -59,6 +75,7 @@ pub struct RpcProcess {
     temp_dir: Option<PathBuf>,
     next_id: u64,
     pub channel_id: u64,
+    buffer: Value,
 }
 
 impl RpcProcess {
@@ -131,6 +148,7 @@ impl RpcProcess {
             temp_dir: Some(temp_dir),
             next_id: 1,
             channel_id: 0,
+            buffer: Value::Nil,
         };
         if let Err(error) = process.initialize(source, synthetic_name, language, width, height) {
             let cleanup = process.shutdown();
@@ -144,6 +162,12 @@ impl RpcProcess {
 
     pub fn shared(&self) -> Arc<Mutex<ReaderShared>> {
         Arc::clone(&self.shared)
+    }
+
+    pub fn is_solution_buffer(&self, buffer: &Value) -> bool {
+        buffer_id(&self.buffer)
+            .zip(buffer_id(buffer))
+            .is_some_and(|(expected, actual)| expected == actual)
     }
 
     fn initialize(
@@ -199,7 +223,7 @@ impl RpcProcess {
             STARTUP_TIMEOUT,
         )?;
         let script = r#"
-local source, name, filetype, channel = ...
+local source, name, filetype, channel, max_bytes, max_lines = ...
 local buf = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_set_current_buf(buf)
 vim.api.nvim_buf_set_name(buf, name)
@@ -219,9 +243,31 @@ bo.endofline = has_eol
 bo.filetype = filetype
 vim.o.shadafile = "NONE"
 vim.o.clipboard = ""
-local function tutor(action)
-  vim.rpcnotify(channel, "tutor_action", action)
+local function snapshot_args()
+  local tick = vim.api.nvim_buf_get_changedtick(buf)
+  local mode = vim.api.nvim_get_mode().mode
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  if line_count > max_lines then return tick, mode, false, {}, false end
+  local current_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+  local eol = vim.bo[buf].endofline
+  local size = eol and 1 or 0
+  for index, line in ipairs(current_lines) do
+    size = size + #line
+    if index > 1 then size = size + 1 end
+    if size > max_bytes then return tick, mode, false, {}, false end
+  end
+  return tick, mode, true, current_lines, eol
 end
+local function tutor(action)
+  local tick, mode, valid, current_lines, eol = snapshot_args()
+  vim.rpcnotify(channel, "tutor_action", action, buf, tick, mode, valid, current_lines, eol)
+end
+local function barrier(id)
+  local tick, mode, valid, current_lines, eol = snapshot_args()
+  vim.rpcnotify(channel, "tutor_barrier", id, buf, tick, mode, valid, current_lines, eol)
+end
+_G.__interview_tutor_barriers = _G.__interview_tutor_barriers or {}
+_G.__interview_tutor_barriers[channel] = barrier
 vim.api.nvim_buf_create_user_command(buf, "TutorTest", function() tutor("test") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorSubmit", function() tutor("submit") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorBack", function() tutor("back") end, {})
@@ -249,10 +295,18 @@ return buf
                     Value::String(synthetic_name.into()),
                     Value::String(language.into()),
                     Value::Unsigned(self.channel_id),
+                    Value::Unsigned(crate::editor::MAX_DOCUMENT_BYTES as u64),
+                    Value::Unsigned(crate::editor::MAX_DOCUMENT_LINES as u64),
                 ]),
             ],
             STARTUP_TIMEOUT,
         )?;
+        self.buffer = buffer.clone();
+        self.shared
+            .lock()
+            .expect("Neovim reader lock")
+            .solution_buffer =
+            Some(buffer_id(&buffer).ok_or("Neovim returned an invalid solution buffer handle")?);
         self.call(
             "nvim_buf_attach",
             vec![buffer, Value::Bool(false), Value::Map(Vec::new())],
@@ -316,9 +370,12 @@ return buf
         Ok(())
     }
 
-    pub fn snapshot(&mut self) -> Result<(String, String, u64), String> {
+    pub fn snapshot(&mut self) -> Result<Snapshot, String> {
         let script = r#"
-local buf = vim.api.nvim_get_current_buf()
+local buf = ...
+if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
+  error("synthetic solution buffer is unavailable")
+end
 return {
   lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true),
   eol = vim.bo[buf].endofline,
@@ -328,48 +385,76 @@ return {
 "#;
         let result = self.call(
             "nvim_exec_lua",
-            vec![Value::String(script.into()), Value::Array(Vec::new())],
+            vec![Value::String(script.into()), array([self.buffer.clone()])],
         )?;
-        let lines = result
-            .map_get("lines")
-            .and_then(Value::as_array)
-            .ok_or("Neovim snapshot omitted lines")?;
-        if lines.len() > crate::editor::MAX_DOCUMENT_LINES {
-            return Err(format!(
-                "document exceeds {} lines",
-                crate::editor::MAX_DOCUMENT_LINES
-            ));
-        }
-        let mut text = String::new();
-        for (index, line) in lines.iter().enumerate() {
-            let line = line
-                .as_str()
-                .ok_or("Neovim snapshot line is not UTF-8 text")?;
-            if index > 0 {
-                text.push('\n');
-            }
-            text.push_str(line);
-            if text.len() > crate::editor::MAX_DOCUMENT_BYTES {
-                return Err(format!(
-                    "document exceeds {} bytes",
-                    crate::editor::MAX_DOCUMENT_BYTES
-                ));
-            }
-        }
-        if result.map_get("eol").and_then(Value::as_bool) == Some(true) {
-            text.push('\n');
-        }
-        crate::editor::validate_document(&text)?;
+        let text = snapshot_text(
+            result
+                .map_get("lines")
+                .ok_or("Neovim snapshot omitted lines")?,
+            result.map_get("eol").and_then(Value::as_bool) == Some(true),
+        )?;
         let mode = result
             .map_get("mode")
             .and_then(Value::as_str)
             .ok_or("Neovim snapshot omitted mode")?
             .to_string();
-        let tick = result
+        let changedtick = result
             .map_get("tick")
             .and_then(Value::as_u64)
             .ok_or("Neovim snapshot omitted changedtick")?;
-        Ok((text, mode, tick))
+        Ok(Snapshot {
+            buffer: self.buffer.clone(),
+            text: Some(text),
+            mode,
+            changedtick,
+        })
+    }
+
+    pub fn request_barrier(&mut self, id: u64) -> Result<(), String> {
+        let script = r#"
+local channel, id = ...
+local barriers = _G.__interview_tutor_barriers
+if barriers == nil or barriers[channel] == nil then
+  error("synthetic solution barrier is unavailable")
+end
+barriers[channel](id)
+return true
+"#;
+        self.call(
+            "nvim_exec_lua",
+            vec![
+                Value::String(script.into()),
+                array([Value::Unsigned(self.channel_id), Value::Unsigned(id)]),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn acknowledge_saved(&mut self, changedtick: u64, source: String) -> Result<bool, String> {
+        let script = r#"
+local buf, tick, source = ...
+if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then return false end
+if vim.api.nvim_buf_get_changedtick(buf) ~= tick then return false end
+local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+local current = table.concat(lines, "\n")
+if vim.bo[buf].endofline then current = current .. "\n" end
+if current ~= source then return false end
+vim.bo[buf].modified = false
+return true
+"#;
+        self.call(
+            "nvim_exec_lua",
+            vec![
+                Value::String(script.into()),
+                array([
+                    self.buffer.clone(),
+                    Value::Unsigned(changedtick),
+                    Value::String(source),
+                ]),
+            ],
+        )?
+        .as_bool()
+        .ok_or_else(|| "Neovim save acknowledgement returned an invalid result".into())
     }
 
     fn call(&mut self, method: &str, parameters: Vec<Value>) -> Result<Value, String> {
@@ -509,6 +594,97 @@ impl Drop for RpcProcess {
     }
 }
 
+fn buffer_id(value: &Value) -> Option<u64> {
+    match value {
+        Value::Unsigned(value) => Some(*value),
+        Value::Integer(value) => u64::try_from(*value).ok(),
+        Value::Ext(0, bytes) if !bytes.is_empty() && bytes.len() <= 8 => Some(
+            bytes
+                .iter()
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)),
+        ),
+        _ => None,
+    }
+}
+
+fn snapshot_text(lines: &Value, endofline: bool) -> Result<String, String> {
+    let lines = lines
+        .as_array()
+        .ok_or("Neovim snapshot lines are not an array")?;
+    if lines.len() > crate::editor::MAX_DOCUMENT_LINES {
+        return Err(format!(
+            "document exceeds {} lines",
+            crate::editor::MAX_DOCUMENT_LINES
+        ));
+    }
+    let mut text = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let line = line
+            .as_str()
+            .ok_or("Neovim snapshot line is not UTF-8 text")?;
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(line);
+        if text.len() > crate::editor::MAX_DOCUMENT_BYTES {
+            return Err(format!(
+                "document exceeds {} bytes",
+                crate::editor::MAX_DOCUMENT_BYTES
+            ));
+        }
+    }
+    if endofline {
+        text.push('\n');
+    }
+    crate::editor::validate_document(&text)?;
+    Ok(text)
+}
+
+fn notified_snapshot(parameters: &[Value], start: usize) -> Result<Snapshot, String> {
+    let buffer = parameters
+        .get(start)
+        .ok_or("Neovim snapshot omitted solution buffer")?
+        .clone();
+    let changedtick = parameters
+        .get(start + 1)
+        .and_then(Value::as_u64)
+        .ok_or("Neovim snapshot omitted changedtick")?;
+    let mode = parameters
+        .get(start + 2)
+        .and_then(Value::as_str)
+        .ok_or("Neovim snapshot omitted mode")?
+        .to_string();
+    let valid = parameters
+        .get(start + 3)
+        .and_then(Value::as_bool)
+        .ok_or("Neovim snapshot omitted validity")?;
+    let text = if valid {
+        Some(snapshot_text(
+            parameters
+                .get(start + 4)
+                .ok_or("Neovim snapshot omitted lines")?,
+            parameters.get(start + 5).and_then(Value::as_bool) == Some(true),
+        )?)
+    } else {
+        None
+    };
+    Ok(Snapshot {
+        buffer,
+        text,
+        mode,
+        changedtick,
+    })
+}
+
+fn push_origin_event(shared: &Arc<Mutex<ReaderShared>>, event: OriginEvent) -> Result<(), String> {
+    let mut shared = shared.lock().expect("Neovim reader lock");
+    if shared.origin_events.len() == MAX_ORIGIN_EVENTS {
+        return Err("Neovim origin event queue exceeds bound".into());
+    }
+    shared.origin_events.push_back(event);
+    Ok(())
+}
+
 fn read_rpc(
     mut output: impl Read,
     response_sender: SyncSender<RpcResponse>,
@@ -557,36 +733,109 @@ fn read_rpc(
                         Some("Neovim RPC notification parameters are invalid".into());
                     break;
                 };
-                let result = match method {
+                let result: Result<(), String> = (|| match method {
                     "redraw" => grid.apply_redraw(&message[2]).map(|snapshot| {
                         if let Some(snapshot) = snapshot {
                             shared.lock().expect("Neovim reader lock").latest_grid = Some(snapshot);
                         }
                     }),
-                    "nvim_buf_lines_event" | "nvim_buf_changedtick_event" => {
-                        shared.lock().expect("Neovim reader lock").document_dirty = true;
-                        Ok(())
-                    }
-                    "nvim_buf_detach_event" => Err("Neovim detached the solution buffer".into()),
-                    "tutor_action" if parameters.len() == 1 => {
-                        let action = parameters[0]
-                            .as_str()
-                            .ok_or_else(|| "Neovim Tutor action is invalid".to_string())
-                            .map(str::to_string);
-                        action.and_then(|action| {
-                            let mut shared = shared.lock().expect("Neovim reader lock");
-                            if shared.pending_actions.len() == MAX_ACTIONS {
-                                Err("Neovim Tutor action queue exceeds bound".into())
+                    "nvim_buf_lines_event" if parameters.len() == 6 => {
+                        let buffer = parameters[0].clone();
+                        let changedtick = parameters[1]
+                            .as_u64()
+                            .ok_or("Neovim line event changedtick is invalid")?;
+                        let more = parameters[5]
+                            .as_bool()
+                            .ok_or("Neovim line event multipart flag is invalid")?;
+                        let mut reader = shared.lock().expect("Neovim reader lock");
+                        if buffer_id(&buffer) != reader.solution_buffer {
+                            Err("Neovim line event targeted a non-solution buffer".into())
+                        } else if reader
+                            .multipart_changedtick
+                            .is_some_and(|pending| pending != changedtick)
+                        {
+                            Err("Neovim multipart line events changed tick".into())
+                        } else if more {
+                            reader.multipart_changedtick = Some(changedtick);
+                            Ok(())
+                        } else {
+                            reader.multipart_changedtick = None;
+                            if !matches!(
+                                reader.origin_events.back(),
+                                Some(OriginEvent::Dirty { changedtick: pending, .. }) if *pending == changedtick
+                            ) {
+                                if reader.origin_events.len() == MAX_ORIGIN_EVENTS {
+                                    Err("Neovim origin event queue exceeds bound".into())
+                                } else {
+                                    reader.origin_events.push_back(OriginEvent::Dirty {
+                                        buffer,
+                                        changedtick,
+                                    });
+                                    Ok(())
+                                }
                             } else {
-                                shared.pending_actions.push_back(action);
-                                shared.document_dirty = true;
                                 Ok(())
                             }
-                        })
+                        }
+                    }
+                    "nvim_buf_changedtick_event" if parameters.len() == 2 => {
+                        let buffer = parameters[0].clone();
+                        let changedtick = parameters[1]
+                            .as_u64()
+                            .ok_or("Neovim changedtick event is invalid")?;
+                        let reader = shared.lock().expect("Neovim reader lock");
+                        if buffer_id(&buffer) != reader.solution_buffer {
+                            Err("Neovim changedtick event targeted a non-solution buffer".into())
+                        } else if reader.multipart_changedtick.is_some() {
+                            Err("Neovim changedtick event interrupted multipart lines".into())
+                        } else {
+                            drop(reader);
+                            push_origin_event(
+                                &shared,
+                                OriginEvent::Dirty {
+                                    buffer,
+                                    changedtick,
+                                },
+                            )
+                        }
+                    }
+                    "nvim_buf_detach_event" if parameters.len() == 1 => {
+                        if shared.lock().expect("Neovim reader lock").solution_buffer
+                            == parameters.first().and_then(buffer_id)
+                        {
+                            Err("Neovim detached the solution buffer".into())
+                        } else {
+                            Err("Neovim detached an unexpected buffer".into())
+                        }
+                    }
+                    "tutor_action" if parameters.len() == 7 => {
+                        let action = parameters[0]
+                            .as_str()
+                            .ok_or("Neovim Tutor action is invalid")?
+                            .to_string();
+                        let snapshot = notified_snapshot(parameters, 1)?;
+                        let expected = shared.lock().expect("Neovim reader lock").solution_buffer;
+                        if expected != buffer_id(&snapshot.buffer) {
+                            Err("Neovim Tutor action targeted a non-solution buffer".into())
+                        } else {
+                            push_origin_event(&shared, OriginEvent::Action { action, snapshot })
+                        }
+                    }
+                    "tutor_barrier" if parameters.len() == 7 => {
+                        let id = parameters[0]
+                            .as_u64()
+                            .ok_or("Neovim barrier id is invalid")?;
+                        let snapshot = notified_snapshot(parameters, 1)?;
+                        let expected = shared.lock().expect("Neovim reader lock").solution_buffer;
+                        if expected != buffer_id(&snapshot.buffer) {
+                            Err("Neovim barrier targeted a non-solution buffer".into())
+                        } else {
+                            push_origin_event(&shared, OriginEvent::Barrier { id, snapshot })
+                        }
                     }
                     "nvim_error_event" => Err("Neovim reported an asynchronous API error".into()),
                     _ => Ok(()),
-                };
+                })();
                 if let Err(error) = result {
                     shared.lock().expect("Neovim reader lock").error = Some(error);
                     break;
@@ -887,11 +1136,32 @@ mod tests {
             let mut process =
                 RpcProcess::start(&executable, source, "interview://p.py", "python", 40, 12)
                     .unwrap();
-            let (round_trip, mode, _) = process.snapshot().unwrap();
-            assert_eq!(round_trip, source);
-            assert!(mode.starts_with('n'));
+            let snapshot = process.snapshot().unwrap();
+            assert_eq!(snapshot.text.as_deref(), Some(source));
+            assert!(snapshot.mode.starts_with('n'));
             process.shutdown().unwrap();
         }
+    }
+
+    #[test]
+    fn snapshots_remain_bound_to_the_synthetic_solution_buffer() {
+        let executable = resolve_executable(None).unwrap();
+        let mut process = RpcProcess::start(
+            &executable,
+            "solution\n",
+            "interview://bound.py",
+            "python",
+            30,
+            10,
+        )
+        .unwrap();
+        process.feed_key(":enew<CR>iother<Esc>").unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            process.snapshot().unwrap().text.as_deref(),
+            Some("solution\n")
+        );
+        process.shutdown().unwrap();
     }
 
     #[test]
@@ -946,6 +1216,36 @@ mod tests {
     }
 
     #[test]
+    fn save_acknowledgement_requires_matching_tick_and_bytes() {
+        let executable = resolve_executable(None).unwrap();
+        let mut process =
+            RpcProcess::start(&executable, "x\n", "interview://saved.py", "python", 20, 8).unwrap();
+        process.feed_key("iZ<Esc>").unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let saved = process.snapshot().unwrap();
+        assert!(
+            process
+                .acknowledge_saved(saved.changedtick, saved.text.clone().unwrap())
+                .unwrap()
+        );
+        process.feed_key("A!<Esc>").unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert!(
+            !process
+                .acknowledge_saved(saved.changedtick, saved.text.unwrap())
+                .unwrap()
+        );
+        let modified = process
+            .call(
+                "nvim_buf_get_option",
+                vec![process.buffer.clone(), Value::String("modified".into())],
+            )
+            .unwrap();
+        assert_eq!(modified.as_bool(), Some(true));
+        process.shutdown().unwrap();
+    }
+
+    #[test]
     fn real_neovim_executes_composed_vim_commands_and_tutor_mappings() {
         let executable = resolve_executable(None).unwrap();
         let mut process = RpcProcess::start(
@@ -971,20 +1271,39 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         feed(&mut process, "gg0dw");
-        assert_eq!(process.snapshot().unwrap().0, "two\nthree\n");
+        assert_eq!(
+            process.snapshot().unwrap().text.as_deref(),
+            Some("two\nthree\n")
+        );
         feed(&mut process, "u");
-        assert_eq!(process.snapshot().unwrap().0, "one two\nthree\n");
+        assert_eq!(
+            process.snapshot().unwrap().text.as_deref(),
+            Some("one two\nthree\n")
+        );
         feed(&mut process, "G$A!<Esc>");
         feed(&mut process, ".");
-        assert_eq!(process.snapshot().unwrap().0, "one two\nthree!!\n");
+        assert_eq!(
+            process.snapshot().unwrap().text.as_deref(),
+            Some("one two\nthree!!\n")
+        );
         feed(&mut process, "gg0\"ayyGp");
-        assert_eq!(process.snapshot().unwrap().0, "one two\nthree!!\none two\n");
+        assert_eq!(
+            process.snapshot().unwrap().text.as_deref(),
+            Some("one two\nthree!!\none two\n")
+        );
         feed(&mut process, "/three<CR>");
-        assert!(process.snapshot().unwrap().1.starts_with('n'));
+        assert!(process.snapshot().unwrap().mode.starts_with('n'));
         feed(&mut process, "<Space>t");
         let shared = process.shared();
-        let action = shared.lock().unwrap().pending_actions.pop_front();
-        assert_eq!(action.as_deref(), Some("test"));
+        let action_observed = shared.lock().unwrap().origin_events.iter().any(|event| {
+            matches!(
+                event,
+                OriginEvent::Action { action, snapshot }
+                    if action == "test"
+                        && snapshot.text.as_deref() == Some("one two\nthree!!\none two\n")
+            )
+        });
+        assert!(action_observed);
         process.shutdown().unwrap();
     }
 }

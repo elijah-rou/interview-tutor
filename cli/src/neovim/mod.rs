@@ -4,7 +4,7 @@ mod msgpack;
 mod process;
 
 use grid::GridSnapshot;
-use process::RpcProcess;
+use process::{OriginEvent, RpcProcess, Snapshot};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
@@ -42,9 +42,27 @@ struct WorkerShared {
 }
 
 #[derive(Clone, Debug)]
+pub struct ActionUpdate {
+    pub action: TutorAction,
+    pub document: DocumentUpdate,
+}
+
+#[derive(Clone, Debug)]
+pub struct BarrierUpdate {
+    pub id: u64,
+    pub document: DocumentUpdate,
+}
+
+#[derive(Clone, Debug)]
+pub enum SourceEvent {
+    Action(ActionUpdate),
+    Barrier(BarrierUpdate),
+}
+
+#[derive(Clone, Debug)]
 enum WorkerEvent {
     Started(Result<(), String>),
-    Action(TutorAction),
+    Source(SourceEvent),
     Warning(String),
     Failed(String),
 }
@@ -54,7 +72,7 @@ pub struct PollResult {
     pub grid: Option<Arc<GridSnapshot>>,
     pub document: Option<DocumentUpdate>,
     pub started: Option<Result<(), String>>,
-    pub actions: Vec<TutorAction>,
+    pub source_events: Vec<SourceEvent>,
     pub warning: Option<String>,
     pub failure: Option<String>,
 }
@@ -77,6 +95,11 @@ enum Command {
         column: u16,
     },
     Resize(u16, u16),
+    Barrier(u64),
+    AcknowledgeSaved {
+        changedtick: u64,
+        source: String,
+    },
     Stop,
     Shutdown,
 }
@@ -88,6 +111,7 @@ struct SessionConfig {
     language: String,
     width: u16,
     height: u16,
+    accepted_changedtick: u64,
 }
 
 pub struct Worker {
@@ -155,6 +179,17 @@ impl Worker {
         self.send(Command::Resize(width, height))
     }
 
+    pub fn barrier(&self, id: u64) -> Result<(), String> {
+        self.send(Command::Barrier(id))
+    }
+
+    pub fn acknowledge_saved(&self, changedtick: u64, source: String) -> Result<(), String> {
+        self.send(Command::AcknowledgeSaved {
+            changedtick,
+            source,
+        })
+    }
+
     pub fn stop_session(&self) -> Result<(), String> {
         self.send(Command::Stop)
     }
@@ -177,7 +212,7 @@ impl Worker {
         while let Some(event) = shared.events.pop_front() {
             match event {
                 WorkerEvent::Started(started) => result.started = Some(started),
-                WorkerEvent::Action(action) => result.actions.push(action),
+                WorkerEvent::Source(event) => result.source_events.push(event),
                 WorkerEvent::Warning(error) => result.warning = Some(error),
                 WorkerEvent::Failed(error) => result.failure = Some(error),
             }
@@ -227,20 +262,27 @@ fn controller(
                 if let Some(mut previous) = process.take() {
                     let _ = previous.shutdown();
                 }
-                let next_config = SessionConfig {
+                let mut next_config = SessionConfig {
                     source,
                     synthetic_name,
                     language,
                     width,
                     height,
+                    accepted_changedtick: 0,
                 };
                 match spawn(&executable, &next_config) {
-                    Ok(mut next) => {
-                        let result = sync_document(&mut next, &shared);
-                        process = Some(next);
-                        config = Some(next_config);
-                        push_event(&shared, WorkerEvent::Started(result.map(|_| ())))
-                    }
+                    Ok(mut next) => match sync_document(&mut next, &mut next_config, &shared) {
+                        Ok(_) => {
+                            process = Some(next);
+                            config = Some(next_config);
+                            push_event(&shared, WorkerEvent::Started(Ok(())))
+                        }
+                        Err(error) => {
+                            let _ = next.shutdown();
+                            config = None;
+                            push_event(&shared, WorkerEvent::Started(Err(error)))
+                        }
+                    },
                     Err(error) => {
                         config = None;
                         push_event(&shared, WorkerEvent::Started(Err(error)))
@@ -248,6 +290,7 @@ fn controller(
                 }
             }
             Ok(Command::Input(encoded)) => {
+                sync_reader_state(&executable, &mut process, &mut config, &shared);
                 let input_error = process
                     .as_mut()
                     .and_then(|process| process.feed_key(&encoded).err());
@@ -273,6 +316,26 @@ fn controller(
                     process.mouse(button, action, modifiers, row, column).err()
                 });
                 if let Some(error) = mouse_error {
+                    fail_process(&mut process, &shared, error);
+                }
+            }
+            Ok(Command::Barrier(id)) => {
+                sync_reader_state(&executable, &mut process, &mut config, &shared);
+                let barrier_error = process
+                    .as_mut()
+                    .and_then(|process| process.request_barrier(id).err());
+                if let Some(error) = barrier_error {
+                    fail_process(&mut process, &shared, error);
+                }
+            }
+            Ok(Command::AcknowledgeSaved {
+                changedtick,
+                source,
+            }) => {
+                let acknowledgement_error = process
+                    .as_mut()
+                    .and_then(|process| process.acknowledge_saved(changedtick, source).err());
+                if let Some(error) = acknowledgement_error {
                     fail_process(&mut process, &shared, error);
                 }
             }
@@ -332,66 +395,146 @@ fn run_and_sync(
         fail_process(process, shared, error);
         return;
     }
-    match sync_document(current, shared) {
-        Ok(update) => {
-            if let Some(config) = config.as_mut() {
-                config.source = update.text;
-            }
-            sync_reader_state(executable, process, config, shared);
+    let candidate = current.snapshot();
+    let _ = handle_snapshot(executable, process, config, shared, candidate);
+    sync_reader_state(executable, process, config, shared);
+}
+
+fn accept_snapshot(
+    process: &RpcProcess,
+    config: &mut SessionConfig,
+    shared: &Arc<Mutex<WorkerShared>>,
+    snapshot: Snapshot,
+) -> Result<DocumentUpdate, String> {
+    if !process.is_solution_buffer(&snapshot.buffer) {
+        return Err("Neovim snapshot targeted a non-solution buffer".into());
+    }
+    let text = snapshot.text.ok_or("document exceeds host source bounds")?;
+    if snapshot.changedtick < config.accepted_changedtick {
+        if text == config.source {
+            return Ok(DocumentUpdate {
+                text,
+                mode: snapshot.mode,
+                changedtick: config.accepted_changedtick,
+            });
         }
-        Err(error) if error.contains("document exceeds") => {
-            let Some(last_valid) = config.clone() else {
+        return Err("Neovim snapshot changedtick moved backwards".into());
+    }
+    if snapshot.changedtick == config.accepted_changedtick && text != config.source {
+        return Err("Neovim changed bytes without advancing changedtick".into());
+    }
+    let update = DocumentUpdate {
+        text: text.clone(),
+        mode: snapshot.mode,
+        changedtick: snapshot.changedtick,
+    };
+    config.source = text;
+    config.accepted_changedtick = snapshot.changedtick;
+    shared.lock().expect("Neovim worker lock").latest_document = Some(update.clone());
+    Ok(update)
+}
+
+fn recover_overflow(
+    executable: &Path,
+    process: &mut Option<RpcProcess>,
+    config: &mut Option<SessionConfig>,
+    shared: &Arc<Mutex<WorkerShared>>,
+    error: String,
+) -> Result<DocumentUpdate, String> {
+    let mut last_valid = config
+        .clone()
+        .ok_or("Neovim overflow recovery has no valid host snapshot")?;
+    if let Some(mut invalid) = process.take() {
+        let _ = invalid.shutdown();
+    }
+    last_valid.accepted_changedtick = 0;
+    let mut replacement = spawn(executable, &last_valid)
+        .map_err(|restart| format!("{error}; cannot restart Neovim: {restart}"))?;
+    let snapshot = replacement.snapshot()?;
+    if snapshot.text.as_deref() != Some(last_valid.source.as_str()) {
+        let _ = replacement.shutdown();
+        return Err("Neovim overflow recovery changed source bytes".into());
+    }
+    let update = accept_snapshot(&replacement, &mut last_valid, shared, snapshot)?;
+    *config = Some(last_valid);
+    *process = Some(replacement);
+    push_event(
+        shared,
+        WorkerEvent::Warning(format!(
+            "{error}; Neovim restarted from the last valid source"
+        )),
+    );
+    Ok(update)
+}
+
+fn handle_snapshot(
+    executable: &Path,
+    process: &mut Option<RpcProcess>,
+    config: &mut Option<SessionConfig>,
+    shared: &Arc<Mutex<WorkerShared>>,
+    candidate: Result<Snapshot, String>,
+) -> Option<(DocumentUpdate, bool)> {
+    let overflow = match &candidate {
+        Ok(snapshot) => snapshot.text.is_none(),
+        Err(error) => error.contains("document exceeds"),
+    };
+    if overflow {
+        let reason = candidate
+            .err()
+            .unwrap_or_else(|| "document exceeds host source bounds".into());
+        return match recover_overflow(executable, process, config, shared, reason) {
+            Ok(update) => Some((update, true)),
+            Err(error) => {
                 fail_process(process, shared, error);
-                return;
-            };
-            if let Some(mut invalid) = process.take() {
-                let _ = invalid.shutdown();
+                None
             }
-            match spawn(executable, &last_valid) {
-                Ok(mut replacement) => {
-                    let restored = sync_document(&mut replacement, shared).and_then(|update| {
-                        (update.text == last_valid.source)
-                            .then_some(())
-                            .ok_or("Neovim overflow recovery changed source bytes".into())
-                    });
-                    process.replace(replacement);
-                    match restored {
-                        Ok(()) => push_event(
-                            shared,
-                            WorkerEvent::Warning(format!(
-                                "{error}; Neovim restarted from the last valid source"
-                            )),
-                        ),
-                        Err(restart_error) => fail_process(process, shared, restart_error),
-                    }
-                }
-                Err(restart_error) => fail_process(
-                    process,
-                    shared,
-                    format!("{error}; cannot restart Neovim: {restart_error}"),
-                ),
-            }
+        };
+    }
+    let snapshot = match candidate {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            fail_process(process, shared, error);
+            return None;
         }
-        Err(error) => fail_process(process, shared, error),
+    };
+    let result = process
+        .as_ref()
+        .zip(config.as_mut())
+        .ok_or_else(|| "Neovim session is unavailable".to_string())
+        .and_then(|(process, config)| accept_snapshot(process, config, shared, snapshot));
+    match result {
+        Ok(update) => Some((update, false)),
+        Err(error) => {
+            fail_process(process, shared, error);
+            None
+        }
+    }
+}
+
+fn event_changedtick(event: &OriginEvent) -> u64 {
+    match event {
+        OriginEvent::Dirty { changedtick, .. } => *changedtick,
+        OriginEvent::Action { snapshot, .. } | OriginEvent::Barrier { snapshot, .. } => {
+            snapshot.changedtick
+        }
     }
 }
 
 fn sync_reader_state(
-    _executable: &Path,
+    executable: &Path,
     process: &mut Option<RpcProcess>,
     config: &mut Option<SessionConfig>,
     shared: &Arc<Mutex<WorkerShared>>,
 ) {
-    let Some(current) = process.as_mut() else {
+    let Some(current) = process.as_ref() else {
         return;
     };
     let reader_shared = current.shared();
-    let (grid, dirty, actions, error) = {
+    let (grid, events, error) = {
         let mut reader = reader_shared.lock().expect("Neovim reader lock");
         (
             reader.latest_grid.take(),
-            std::mem::take(&mut reader.document_dirty),
-            std::mem::take(&mut reader.pending_actions),
+            std::mem::take(&mut reader.origin_events),
             reader.error.take(),
         )
     };
@@ -402,42 +545,72 @@ fn sync_reader_state(
         fail_process(process, shared, error);
         return;
     }
-    if dirty || !actions.is_empty() {
-        match sync_document(current, shared) {
-            Ok(update) => {
-                if let Some(config) = config.as_mut() {
-                    config.source = update.text;
-                }
-            }
-            Err(error) => {
-                fail_process(process, shared, error);
+    let events = events.into_iter().collect::<Vec<_>>();
+    for (index, event) in events.iter().cloned().enumerate() {
+        let event_tick = event_changedtick(&event);
+        if let OriginEvent::Dirty { buffer, .. } = &event {
+            let valid_buffer = process
+                .as_ref()
+                .is_some_and(|process| process.is_solution_buffer(buffer));
+            if !valid_buffer {
+                fail_process(
+                    process,
+                    shared,
+                    "Neovim dirty event targeted a non-solution buffer".into(),
+                );
                 return;
+            }
+            if events[index + 1..]
+                .iter()
+                .any(|later| event_changedtick(later) >= event_tick)
+            {
+                continue;
             }
         }
-    }
-    for action in actions {
-        match parse_action(&action) {
-            Ok(action) => push_event(shared, WorkerEvent::Action(action)),
-            Err(error) => {
-                fail_process(process, shared, error);
-                return;
+        let candidate = match event.clone() {
+            OriginEvent::Dirty { .. } => process
+                .as_mut()
+                .ok_or_else(|| "Neovim session is unavailable".to_string())
+                .and_then(RpcProcess::snapshot),
+            OriginEvent::Action { snapshot, .. } | OriginEvent::Barrier { snapshot, .. } => {
+                Ok(snapshot)
             }
+        };
+        let Some((document, recovered)) =
+            handle_snapshot(executable, process, config, shared, candidate)
+        else {
+            return;
+        };
+        match event {
+            OriginEvent::Dirty { .. } => {}
+            OriginEvent::Action { action, .. } => match parse_action(&action) {
+                Ok(action) => push_event(
+                    shared,
+                    WorkerEvent::Source(SourceEvent::Action(ActionUpdate { action, document })),
+                ),
+                Err(error) => {
+                    fail_process(process, shared, error);
+                    return;
+                }
+            },
+            OriginEvent::Barrier { id, .. } => push_event(
+                shared,
+                WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate { id, document })),
+            ),
+        }
+        if recovered {
+            break;
         }
     }
 }
 
 fn sync_document(
     process: &mut RpcProcess,
+    config: &mut SessionConfig,
     shared: &Arc<Mutex<WorkerShared>>,
 ) -> Result<DocumentUpdate, String> {
-    let (text, mode, changedtick) = process.snapshot()?;
-    let update = DocumentUpdate {
-        text,
-        mode,
-        changedtick,
-    };
-    shared.lock().expect("Neovim worker lock").latest_document = Some(update.clone());
-    Ok(update)
+    let snapshot = process.snapshot()?;
+    accept_snapshot(process, config, shared, snapshot)
 }
 
 fn parse_action(action: &str) -> Result<TutorAction, String> {
@@ -540,6 +713,147 @@ mod tests {
                 .is_some_and(|message| message.contains("restarted from the last valid source")),
             "overflow recovery warning was not published"
         );
+        assert_eq!(restored.as_deref(), Some(source.as_str()));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn serialized_barrier_captures_immediately_preceding_input() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://barrier.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let poll = worker.poll();
+            if let Some(started) = poll.started {
+                started.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        worker.input("iZ".into()).unwrap();
+        worker.barrier(42).unwrap();
+        worker.input("!<Esc>".into()).unwrap();
+        let mut barrier = None;
+        let mut latest_text = None;
+        while barrier.is_none() || latest_text.as_deref() != Some("Z!x\n") {
+            let poll = worker.poll();
+            if let Some(document) = poll.document {
+                latest_text = Some(document.text);
+            }
+            barrier = poll
+                .source_events
+                .into_iter()
+                .find_map(|event| match event {
+                    SourceEvent::Barrier(barrier) => Some(barrier),
+                    SourceEvent::Action(_) => None,
+                })
+                .or(barrier);
+            assert!(poll.failure.is_none());
+            assert!(Instant::now() < deadline, "source barrier timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let barrier = barrier.unwrap();
+        assert_eq!(barrier.id, 42);
+        assert_eq!(barrier.document.text, "Zx\n");
+        assert_eq!(latest_text.as_deref(), Some("Z!x\n"));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn tutor_action_snapshot_is_not_replaced_by_a_later_edit() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://action.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let poll = worker.poll();
+            if let Some(started) = poll.started {
+                started.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        worker.input("iZ<Esc><Space>tA!<Esc>".into()).unwrap();
+        let mut action = None;
+        let mut latest_text = None;
+        while action.is_none() || latest_text.as_deref() != Some("Zx!\n") {
+            let poll = worker.poll();
+            if let Some(document) = poll.document {
+                latest_text = Some(document.text);
+            }
+            action = poll
+                .source_events
+                .into_iter()
+                .find_map(|event| match event {
+                    SourceEvent::Action(action) => Some(action),
+                    SourceEvent::Barrier(_) => None,
+                })
+                .or(action);
+            assert!(poll.failure.is_none());
+            assert!(Instant::now() < deadline, "Tutor action timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let action = action.unwrap();
+        assert_eq!(action.action, TutorAction::Test);
+        assert_eq!(action.document.text, "Zx\n");
+        assert_eq!(latest_text.as_deref(), Some("Zx!\n"));
+        worker.shutdown();
+    }
+
+    #[test]
+    fn oversized_normal_input_uses_the_same_restart_recovery() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        let source = "x".repeat(crate::editor::MAX_DOCUMENT_BYTES);
+        worker
+            .start_session(
+                source.clone(),
+                "interview://normal-overflow.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let poll = worker.poll();
+            if let Some(started) = poll.started {
+                started.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        worker.input("iZ<Esc>".into()).unwrap();
+        let mut warning = None;
+        let mut restored = None;
+        while Instant::now() < deadline && warning.is_none() {
+            let poll = worker.poll();
+            warning = warning.or(poll.warning);
+            restored = poll.document.map(|document| document.text).or(restored);
+            assert!(poll.failure.is_none(), "normal input overflow must recover");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(warning.is_some(), "normal input overflow warning missing");
         assert_eq!(restored.as_deref(), Some(source.as_str()));
         worker.shutdown();
     }

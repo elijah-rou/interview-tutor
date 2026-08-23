@@ -77,6 +77,21 @@ fn rgb(value: u32) -> Color {
     )
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ModeCursor {
+    shape: CursorShape,
+    blink: bool,
+    cell_percentage: u8,
+}
+
 #[derive(Clone, Debug)]
 pub struct GridSnapshot {
     pub width: usize,
@@ -88,6 +103,9 @@ pub struct GridSnapshot {
     pub cursor_row: usize,
     pub cursor_column: usize,
     pub cursor_visible: bool,
+    pub cursor_shape: CursorShape,
+    pub cursor_blink: bool,
+    pub cursor_cell_percentage: u8,
     pub mode: String,
 }
 
@@ -116,6 +134,8 @@ pub struct GridState {
     cursor_row: usize,
     cursor_column: usize,
     cursor_visible: bool,
+    mode_cursors: Vec<ModeCursor>,
+    mode_cursor_index: usize,
     mode: String,
 }
 
@@ -131,6 +151,8 @@ impl Default for GridState {
             cursor_row: 0,
             cursor_column: 0,
             cursor_visible: true,
+            mode_cursors: Vec::new(),
+            mode_cursor_index: 0,
             mode: "normal".into(),
         }
     }
@@ -163,13 +185,13 @@ impl GridState {
                     "grid_scroll" => self.scroll(arguments)?,
                     "default_colors_set" => self.default_colors(arguments)?,
                     "hl_attr_define" => self.define_highlight(arguments)?,
+                    "mode_info_set" => self.set_mode_info(arguments)?,
                     "mode_change" => self.change_mode(arguments)?,
                     "busy_start" => self.cursor_visible = false,
                     "busy_stop" => self.cursor_visible = true,
                     "flush" => flush = true,
-                    "mode_info_set" | "option_set" | "set_title" | "set_icon" | "mouse_on"
-                    | "mouse_off" | "bell" | "visual_bell" | "hl_group_set" | "chdir"
-                    | "update_menu" | "suspend" => {}
+                    "option_set" | "set_title" | "set_icon" | "mouse_on" | "mouse_off" | "bell"
+                    | "visual_bell" | "hl_group_set" | "chdir" | "update_menu" | "suspend" => {}
                     "connect" | "restart" => {
                         return Err(format!("unsupported Neovim UI event: {name}"));
                     }
@@ -192,6 +214,9 @@ impl GridState {
             cursor_row: self.cursor_row,
             cursor_column: self.cursor_column,
             cursor_visible: self.cursor_visible,
+            cursor_shape: self.current_mode_cursor().shape,
+            cursor_blink: self.current_mode_cursor().blink,
+            cursor_cell_percentage: self.current_mode_cursor().cell_percentage,
             mode: self.mode.clone(),
         }
     }
@@ -387,6 +412,63 @@ impl GridState {
         Ok(())
     }
 
+    fn current_mode_cursor(&self) -> ModeCursor {
+        self.mode_cursors
+            .get(self.mode_cursor_index)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn set_mode_info(&mut self, arguments: &[Value]) -> Result<(), String> {
+        let enabled = arguments
+            .first()
+            .and_then(Value::as_bool)
+            .ok_or("Neovim mode cursor enable flag is invalid")?;
+        let modes = arguments
+            .get(1)
+            .and_then(Value::as_array)
+            .ok_or("Neovim mode cursor table is invalid")?;
+        if modes.len() > 64 {
+            return Err("Neovim mode cursor table exceeds bound".into());
+        }
+        self.mode_cursors.clear();
+        if !enabled {
+            return Ok(());
+        }
+        for mode in modes {
+            let attributes = mode.as_map().ok_or("Neovim mode cursor entry is invalid")?;
+            let lookup = |name: &str| {
+                attributes
+                    .iter()
+                    .find_map(|(key, value)| (key.as_str() == Some(name)).then_some(value))
+            };
+            let shape = match lookup("cursor_shape").and_then(Value::as_str) {
+                None | Some("block") => CursorShape::Block,
+                Some("horizontal") => CursorShape::Horizontal,
+                Some("vertical") => CursorShape::Vertical,
+                Some(_) => return Err("Neovim mode cursor shape is invalid".into()),
+            };
+            let cell_percentage = lookup("cell_percentage")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cell_percentage = u8::try_from(cell_percentage)
+                .map_err(|_| "Neovim mode cursor percentage exceeds bound")?;
+            if cell_percentage > 100 {
+                return Err("Neovim mode cursor percentage exceeds bound".into());
+            }
+            let blink = lookup("blinkon").and_then(Value::as_u64).unwrap_or(0) > 0;
+            self.mode_cursors.push(ModeCursor {
+                shape,
+                blink,
+                cell_percentage,
+            });
+        }
+        self.mode_cursor_index = self
+            .mode_cursor_index
+            .min(self.mode_cursors.len().saturating_sub(1));
+        Ok(())
+    }
+
     fn change_mode(&mut self, arguments: &[Value]) -> Result<(), String> {
         let mode = arguments
             .first()
@@ -395,7 +477,12 @@ impl GridState {
         if mode.len() > 64 {
             return Err("Neovim mode name exceeds bound".into());
         }
+        let index = usize_value(arguments.get(1), "mode cursor index")?;
+        if !self.mode_cursors.is_empty() && index >= self.mode_cursors.len() {
+            return Err("Neovim mode cursor index exceeds table".into());
+        }
         self.mode = mode.into();
+        self.mode_cursor_index = index;
         Ok(())
     }
 }
@@ -531,6 +618,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.cell(0, 0).unwrap().text, "b");
+    }
+
+    #[test]
+    fn mode_info_selects_cursor_shape_blink_and_percentage() {
+        let mut grid = GridState::default();
+        let snapshot = grid
+            .apply_redraw(&redraw([
+                event(
+                    "mode_info_set",
+                    [array([
+                        Value::Bool(true),
+                        array([map([
+                            ("cursor_shape", Value::String("vertical".into())),
+                            ("cell_percentage", Value::Unsigned(25)),
+                            ("blinkon", Value::Unsigned(300)),
+                        ])]),
+                    ])],
+                ),
+                event(
+                    "mode_change",
+                    [array([Value::String("insert".into()), Value::Unsigned(0)])],
+                ),
+                event("flush", [Value::Array(Vec::new())]),
+            ]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.cursor_shape, CursorShape::Vertical);
+        assert!(snapshot.cursor_blink);
+        assert_eq!(snapshot.cursor_cell_percentage, 25);
+        assert_eq!(snapshot.mode, "insert");
     }
 
     #[test]

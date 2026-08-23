@@ -993,6 +993,9 @@ mod tests {
             cursor_row: 0,
             cursor_column: 0,
             cursor_visible: true,
+            cursor_shape: crate::neovim::grid::CursorShape::Block,
+            cursor_blink: false,
+            cursor_cell_percentage: 0,
             mode: "normal".into(),
         }));
 

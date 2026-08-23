@@ -18,10 +18,6 @@ pub fn routes_to_neovim(key: KeyEvent, state: &AppState) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
-    if solve.editor.mode == Mode::Normal && !state.leader_pending && key.code == KeyCode::Char(' ')
-    {
-        return false;
-    }
     !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
 }
 
@@ -92,7 +88,7 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             };
         }
     }
-    if solve.pane != crate::app::model::SolvePane::Editor || mode == Mode::Normal {
+    if solve.pane != crate::app::model::SolvePane::Editor {
         if state.leader_pending {
             state.leader_pending = false;
             return match key.code {
@@ -245,6 +241,7 @@ mod tests {
     fn focused_editor_routes_full_neovim_surface_except_outer_app_keys() {
         let mut state = solve_state();
         for key in [
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
@@ -316,16 +313,23 @@ mod tests {
                 KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
                 &mut state
             ),
+            Some(Action::Editor(EditorAction::Normal(' ')))
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Output;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
             None
         );
         assert_eq!(
             action_for_key(
-                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
                 &mut state
             ),
-            Some(Action::Back)
+            Some(Action::SaveTest)
         );
-        state.solve.as_mut().unwrap().pane = SolvePane::Output;
         assert_eq!(
             action_for_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state),
             Some(Action::Down)

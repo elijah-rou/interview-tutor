@@ -113,20 +113,16 @@ impl EditorDocument {
         validate_text(&text)?;
         self.update_neovim_mode(mode);
         if text != self.text {
-            let revision_steps = self
-                .neovim_changedtick
-                .and_then(|previous| changedtick.checked_sub(previous))
-                .unwrap_or(1)
-                .max(1);
-            self.revision = self
-                .revision
-                .checked_add(revision_steps)
-                .ok_or_else(|| "editor revision overflow".to_string())?;
+            self.revision = self.next_revision()?;
             self.text = text;
         }
         self.neovim_changedtick = Some(changedtick);
         self.error = None;
         Ok(())
+    }
+
+    pub fn neovim_changedtick(&self) -> Option<u64> {
+        self.neovim_changedtick
     }
 
     pub fn line_count(&self) -> usize {
@@ -687,7 +683,7 @@ mod tests {
         document
             .install_neovim_snapshot("y\n".into(), "n", 15)
             .unwrap();
-        assert_eq!(document.revision, 5);
+        assert_eq!(document.revision, 3);
     }
 
     #[test]
