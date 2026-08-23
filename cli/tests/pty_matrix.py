@@ -466,7 +466,7 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
 
         session.send(b"Why does this invariant hold?" + ENTER)
         wait_turns(session, home, 1)
-        session.wait_screen("Interviewer:")
+        session.wait_screen("CODEX · INTERVIEWER")
         for level in range(1, 4):
             session.send(b" h")
             wait_turns(session, home, 1 + level)
@@ -531,6 +531,32 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         open_solve(session)
         session.wait_screen("print('initial')")
 
+        session.send(b"i")
+        session.wait_screen("Insert · SAVED")
+        session.send(b"\tTAB-SENTINEL")
+        session.wait_screen("TAB-SENTINEL")
+        assert "Editor · Neovim [active]" in session.screen.text()
+        session.send(ESCAPE)
+        session.wait_screen("Normal · DIRTY")
+        session.send(b"\t")
+        session.wait_screen("Problem / Examples [active]")
+        session.send(SHIFT_TAB)
+        session.wait_screen("Editor · Neovim [active]")
+        session.send(F5)
+        session.wait_screen("Testing…")
+        session.wait_screen("Run complete")
+        tab_source = fixture.solution.read_text(encoding="utf-8")
+        assert tab_source == "    TAB-SENTINELprint('initial')\n", repr(tab_source)
+        session.send(b"u")
+        session.wait_predicate(
+            "Tab insertion undo",
+            lambda: "TAB-SENTINEL" not in session.screen.text(),
+        )
+        session.send(F5)
+        session.wait_screen("Testing…")
+        session.wait_screen("Run complete")
+        assert fixture.solution.read_text(encoding="utf-8") == "print('initial')\n"
+
         session.send(b" ?")
         session.wait_screen("Keyboard help")
         session.send(b"j")
@@ -584,11 +610,13 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         session.send(b"\x1b[<0;70;10M\x1b[<0;70;10m")
 
         session.send(b" t")
+        session.wait_screen("Testing…")
         session.wait_screen("Run complete")
         expected_source = (
             "#print('initial')!!!\n" * 4 + "BRACKETED\nPASTE\n"
         )
-        assert fixture.solution.read_text(encoding="utf-8") == expected_source
+        saved_source = fixture.solution.read_text(encoding="utf-8")
+        assert saved_source == expected_source, repr(saved_source)
         assert query_attempts(database) == []
         session.send(CTRL_S)
         session.wait_screen("Testing…")
@@ -610,8 +638,9 @@ def broad_neovim_case(fixture: MatrixFixture) -> str:
         f"embedded Neovim remained alive after editor shutdown: {neovim_pid}"
     )
     return (
-        "visual-char+line+block unnamed+named-register n+N undo+redo macro+dot "
-        "bracketed-paste+mouse native-command+search+message F5+F9+Ctrl-S"
+        "insert-Tab=Neovim normal-Tab=pane visual-char+line+block "
+        "unnamed+named-register n+N undo+redo macro+dot bracketed-paste+mouse "
+        "native-command+search+message F5+F9+Ctrl-S"
     )
 
 
@@ -775,6 +804,15 @@ def resize_case(fixture: MatrixFixture) -> str:
         def assert_collapsed(*labels: str) -> None:
             session.settle()
             view = session.screen.text()
+            if "Solve panes" not in view:
+                rail_titles = {
+                    "Problem": "┌Prob┐",
+                    "Output": "┌Outp─",
+                    "Interview": "┌Intv┐",
+                }
+                for label, title in rail_titles.items():
+                    assert (title in view) == (label in labels), (labels, view)
+                return
             for label in ["Problem", "Output", "Interview"]:
                 assert (f"{label} [+]" in view) == (label in labels), (
                     labels,
@@ -801,7 +839,13 @@ def resize_case(fixture: MatrixFixture) -> str:
         session.send(b" c" + SHIFT_TAB + b" c" + SHIFT_TAB + b" c")
         assert_collapsed("Problem", "Output", "Interview")
         session.resize(100, 30)
-        session.wait_screen("Problem [+]")
+        session.wait_screen("[+]")
+        session.wait_predicate(
+            "full layout compact rail labels",
+            lambda: all(
+                label in session.screen.text() for label in ["Prob", "Outp", "Intv"]
+            ),
+        )
         assert "Solve panes" not in session.screen.text()
         session.resize(59, 19)
         session.wait_screen("Terminal too small")
@@ -1023,7 +1067,7 @@ def run_codex_case(fixture: MatrixFixture, mode: str) -> str:
                     assert len(captured_turns(home)) == 1
                     session.send(b"after explicit reconnect" + ENTER)
                     wait_turns(session, home, 2)
-                    session.wait_screen("Interviewer:")
+                    session.wait_screen("CODEX · INTERVIEWER")
                     session.wait_predicate(
                         "single Codex reconnect",
                         lambda: (
@@ -1033,7 +1077,7 @@ def run_codex_case(fixture: MatrixFixture, mode: str) -> str:
                         ),
                     )
                 elif mode == "stderr-flood":
-                    session.wait_screen("Interviewer:")
+                    session.wait_screen("CODEX · INTERVIEWER")
                 else:
                     session.wait_screen("Codex: protocol error")
                     if mode in {

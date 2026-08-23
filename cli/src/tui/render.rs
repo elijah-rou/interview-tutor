@@ -5,9 +5,9 @@ use crate::editor::Mode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn block(title: &str) -> Block<'static> {
     Block::default()
@@ -56,12 +56,21 @@ fn wrapped_markdown_text(markdown: &str, width: usize) -> Text<'static> {
             wrapped.push(Line::default());
             continue;
         }
-        let chars = content.chars().collect::<Vec<_>>();
-        wrapped.extend(
-            chars
-                .chunks(width)
-                .map(|chunk| Line::from(chunk.iter().collect::<String>())),
-        );
+        let mut row = String::new();
+        let mut row_width: usize = 0;
+        for character in content.chars() {
+            let character_width = character.width().unwrap_or(0);
+            if row_width > 0 && row_width.saturating_add(character_width) > width {
+                wrapped.push(Line::from(row));
+                row = String::new();
+                row_width = 0;
+            }
+            row.push(character);
+            row_width = row_width.saturating_add(character_width);
+        }
+        if !row.is_empty() {
+            wrapped.push(Line::from(row));
+        }
     }
     Text::from(wrapped)
 }
@@ -152,8 +161,8 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
                 "Space t/s/b/? · Tab panes".to_string(),
             ],
             (SolvePane::Editor, Mode::Insert) => vec![
-                "Esc returns to Normal for Space actions · Ctrl-Q quit · Tab panes".to_string(),
-                "Esc normal · Ctrl-Q quit · Tab panes".to_string(),
+                "Tab/Shift-Tab to Neovim · Esc returns to Normal · Ctrl-Q quit".to_string(),
+                "Tab to Neovim · Esc normal · Ctrl-Q quit".to_string(),
             ],
             (SolvePane::Editor, Mode::Visual) => vec![
                 "Neovim Visual · Esc then Space actions · Ctrl-Q quit · Tab panes".to_string(),
@@ -422,6 +431,26 @@ fn solve_output(state: &AppState) -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
         .scroll((solve.output_scroll, 0))
 }
+fn speaker_badge(label: &str, backend_name: &str) -> Line<'static> {
+    let badge = |text: String, color: Color| {
+        Line::styled(
+            text,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )
+    };
+    match label {
+        "You" => badge(" YOU ".into(), Color::Cyan),
+        "Hinter" => badge(" HINTER ".into(), Color::Yellow),
+        "Interviewer" => badge(
+            format!(" {} · INTERVIEWER ", backend_name.to_uppercase()),
+            Color::Magenta,
+        ),
+        submission if submission.starts_with("Submission review · recorded revision ") => {
+            badge(format!(" {submission} "), Color::Green)
+        }
+        other => badge(format!(" {other} "), Color::White),
+    }
+}
 fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
     let backend_name = state.interviewer.backend.display_name();
@@ -517,12 +546,16 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
             "{backend_name} declined. Local editor, tests, and submission remain available."
         ))),
         _ => {
-            for (label, message) in &state.interviewer.messages {
-                lines.push(Line::styled(
-                    format!("{label}:"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-                lines.extend(message.lines().map(|line| Line::from(line.to_string())));
+            let body_width = usize::from(area.width.saturating_sub(4)).max(1);
+            for (index, (label, message)) in state.interviewer.messages.iter().enumerate() {
+                if index > 0 {
+                    lines.push(Line::default());
+                }
+                lines.push(speaker_badge(label, backend_name));
+                for mut row in wrapped_markdown_text(message, body_width).lines {
+                    row.spans.insert(0, Span::raw("  "));
+                    lines.push(row);
+                }
             }
             lines.push(Line::from(""));
             let cursor = if state.interviewer.composer_focused {
@@ -566,7 +599,9 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
 }
 const FULL_SOLVE_WIDTH: u16 = 100;
 const FULL_SOLVE_CONTENT_HEIGHT: u16 = 27;
-const SIDE_RAIL_WIDTH: u16 = 16;
+const SIDE_RAIL_WIDTH: u16 = 6;
+const FOCUSED_SIDE_PERCENT: u16 = 45;
+const UNFOCUSED_SIDE_PERCENT: u16 = 28;
 
 #[derive(Clone, Copy)]
 struct FullSolveLayout {
@@ -586,6 +621,18 @@ fn accessory_expanded(state: &AppState, pane: SolvePane) -> bool {
     }
 }
 
+fn side_width(area_width: u16, expanded: bool, focused: bool) -> u16 {
+    if !expanded {
+        return SIDE_RAIL_WIDTH;
+    }
+    let percent = if focused {
+        FOCUSED_SIDE_PERCENT
+    } else {
+        UNFOCUSED_SIDE_PERCENT
+    };
+    area_width.saturating_mul(percent) / 100
+}
+
 fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
     if area.width < FULL_SOLVE_WIDTH || area.height < FULL_SOLVE_CONTENT_HEIGHT {
         return None;
@@ -596,16 +643,16 @@ fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
     } else {
         Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area)
     };
-    let problem_width = if solve.accessory_panes.problem_expanded {
-        area.width.saturating_mul(30) / 100
-    } else {
-        SIDE_RAIL_WIDTH
-    };
-    let interview_width = if solve.accessory_panes.interview_expanded {
-        area.width.saturating_mul(25) / 100
-    } else {
-        SIDE_RAIL_WIDTH
-    };
+    let problem_width = side_width(
+        area.width,
+        solve.accessory_panes.problem_expanded,
+        solve.pane == SolvePane::Problem,
+    );
+    let interview_width = side_width(
+        area.width,
+        solve.accessory_panes.interview_expanded,
+        solve.pane == SolvePane::Interview,
+    );
     assert!(problem_width.saturating_add(interview_width) < area.width);
     let upper = Layout::horizontal([
         Constraint::Length(problem_width),
@@ -622,14 +669,12 @@ fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
 }
 
 fn collapsed_rail(label: &str, active: bool) -> Paragraph<'static> {
-    let title = if active {
-        format!("*{label} [+]")
-    } else {
-        format!("{label} [+]")
-    };
-    Paragraph::new("Space-c expand")
-        .block(block(&title))
-        .wrap(Wrap { trim: true })
+    let mut lines = Vec::new();
+    if active {
+        lines.push(Line::from("*"));
+    }
+    lines.push(Line::from("[+]"));
+    Paragraph::new(lines).block(block(label))
 }
 
 fn compact_pane_label(label: &str, expanded: bool) -> Line<'static> {
@@ -643,7 +688,7 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             frame.render_widget(solve_problem(state), layout.problem);
         } else {
             frame.render_widget(
-                collapsed_rail("Problem", solve.pane == SolvePane::Problem),
+                collapsed_rail("Prob", solve.pane == SolvePane::Problem),
                 layout.problem,
             );
         }
@@ -652,7 +697,7 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             frame.render_widget(solve_interview(state, layout.interview), layout.interview);
         } else {
             frame.render_widget(
-                collapsed_rail("Interview", solve.pane == SolvePane::Interview),
+                collapsed_rail("Intv", solve.pane == SolvePane::Interview),
                 layout.interview,
             );
         }
@@ -660,7 +705,7 @@ fn render_solve(frame: &mut Frame<'_>, state: &AppState, area: Rect) {
             frame.render_widget(solve_output(state), layout.output);
         } else {
             frame.render_widget(
-                collapsed_rail("Output", solve.pane == SolvePane::Output),
+                collapsed_rail("Outp", solve.pane == SolvePane::Output),
                 layout.output,
             );
         }
@@ -828,7 +873,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         frame.render_widget(Clear, popup);
         let help = if state.screen == Screen::Solve {
             format!(
-                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab visits collapsed rails\nProblem/Output/Interview: i expands and focuses Interview\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
+                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab switches panes in Normal/Visual/Command and accessories, but goes to Neovim in Insert/Replace/terminal modes\nProblem/Output/Interview: i expands and focuses Interview; focused accessories widen\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
@@ -887,6 +932,22 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn buffer_rows_in(buffer: &ratatui::buffer::Buffer, area: Rect) -> Vec<String> {
+        let right = area.x.saturating_add(area.width);
+        let bottom = area.y.saturating_add(area.height);
+        (area.y..bottom)
+            .map(|y| {
+                (area.x..right)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn buffer_text_in(buffer: &ratatui::buffer::Buffer, area: Rect) -> String {
+        buffer_rows_in(buffer, area).join("\n")
     }
 
     fn rendered_row(state: &AppState, width: u16, height: u16, row: u16) -> String {
@@ -1148,7 +1209,7 @@ mod tests {
         state.interviewer.status = crate::app::model::InterviewerStatus::Disclosure;
         let disclosure = rendered(&state, 120, 40);
         assert!(disclosure.contains("Privacy disclosure"));
-        assert!(disclosure.contains("selected provider"));
+        assert!(disclosure.contains("provider"));
         assert!(disclosure.contains("settings"));
         assert!(disclosure.contains("!command"));
         assert!(disclosure.contains("tools/bash"));
@@ -1179,10 +1240,198 @@ mod tests {
         ));
         let view = rendered(&state, 80, 24);
         assert!(
-            view.contains("Interviewer")
-                && view.contains("Hinter")
+            view.contains("INTERVIEWER")
+                && view.contains("HINTER")
                 && view.contains("Submission review · recorded revision 7")
         );
+    }
+
+    #[test]
+    fn transcript_renders_distinct_styled_speaker_blocks() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.backend = crate::interviewer::Backend::Pi;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        state
+            .interviewer
+            .push_message("You".into(), format!("{}界界", "my question ".repeat(8)));
+        state
+            .interviewer
+            .push_message("Interviewer".into(), "interviewer reply".into());
+        state
+            .interviewer
+            .push_message("Hinter".into(), "hint body".into());
+        state.interviewer.push_message(
+            "Submission review · recorded revision 7".into(),
+            "review body".into(),
+        );
+
+        let area = Rect::new(0, 0, 56, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(solve_interview(&state, area), area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = buffer.content();
+        let rows = buffer_rows_in(buffer, area);
+        let interior_rows = buffer_rows_in(
+            buffer,
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                area.height,
+            ),
+        );
+        let find_row = |needle: &str| rows.iter().position(|row| row.contains(needle));
+        let styled_text = |color: Color| -> String {
+            content
+                .iter()
+                .filter(|cell| cell.style().fg == Some(color))
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let bold_at = |color: Color| -> bool {
+            content.iter().any(|cell| {
+                cell.style().fg == Some(color) && cell.style().add_modifier.contains(Modifier::BOLD)
+            })
+        };
+
+        assert!(styled_text(Color::Cyan).contains("YOU"));
+        assert!(styled_text(Color::Magenta).contains("PI · INTERVIEWER"));
+        assert!(styled_text(Color::Yellow).contains("HINTER"));
+        assert!(styled_text(Color::Green).contains("Submission review · recorded revision 7"));
+        for color in [Color::Cyan, Color::Magenta, Color::Yellow, Color::Green] {
+            assert!(bold_at(color), "{color:?} badge renders bold");
+        }
+
+        let you_row = find_row("YOU").expect("YOU badge visible");
+        let interviewer_row = find_row("INTERVIEWER").expect("interviewer badge visible");
+        let question_body = find_row("  my question").expect("prefixed question body");
+        assert!(
+            interior_rows[you_row + 1..interviewer_row]
+                .iter()
+                .any(|row| row.trim().is_empty()),
+            "turns are separated by blank rows"
+        );
+        assert!(question_body > you_row && question_body < interviewer_row);
+        for row in interior_rows[you_row + 1..interviewer_row]
+            .iter()
+            .filter(|row| !row.trim().is_empty())
+        {
+            assert!(row.starts_with("  "), "body row lacks prefix: {row:?}");
+        }
+    }
+
+    #[test]
+    fn focused_interview_displays_more_transcript_than_unfocused() {
+        let mut state = solve_state();
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        for index in 0..40 {
+            state.interviewer.push_message(
+                "Interviewer".into(),
+                format!("message-{index}: {}", "wrapped content ".repeat(8)),
+            );
+        }
+        let mut visible_messages = |pane: SolvePane| {
+            state.solve.as_mut().unwrap().pane = pane;
+            let view = rendered(&state, 120, 40);
+            (0..40)
+                .filter(|index| view.contains(&format!("message-{index}:")))
+                .count()
+        };
+        let unfocused = visible_messages(SolvePane::Editor);
+        let focused = visible_messages(SolvePane::Interview);
+        assert!(
+            focused > unfocused,
+            "focused {focused} vs unfocused {unfocused}"
+        );
+    }
+
+    #[test]
+    fn full_layout_sides_are_focus_responsive_with_compact_rails() {
+        let mut state = solve_state();
+        let area = Rect::new(0, 0, 120, 30);
+        let layout = |state: &AppState| full_solve_layout(state, area).unwrap();
+        let base = layout(&state);
+        assert_eq!(base.problem.width, 33, "unfocused expanded problem width");
+        assert_eq!(
+            base.interview.width, 33,
+            "unfocused expanded interview width"
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        let focused_interview = layout(&state);
+        assert_eq!(focused_interview.interview.width, 54, "45% of upper row");
+        assert_eq!(focused_interview.problem.width, 33);
+        assert_eq!(
+            focused_interview.editor.width,
+            area.width - focused_interview.problem.width - focused_interview.interview.width
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        let focused_problem = layout(&state);
+        assert_eq!(focused_problem.problem.width, 54, "focused problem widens");
+        assert_eq!(focused_problem.interview.width, 33);
+        assert!(
+            focused_problem.editor.width >= 20,
+            "editor keeps usable space"
+        );
+
+        // Collapsing returns substantial width to the editor; rails stay compact.
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .problem_expanded = false;
+        let collapsed_problem = layout(&state);
+        assert_eq!(collapsed_problem.problem.width, SIDE_RAIL_WIDTH);
+        assert_eq!(SIDE_RAIL_WIDTH, 6);
+        assert!(collapsed_problem.editor.width > base.editor.width + 20);
+        state
+            .solve
+            .as_mut()
+            .unwrap()
+            .accessory_panes
+            .interview_expanded = false;
+        let collapsed_both = layout(&state);
+        assert_eq!(collapsed_both.interview.width, SIDE_RAIL_WIDTH);
+        assert!(collapsed_both.editor.width > collapsed_problem.editor.width + 20);
+
+        let view = rendered(&state, 100, 30);
+        assert!(view.contains("Prob") && view.contains("Intv") && view.contains("Outp"));
+        assert!(view.contains("[+]"));
+    }
+
+    #[test]
+    fn compact_rails_mark_the_focused_pane() {
+        let mut state = solve_state();
+        {
+            let solve = state.solve.as_mut().unwrap();
+            solve.accessory_panes.problem_expanded = false;
+            solve.accessory_panes.output_expanded = false;
+            solve.accessory_panes.interview_expanded = false;
+            solve.pane = SolvePane::Problem;
+        }
+        let rail_text = |state: &AppState| {
+            let width = 100;
+            let height = 30;
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, state)).unwrap();
+            let content_area = Rect::new(0, 2, width, height.saturating_sub(3));
+            let problem_area = full_solve_layout(state, content_area).unwrap().problem;
+            buffer_text_in(terminal.backend().buffer(), problem_area)
+        };
+        let active = rail_text(&state);
+        assert!(
+            active.contains('*'),
+            "focused rail shows a marker: {active}"
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        let inactive = rail_text(&state);
+        assert!(!inactive.contains('*'));
     }
 
     #[test]
@@ -1236,7 +1485,8 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, &state)).unwrap();
-        let keyword = &terminal.backend().buffer()[(37, 3)];
+        let grid_area = neovim_grid_area(&state, 120, 40).unwrap();
+        let keyword = &terminal.backend().buffer()[(grid_area.x, grid_area.y)];
         assert_eq!(keyword.symbol(), "d");
         assert_eq!(keyword.fg, Color::Rgb(0xff, 0x00, 0xff));
     }
@@ -1254,11 +1504,34 @@ mod tests {
                 interview_expanded,
             };
 
-            let full = rendered(&state, 100, 30);
-            assert!(!full.contains("Solve panes"), "mask {mask}");
-            assert_eq!(full.contains("Problem [+]"), !problem_expanded);
-            assert_eq!(full.contains("Output [+]"), !output_expanded);
-            assert_eq!(full.contains("Interview [+]"), !interview_expanded);
+            let width: u16 = 100;
+            let height: u16 = 30;
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &state)).unwrap();
+            let content_area = Rect::new(0, 2, width, height.saturating_sub(3));
+            let layout = full_solve_layout(&state, content_area).unwrap();
+            let buffer = terminal.backend().buffer();
+            assert!(!buffer_text_in(buffer, content_area).contains("Solve panes"));
+            for (expanded, area, expanded_title, rail_title) in [
+                (
+                    problem_expanded,
+                    layout.problem,
+                    "Problem / Examples",
+                    "Prob",
+                ),
+                (output_expanded, layout.output, "Output / Test", "Outp"),
+                (interview_expanded, layout.interview, "Interview", "Intv"),
+            ] {
+                let pane = buffer_text_in(buffer, area);
+                if expanded {
+                    assert!(pane.contains(expanded_title), "mask {mask}: {pane}");
+                    assert!(!pane.contains("[+]"), "mask {mask}: {pane}");
+                } else {
+                    assert!(pane.contains(rail_title), "mask {mask}: {pane}");
+                    assert!(pane.contains("[+]"), "mask {mask}: {pane}");
+                }
+            }
 
             let compact = rendered(&state, 80, 24);
             assert!(compact.contains("Solve panes"), "mask {mask}");
@@ -1307,7 +1580,8 @@ mod tests {
 
         let preserved = state.solve.as_ref().unwrap().accessory_panes;
         assert!(rendered(&state, 80, 24).contains("Problem [+]"));
-        assert!(rendered(&state, 100, 30).contains("Problem [+]"));
+        assert!(rendered(&state, 100, 30).contains("Prob"));
+        assert!(rendered(&state, 100, 30).contains("[+]"));
         assert_eq!(state.solve.as_ref().unwrap().accessory_panes, preserved);
     }
 

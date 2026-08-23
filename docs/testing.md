@@ -34,7 +34,7 @@ Exercises the Python PTY harness itself: an injected hard timeout with child cle
 Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mode, then runs the serial Linux PTY matrix. Its 34 cases are:
 
 - four full/compact/autosave/resize workflows
-- one real-Neovim full-surface workflow covering Visual/count/operator/text-object, macro, dot-repeat, search, named-register, Tutor-command, exact-save, and process-reap behavior
+- one real-Neovim full-surface workflow covering Insert-mode Tab versus Normal-mode pane cycling, Visual/count/operator/text-object, macro, dot-repeat, search, named-register, Tutor-command, exact-save, and process-reap behavior
 - six local-runner fail/timeout/cancel/output/process-boundary cases
 - four SIGINT/SIGTERM attempt-recording lock cases
 - thirteen Codex auth/decline/protocol/approval/reconnect/backpressure cases
@@ -43,7 +43,7 @@ Fetches the locked CLI graph, reuses/builds the two debug binaries in offline mo
 
 Each ordinary PTY case has a 20-second hard deadline. Lifecycle cases use 4 seconds. The Python matrix has a 90-second hard deadline and asserts its own total is at most 90 seconds; the Make command adds GNU `timeout` at 95 seconds with a 5-second kill-after grace.
 
-The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, real clean embedded-Neovim editing/UI behavior, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, explicit `--interviewer none`, terminal mode/cursor/alternate-screen/mouse/bracketed-paste restoration, prior signal dispositions, Neovim and runner direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
+The gate checks 120x40 and 80x24 rendering, below-minimum resize behavior and state preservation, real clean embedded-Neovim editing/UI behavior including mode-sensitive Tab routing, save/test/submit attempt rows, stale revisions, bounded output, fake Codex degradation/privacy/reconnect, explicit `--interviewer none`, terminal mode/cursor/alternate-screen/mouse/bracketed-paste restoration, prior signal dispositions, Neovim and runner direct-child reap, process-group cleanup, pipe-reader shutdown, and temporary artifact cleanup. A hostile descendant that calls `setsid` is outside process-group containment; the fixture records and explicitly kills/reaps its PID so the limitation remains visible.
 
 ### `make test-race`
 

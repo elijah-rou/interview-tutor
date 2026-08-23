@@ -19,7 +19,7 @@ The status line reports the selected language and current operation. Errors rema
 
 ## Solve panes and keys
 
-Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. Tab and Shift-Tab always cycle all four, including collapsed accessory rails. Problem, Output, and Interview collapse independently; Editor cannot collapse. Focused expanded accessories scroll with Up/Down. Interview scrolls from newest toward older bounded transcript content and returns to newest when a message is appended or the session is cleared. Collapsing Interview closes its composer without clearing its transcript or active operation. Outside the Editor, `i` expands Interview and focuses its composer. In the Editor it retains Vim insert behavior.
+Solve mode has Editor, Problem/Examples, Output/Test, and Interview panes. In Editor Normal, Visual, and command/search modes, Tab and Shift-Tab cycle all four panes, including collapsed accessory rails. In Editor Insert, Replace, and terminal modes, both keys go to Neovim instead; accessory panes always use them for pane cycling. Problem, Output, and Interview collapse independently; Editor cannot collapse. Focused expanded accessories scroll with Up/Down. Interview scrolls from newest toward older bounded transcript content and returns to newest when a message is appended or the session is cleared. Transcript turns use distinct styled `YOU`, `<backend> · INTERVIEWER`, `HINTER`, and submission-review headings, consistently indented bodies, and blank-row separation. Collapsing Interview closes its composer without clearing its transcript or active operation. Outside the Editor, `i` expands Interview and focuses its composer. In the Editor it retains Vim insert behavior.
 
 Global solve actions are:
 
@@ -40,7 +40,7 @@ Back atomically autosaves a dirty draft without running tests or recording an at
 
 ## Embedded Neovim
 
-Solve requires a compatible trusted Neovim (`>=0.9`, `<2.0`) and starts it with `nvim --clean --embed`. Interview Tutor attaches through Neovim's external-UI MessagePack-RPC protocol and renders the real Neovim grid inside the Editor pane. Normal, Insert, Visual, operator-pending, command/search, registers, macros, counts, text objects, undo/redo, dot-repeat, completion, Lua, shell, job, terminal, split, and tab behavior therefore comes from clean Neovim rather than an emulation. User initialization and user plugins are not loaded.
+Solve requires a compatible trusted Neovim (`>=0.9`, `<2.0`) and starts it with `nvim --clean --embed`. Interview Tutor attaches through Neovim's external-UI MessagePack-RPC protocol and renders the real Neovim grid inside the Editor pane. Normal, Insert, Visual, operator-pending, command/search, registers, macros, counts, text objects, undo/redo, dot-repeat, completion, Lua, shell, job, terminal, split, and tab behavior therefore comes from clean Neovim rather than an emulation. The host reserves Tab and Shift-Tab for pane cycling only outside Insert, Replace, and terminal modes. User initialization and user plugins are not loaded.
 
 Select the executable with `--neovim PATH`, then `INTERVIEW_TUTOR_NEOVIM_EXECUTABLE`; otherwise `nvim` is resolved on `PATH`. The canonical target must be a regular executable owned by the effective user or root and not group/world writable. Missing, incompatible, or failed Neovim is an explicit solve error; there is no manual-editor fallback.
 
@@ -60,7 +60,7 @@ Output is bounded and sanitized. `STALE` appears only when displayed output belo
 
 ## Layout
 
-- At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become narrow titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space.
+- At 100x30 and larger: expanded Problem/Examples, Editor, Interview, and a full-width Output/Test pane are visible. Collapsed side panes become approximately five-column titled rails, collapsed Output becomes a three-row rail, and Editor receives the freed space. Expanded side panes widen with focus: Interview uses about 45% when focused, and focused Problem is materially wider than its resting width.
 - At 80x24: one selected pane appears behind collapse-marked tabs. A collapsed accessory keeps focus on its tab while Editor renders as the content fallback.
 - Below 60x20: only a resize panel appears. Ctrl-Q remains available from every focused pane and Neovim mode; dirty source requires a second Ctrl-Q confirmation.
 

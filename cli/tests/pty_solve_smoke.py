@@ -301,8 +301,10 @@ def main() -> int:
                 master, process, output, screen, database, 1, deadline
             )
             assert len(captured_turns(capture)) == 1
-            os.write(master, b"\tiX\x1b")
+            os.write(master, b"\tiX")
             wait_for(master, process, output, screen, "Xprint", deadline)
+            os.write(master, b"\x1b")
+            wait_for(master, process, output, screen, "Space t test", deadline)
             assert solution.read_text() == recorded_source
             (codex_home / "fake-release-turn").write_text("release")
 
@@ -323,7 +325,7 @@ def main() -> int:
                 "Submission review · recorded",
                 deadline,
             )
-            wait_for(master, process, output, screen, "revision 0:", deadline)
+            wait_for(master, process, output, screen, "revision 0", deadline)
             with sqlite3.connect(database) as connection:
                 attempts = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
             assert attempts == 1, attempts
@@ -339,7 +341,13 @@ def main() -> int:
             assert payloads[1]["userQuestion"] == ""
             assert turns[0]["params"]["threadId"] != turns[1]["params"]["threadId"]
 
-            os.write(master, b"\t\t\t r")
+            os.write(master, b"\t")
+            wait_for(master, process, output, screen, "Problem / Examples [active]", deadline)
+            os.write(master, b"\t")
+            wait_for(master, process, output, screen, "Output / Test [active]", deadline)
+            os.write(master, b"\t")
+            wait_for(master, process, output, screen, "Interview [active]", deadline)
+            os.write(master, b" r")
             wait_for(master, process, output, screen, "offline · memory", deadline)
             os.write(master, b"\t q q")
             process.wait(timeout=max(0.1, deadline - time.monotonic()))

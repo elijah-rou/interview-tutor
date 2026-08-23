@@ -25,7 +25,12 @@ pub fn routes_to_neovim(key: KeyEvent, state: &AppState) -> bool {
     {
         return false;
     }
-    !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+    if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        // Neovim reports Insert, Replace, and terminal modes as insert-like so
+        // their Tab mappings remain authoritative.
+        return solve.editor.mode == Mode::Insert;
+    }
+    true
 }
 
 pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
@@ -66,15 +71,19 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         state.leader_pending = false;
         return Some(Action::Submit);
     }
-    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
-        || key.code == KeyCode::BackTab
-    {
-        state.leader_pending = false;
-        return Some(Action::PreviousFocus);
-    }
-    if key.code == KeyCode::Tab {
-        state.leader_pending = false;
-        return Some(Action::NextFocus);
+    let tab_targets_neovim =
+        pane == crate::app::model::SolvePane::Editor && mode == Mode::Insert && !editor_failed;
+    if !tab_targets_neovim {
+        if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
+            || key.code == KeyCode::BackTab
+        {
+            state.leader_pending = false;
+            return Some(Action::PreviousFocus);
+        }
+        if key.code == KeyCode::Tab {
+            state.leader_pending = false;
+            return Some(Action::NextFocus);
+        }
     }
 
     if pane == crate::app::model::SolvePane::Interview && state.interviewer.composer_focused {
@@ -290,6 +299,57 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
+    }
+
+    #[test]
+    fn insert_mode_tab_reaches_neovim_while_other_modes_cycle_panes() {
+        let mut state = solve_state();
+        assert_eq!(state.solve.as_ref().unwrap().pane, SolvePane::Editor);
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                &mut state
+            ),
+            Some(Action::PreviousFocus)
+        );
+        for mode in ["i", "R", "t"] {
+            state
+                .solve
+                .as_mut()
+                .unwrap()
+                .editor
+                .update_neovim_mode(mode);
+            for key in [
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            ] {
+                assert!(routes_to_neovim(key, &state), "mode {mode}");
+                assert_eq!(action_for_key(key, &mut state), None, "mode {mode}");
+            }
+        }
+        state.solve.as_mut().unwrap().editor.update_neovim_mode("c");
+        assert!(!routes_to_neovim(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state
+        ));
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
+            Some(Action::NextFocus)
+        );
+        state.solve.as_mut().unwrap().editor.update_neovim_mode("i");
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        assert!(!routes_to_neovim(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state
+        ));
         assert_eq!(
             action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
             Some(Action::NextFocus)
