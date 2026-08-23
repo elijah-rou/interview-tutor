@@ -160,11 +160,12 @@ impl Default for GridState {
 }
 
 impl GridState {
-    pub fn apply_redraw(&mut self, batch: &Value) -> Result<Vec<Arc<GridSnapshot>>, String> {
+    pub fn apply_redraw(&mut self, batch: &Value) -> Result<Option<Arc<GridSnapshot>>, String> {
         let events = batch
             .as_array()
             .ok_or("Neovim redraw batch is not an array")?;
-        let mut snapshots = Vec::new();
+        let mut flush_count = 0;
+        let mut latest_snapshot = None;
         for event in events {
             let event = event
                 .as_array()
@@ -191,10 +192,13 @@ impl GridState {
                     "busy_start" => self.cursor_visible = false,
                     "busy_stop" => self.cursor_visible = true,
                     "flush" => {
-                        if snapshots.len() == MAX_FLUSHES_PER_BATCH {
+                        if flush_count == MAX_FLUSHES_PER_BATCH {
                             return Err("Neovim redraw batch exceeds flush bound".into());
                         }
-                        snapshots.push(Arc::new(self.snapshot()));
+                        flush_count += 1;
+                        // A batch may flush 64 times; release first to retain at most one full grid.
+                        drop(latest_snapshot.take());
+                        latest_snapshot = Some(Arc::new(self.snapshot()));
                     }
                     "option_set" | "set_title" | "set_icon" | "mouse_on" | "mouse_off" | "bell"
                     | "visual_bell" | "hl_group_set" | "chdir" | "update_menu" | "suspend" => {}
@@ -205,7 +209,7 @@ impl GridState {
                 }
             }
         }
-        Ok(snapshots)
+        Ok(latest_snapshot)
     }
 
     fn snapshot(&self) -> GridSnapshot {
@@ -589,11 +593,10 @@ mod tests {
                 ])],
             ),
         ]);
-        assert!(grid.apply_redraw(&no_flush).unwrap().is_empty());
+        assert!(grid.apply_redraw(&no_flush).unwrap().is_none());
         let flushed = grid
             .apply_redraw(&redraw([event("flush", [Value::Array(Vec::new())])]))
             .unwrap()
-            .pop()
             .unwrap();
         assert_eq!(flushed.cell(0, 0).unwrap().text, "a");
         assert_eq!(flushed.cell(0, 0).unwrap().highlight, 7);
@@ -632,7 +635,6 @@ mod tests {
                 event("flush", [Value::Array(Vec::new())]),
             ]))
             .unwrap()
-            .pop()
             .unwrap();
         assert_eq!(snapshot.cell(0, 0).unwrap().text, "b");
     }
@@ -660,7 +662,6 @@ mod tests {
                 event("flush", [Value::Array(Vec::new())]),
             ]))
             .unwrap()
-            .pop()
             .unwrap();
         assert_eq!(snapshot.cursor_shape, CursorShape::Vertical);
         assert!(snapshot.cursor_blink);
@@ -669,37 +670,43 @@ mod tests {
     }
 
     #[test]
-    fn each_flush_captures_state_at_its_exact_position() {
+    fn maximal_grid_multi_flush_retains_only_the_latest_exact_flush() {
         let mut grid = GridState::default();
-        let snapshots = grid
-            .apply_redraw(&redraw([
-                event(
-                    "grid_line",
-                    [array([
-                        Value::Unsigned(1),
-                        Value::Unsigned(0),
-                        Value::Unsigned(0),
-                        array([array([Value::String("a".into())])]),
-                        Value::Bool(false),
-                    ])],
-                ),
-                event("flush", [Value::Array(Vec::new())]),
-                event(
-                    "grid_line",
-                    [array([
-                        Value::Unsigned(1),
-                        Value::Unsigned(0),
-                        Value::Unsigned(0),
-                        array([array([Value::String("b".into())])]),
-                        Value::Bool(false),
-                    ])],
-                ),
-                event("flush", [Value::Array(Vec::new())]),
-            ]))
-            .unwrap();
-        assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].cell(0, 0).unwrap().text, "a");
-        assert_eq!(snapshots[1].cell(0, 0).unwrap().text, "b");
+        let mut events = vec![event(
+            "grid_resize",
+            [array([
+                Value::Unsigned(1),
+                Value::Unsigned(MAX_GRID_WIDTH as u64),
+                Value::Unsigned(MAX_GRID_HEIGHT as u64),
+            ])],
+        )];
+        for index in 0..MAX_FLUSHES_PER_BATCH {
+            events.push(event(
+                "grid_line",
+                [array([
+                    Value::Unsigned(1),
+                    Value::Unsigned(0),
+                    Value::Unsigned(0),
+                    array([array([Value::String(index.to_string())])]),
+                    Value::Bool(false),
+                ])],
+            ));
+            events.push(event("flush", [Value::Array(Vec::new())]));
+        }
+        events.push(event(
+            "grid_line",
+            [array([
+                Value::Unsigned(1),
+                Value::Unsigned(0),
+                Value::Unsigned(0),
+                array([array([Value::String("unflushed".into())])]),
+                Value::Bool(false),
+            ])],
+        ));
+
+        let snapshot = grid.apply_redraw(&redraw(events)).unwrap().unwrap();
+        assert_eq!(snapshot.cells.len(), MAX_GRID_CELLS);
+        assert_eq!(snapshot.cell(0, 0).unwrap().text, "63");
     }
 
     #[test]
@@ -720,7 +727,6 @@ mod tests {
                 event("flush", [Value::Array(Vec::new())]),
             ]))
             .unwrap()
-            .pop()
             .unwrap();
         let text = &snapshot.cell(0, 0).unwrap().text;
         assert_eq!(text, "��x");
@@ -800,7 +806,7 @@ mod tests {
     #[test]
     fn wide_continuation_cursor_colors_busy_and_clear_publish_at_flush() {
         let mut grid = GridState::default();
-        let snapshots = grid
+        let busy = grid
             .apply_redraw(&redraw([
                 event(
                     "grid_resize",
@@ -843,24 +849,27 @@ mod tests {
                 ),
                 event("busy_start", [Value::Array(Vec::new())]),
                 event("flush", [Value::Array(Vec::new())]),
+            ]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy.cell(0, 0).unwrap().text, "界");
+        assert_eq!(busy.cell(0, 1).unwrap().text, "");
+        assert_eq!(busy.default_foreground, Some(0x010203));
+        assert_eq!(busy.default_background, Some(0x040506));
+        assert_eq!((busy.cursor_row, busy.cursor_column), (0, 1));
+        assert!(!busy.cursor_visible);
+
+        let cleared = grid
+            .apply_redraw(&redraw([
                 event("busy_stop", [Value::Array(Vec::new())]),
                 event("grid_clear", [array([Value::Unsigned(1)])]),
                 event("flush", [Value::Array(Vec::new())]),
             ]))
+            .unwrap()
             .unwrap();
-        assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].cell(0, 0).unwrap().text, "界");
-        assert_eq!(snapshots[0].cell(0, 1).unwrap().text, "");
-        assert_eq!(snapshots[0].default_foreground, Some(0x010203));
-        assert_eq!(snapshots[0].default_background, Some(0x040506));
-        assert_eq!(
-            (snapshots[0].cursor_row, snapshots[0].cursor_column),
-            (0, 1)
-        );
-        assert!(!snapshots[0].cursor_visible);
-        assert!(snapshots[1].cursor_visible);
+        assert!(cleared.cursor_visible);
         assert!(
-            snapshots[1]
+            cleared
                 .cells
                 .iter()
                 .all(|cell| cell == &GridCell::default())
@@ -924,7 +933,7 @@ mod tests {
                 [Value::Array(Vec::new())]
             )]))
             .unwrap()
-            .is_empty()
+            .is_none()
         );
     }
 }

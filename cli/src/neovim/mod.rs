@@ -562,11 +562,8 @@ fn sync_reader_state(
     if let Some(grid) = grid {
         shared.lock().expect("Neovim worker lock").latest_grid = Some(grid);
     }
-    if let Some(error) = error {
-        fail_process(process, shared, error);
-        return;
-    }
     let events = events.into_iter().collect::<Vec<_>>();
+    let mut reader_replaced = false;
     for (index, event) in events.iter().cloned().enumerate() {
         let event_tick = event_changedtick(&event);
         if let OriginEvent::Dirty { buffer, .. } = &event {
@@ -620,8 +617,12 @@ fn sync_reader_state(
             ),
         }
         if recovered {
+            reader_replaced = true;
             break;
         }
+    }
+    if !reader_replaced && let Some(error) = error {
+        fail_process(process, shared, error);
     }
 }
 
@@ -682,10 +683,23 @@ fn push_event(shared: &Arc<Mutex<WorkerShared>>, event: WorkerEvent) {
 
 #[cfg(test)]
 mod tests {
+    use super::msgpack::{self, Value, array, map};
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn shell_encoded(value: &Value) -> String {
+        msgpack::encode(value)
+            .unwrap()
+            .into_iter()
+            .map(|byte| format!("\\{byte:03o}"))
+            .collect()
+    }
+
+    fn rpc_response(id: u64, result: Value) -> Value {
+        array([Value::Unsigned(1), Value::Unsigned(id), Value::Nil, result])
+    }
 
     fn wait_until_started(worker: &Worker, deadline: Instant) {
         loop {
@@ -878,6 +892,133 @@ mod tests {
         assert_eq!(host_document.saved_text(), source);
         assert!(!host_document.dirty());
         worker.shutdown();
+    }
+
+    #[test]
+    fn rpc_source_notifications_are_delivered_before_following_eof_failure() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "interview-worker-notify-eof-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let executable = root.join("fake-nvim");
+        let api = array([
+            Value::Unsigned(7),
+            map([
+                (
+                    "version",
+                    map([
+                        ("api_level", Value::Unsigned(11)),
+                        ("api_compatible", Value::Unsigned(11)),
+                        ("api_prerelease", Value::Bool(false)),
+                    ]),
+                ),
+                ("ui_options", array([Value::String("ext_linegrid".into())])),
+            ]),
+        ]);
+        let initial_snapshot = map([
+            ("lines", array([Value::String("saved".into())])),
+            ("eol", Value::Bool(true)),
+            ("mode", Value::String("n".into())),
+            ("tick", Value::Unsigned(1)),
+        ]);
+        let action = array([
+            Value::Unsigned(2),
+            Value::String("tutor_action".into()),
+            array([
+                Value::String("test".into()),
+                Value::Unsigned(1),
+                Value::Unsigned(2),
+                Value::String("n".into()),
+                Value::Bool(true),
+                array([Value::String("processed-action".into())]),
+                Value::Bool(true),
+            ]),
+        ]);
+        let barrier = array([
+            Value::Unsigned(2),
+            Value::String("tutor_barrier".into()),
+            array([
+                Value::Unsigned(9),
+                Value::Unsigned(1),
+                Value::Unsigned(3),
+                Value::String("n".into()),
+                Value::Bool(true),
+                array([Value::String("processed-barrier".into())]),
+                Value::Bool(true),
+            ]),
+        ]);
+        let messages = [
+            rpc_response(1, api),
+            rpc_response(2, Value::Nil),
+            rpc_response(3, Value::Nil),
+            rpc_response(4, Value::Unsigned(1)),
+            rpc_response(5, Value::Bool(true)),
+            rpc_response(6, Value::Nil),
+            rpc_response(7, initial_snapshot),
+            action,
+            barrier,
+        ]
+        .iter()
+        .map(|message| format!("sleep 0.02\nprintf '{}'\n", shell_encoded(message)))
+        .collect::<String>();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then printf 'NVIM v0.11.5\\n'; exit 0; fi\n{messages}exit 0\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "saved\n".into(),
+                "interview://notify-eof.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut sequence = Vec::new();
+        let mut failed = false;
+        while !failed {
+            for event in worker.poll().events {
+                match event {
+                    WorkerEvent::Started(result) => {
+                        result.unwrap();
+                        sequence.push("started".to_string());
+                    }
+                    WorkerEvent::Source(SourceEvent::Action(update)) => {
+                        assert_eq!(update.action, TutorAction::Test);
+                        assert_eq!(update.document.text, "processed-action\n");
+                        sequence.push("action".to_string());
+                    }
+                    WorkerEvent::Source(SourceEvent::Barrier(update)) => {
+                        assert_eq!(update.id, 9);
+                        assert_eq!(update.document.text, "processed-barrier\n");
+                        sequence.push("barrier".to_string());
+                    }
+                    WorkerEvent::Failed(error) => {
+                        assert!(error.contains("MessagePack stream"), "{error}");
+                        sequence.push("failed".to_string());
+                        failed = true;
+                    }
+                    WorkerEvent::Warning(error) => panic!("unexpected warning: {error}"),
+                }
+            }
+            assert!(Instant::now() < deadline, "notification/EOF test timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(sequence, ["started", "action", "barrier", "failed"]);
+        worker.shutdown();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

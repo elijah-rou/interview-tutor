@@ -434,8 +434,8 @@ local function acknowledge_barrier()
   if id == nil then error("source barrier id queue is empty") end
   barrier(id)
 end
-for _, mode in ipairs({ "n", "i", "x", "s", "o", "c" }) do
-  vim.keymap.set(mode, "<F35>", acknowledge_barrier, { buffer = buf, silent = true, nowait = true })
+for _, mode in ipairs({ "n", "i", "x", "s", "o", "c", "t" }) do
+  vim.keymap.set(mode, "<F35>", acknowledge_barrier, { silent = true, nowait = true })
 end
 vim.api.nvim_buf_create_user_command(buf, "TutorTest", function() tutor("test") end, {})
 vim.api.nvim_buf_create_user_command(buf, "TutorSubmit", function() tutor("submit") end, {})
@@ -1150,8 +1150,8 @@ fn read_rpc(
                     break;
                 };
                 let result: Result<(), String> = (|| match method {
-                    "redraw" => grid.apply_redraw(&message[2]).map(|snapshots| {
-                        for snapshot in snapshots {
+                    "redraw" => grid.apply_redraw(&message[2]).map(|snapshot| {
+                        if let Some(snapshot) = snapshot {
                             shared.lock().expect("Neovim reader lock").latest_grid = Some(snapshot);
                         }
                     }),
@@ -1690,6 +1690,32 @@ mod tests {
         }
     }
 
+    fn wait_for_barrier(process: &RpcProcess, id: u64) -> Snapshot {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = process
+                .shared()
+                .lock()
+                .unwrap()
+                .origin_events
+                .iter()
+                .find_map(|event| match event {
+                    OriginEvent::Barrier {
+                        id: actual,
+                        snapshot,
+                    } if *actual == id => Some(snapshot.clone()),
+                    OriginEvent::Dirty { .. }
+                    | OriginEvent::Action { .. }
+                    | OriginEvent::Barrier { .. } => None,
+                });
+            if let Some(snapshot) = snapshot {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "source barrier {id} timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn real_neovim_round_trips_exact_source_and_reports_api() {
         let executable = resolve_executable(None).unwrap();
@@ -2017,6 +2043,120 @@ end, { buffer = buf, expr = true })
         );
         assert_eq!(barrier.text.as_deref(), Some("Zx\n"));
         assert!(barrier.mode.starts_with('i'));
+        process.shutdown().unwrap();
+    }
+
+    #[test]
+    fn tutor_commands_and_barriers_work_across_global_neovim_contexts() {
+        let executable = resolve_executable(None).unwrap();
+        let mut process = RpcProcess::start(
+            &executable,
+            "solution\n",
+            "interview://global-barrier.py",
+            "python",
+            40,
+            12,
+        )
+        .unwrap();
+
+        for command in [
+            "TutorTest",
+            "TutorSubmit",
+            "TutorBack",
+            "TutorCollapse",
+            "TutorQuit",
+            "TutorHint",
+        ] {
+            process.feed_key(&format!(":{command}<CR>")).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let actions = process
+                .shared()
+                .lock()
+                .unwrap()
+                .origin_events
+                .iter()
+                .filter_map(|event| match event {
+                    OriginEvent::Action { action, snapshot } => {
+                        assert_eq!(snapshot.text.as_deref(), Some("solution\n"));
+                        Some(action.clone())
+                    }
+                    OriginEvent::Dirty { .. } | OriginEvent::Barrier { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            if actions.len() == 6 {
+                assert_eq!(
+                    actions,
+                    ["test", "submit", "back", "collapse", "quit", "hint"]
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "Tutor commands timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        process.feed_key(":enew<CR>iALTERNATE<Esc>").unwrap();
+        process.request_barrier(101).unwrap();
+        assert_eq!(
+            wait_for_barrier(&process, 101).text.as_deref(),
+            Some("solution\n")
+        );
+
+        process.feed_key(":new<CR>iSPLIT<Esc>").unwrap();
+        process.request_barrier(102).unwrap();
+        assert_eq!(
+            wait_for_barrier(&process, 102).text.as_deref(),
+            Some("solution\n")
+        );
+
+        process.feed_key(":tabnew<CR>iTAB<Esc>").unwrap();
+        process.request_barrier(103).unwrap();
+        assert_eq!(
+            wait_for_barrier(&process, 103).text.as_deref(),
+            Some("solution\n")
+        );
+
+        for (keys, id, expected_mode) in [
+            ("i", 201, "i"),
+            ("v", 202, "v"),
+            ("gh", 203, "s"),
+            ("d", 204, "no"),
+            (":", 205, "c"),
+        ] {
+            process.feed_key(keys).unwrap();
+            process.request_barrier(id).unwrap();
+            let barrier = wait_for_barrier(&process, id);
+            assert_eq!(barrier.text.as_deref(), Some("solution\n"));
+            assert!(
+                barrier.mode.starts_with(expected_mode),
+                "expected {expected_mode} mode, got {}",
+                barrier.mode
+            );
+            process.feed_key("<Esc>").unwrap();
+        }
+
+        process.feed_key(":tabnew<CR>:terminal<CR>i").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mode = process
+                .call("nvim_get_mode", Vec::new())
+                .unwrap()
+                .map_get("mode")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            if mode.starts_with('t') {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal mode timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        process.request_barrier(104).unwrap();
+        let terminal_barrier = wait_for_barrier(&process, 104);
+        assert_eq!(terminal_barrier.text.as_deref(), Some("solution\n"));
+        assert!(terminal_barrier.mode.starts_with('t'));
+
         process.shutdown().unwrap();
     }
 
