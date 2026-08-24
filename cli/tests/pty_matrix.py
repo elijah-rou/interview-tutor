@@ -21,6 +21,8 @@ ENTER = b"\r"
 ESCAPE = b"\x1b"
 F5 = b"\x1b[15~"
 F9 = b"\x1b[20~"
+HOME = b"\x1b[H"
+END = b"\x1b[F"
 SHIFT_TAB = b"\x1b[Z"
 CTRL_C = b"\x03"
 CTRL_Q = b"\x11"
@@ -694,9 +696,9 @@ def compact_case(fixture: MatrixFixture) -> str:
             question = f"compact-question-{index}-" + "wrapped-content-" * 3
             session.send(question.encode("utf-8") + ENTER)
             wait_turn_completion(session, home, index + 1)
-        session.send(b"k" * 40)
+        session.send(HOME)
         session.wait_screen("compact-question-0-")
-        session.send(b"j" * 40)
+        session.send(END)
         session.wait_screen("compact-question-5-")
 
         session.send(b"\t")

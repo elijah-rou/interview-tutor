@@ -211,8 +211,9 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
         ]
     } else if solve.pane == SolvePane::Interview && state.interviewer.composer_focused {
         vec![
-            "Type question · Enter send · Esc close · Tab panes".to_string(),
-            "Enter send · Esc close · Tab panes".to_string(),
+            "Type question · PgUp/PgDn/Home/End scroll · Enter send · Esc close · Tab panes"
+                .to_string(),
+            "Enter send · Esc close · PgUp/PgDn scroll · Tab panes".to_string(),
         ]
     } else {
         match (solve.pane, solve.editor.mode) {
@@ -248,7 +249,10 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             }
             (SolvePane::Interview, _) => vec![
                 format!(
-                    "i ask · ↑/↓ scroll · Space t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
+                    "i ask · ↑/↓ row · PgUp/PgDn page · Home/End oldest/latest · Space t/s/b/c/? · Tab panes"
+                ),
+                format!(
+                    "i ask · PgUp/PgDn/Home/End scroll · Space t/s/b/? · c {collapse_verb} · Tab panes"
                 ),
                 format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
             ],
@@ -606,6 +610,23 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
             "{backend_name} declined. Local editor, tests, and submission remain available."
         ))),
         _ => {
+            if state.interviewer.omitted_messages > 0 {
+                let suffix = if state.interviewer.omitted_messages == 1 {
+                    "message"
+                } else {
+                    "messages"
+                };
+                lines.push(Line::styled(
+                    format!(
+                        "… {} earlier {suffix} omitted from this bounded display …",
+                        state.interviewer.omitted_messages
+                    ),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+                lines.push(Line::default());
+            }
             let body_width = usize::from(area.width.saturating_sub(4)).max(1);
             for (index, (label, message)) in state.interviewer.messages.iter().enumerate() {
                 if index > 0 {
@@ -628,8 +649,9 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                 state.interviewer.composer
             )));
             lines.push(Line::from(
-                "i ask · Enter send · Space-h hint · Space-r reset · Ctrl-C cancel",
+                "i ask · Enter send · ↑/↓ row · PgUp/PgDn page · Home/End · Space-h hint",
             ));
+            lines.push(Line::from("Space-r reset · Ctrl-C cancel"));
         }
     }
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
@@ -929,11 +951,16 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     }
 
     if state.show_help && !undersized {
-        let popup = centered(70, 55, area);
+        let popup_height = if state.screen == Screen::Solve {
+            70
+        } else {
+            55
+        };
+        let popup = centered(70, popup_height, area);
         frame.render_widget(Clear, popup);
         let help = if state.screen == Screen::Solve {
             format!(
-                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab switches panes in Normal/Visual/Command and accessories, but goes to Neovim in Insert/Replace/terminal modes\nProblem/Output/Interview: i expands and focuses Interview; focused accessories widen\nComposer captures typed spaces; ↑/↓ scrolls accessories\nCompatibility aliases: F5 test · F9 submit",
+                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab switches panes in Normal/Visual/Command and accessories, but goes to Neovim in Insert/Replace/terminal modes\nProblem/Output/Interview: i expands and focuses Interview; focused accessories widen\nComposer captures typed spaces; Interview uses ↑/↓ by row, PgUp/PgDn by page, Home/End oldest/latest\nCompatibility aliases: F5 test · F9 submit",
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
@@ -1694,6 +1721,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn oldest_interview_view_marks_messages_omitted_by_the_display_bound() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        for index in 0..=crate::app::model::MAX_VISIBLE_TRANSCRIPT_ENTRIES {
+            state
+                .interviewer
+                .push_message("Interviewer".into(), format!("message-{index}"));
+        }
+        assert_eq!(state.interviewer.omitted_messages, 1);
+        state.interviewer.scroll = u16::MAX;
+
+        let oldest = rendered(&state, 80, 24);
+        assert!(oldest.contains("1 earlier message omitted"));
+        assert!(oldest.contains("message-1"));
+        assert!(!oldest.contains("message-0"));
     }
 
     #[test]

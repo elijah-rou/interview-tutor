@@ -86,6 +86,20 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
         }
     }
 
+    if pane == crate::app::model::SolvePane::Interview {
+        let scroll_action = match key.code {
+            KeyCode::PageUp => Some(Action::InterviewPageOlder),
+            KeyCode::PageDown => Some(Action::InterviewPageNewer),
+            KeyCode::Home => Some(Action::InterviewOldest),
+            KeyCode::End => Some(Action::InterviewLatest),
+            _ => None,
+        };
+        if scroll_action.is_some() {
+            state.leader_pending = false;
+            return scroll_action;
+        }
+    }
+
     if pane == crate::app::model::SolvePane::Interview && state.interviewer.composer_focused {
         state.leader_pending = false;
         return match key.code {
@@ -354,6 +368,24 @@ mod tests {
             action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state),
             Some(Action::NextFocus)
         );
+    }
+
+    #[test]
+    fn interview_page_and_endpoint_scroll_keys_precede_the_composer() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.composer_focused = true;
+        for (code, expected) in [
+            (KeyCode::PageUp, Action::InterviewPageOlder),
+            (KeyCode::PageDown, Action::InterviewPageNewer),
+            (KeyCode::Home, Action::InterviewOldest),
+            (KeyCode::End, Action::InterviewLatest),
+        ] {
+            assert_eq!(
+                action_for_key(KeyEvent::new(code, KeyModifiers::NONE), &mut state),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

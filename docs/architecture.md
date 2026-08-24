@@ -51,7 +51,7 @@ The local executor defaults to a 30-second wall timeout, 250-ms TERM grace, 256-
 
 Persistent per-stream VTE parsers decode arbitrary UTF-8 chunk boundaries and remove CSI, OSC, and dangerous controls while retaining newlines/tabs. Sanitized prefix/tail retention emits one deterministic omission marker. The final UTF-8 display never exceeds its cap; raw accounting reports exact omitted bytes. Normal execution retains at most 1.5 times the display cap in sanitized text. Discovery can retain separate stdout/stderr and has a 4.5-times aggregate maximum; it parses stdout only and rejects truncation.
 
-Codex bounds are a 10-second version probe/startup, 120-second turn, 2-second interrupt/shutdown acknowledgement, 1-second kill/reap, 250-ms reader drain, 64-KiB version output, 1-MiB stderr ring, 2-MiB protocol line, 64-KiB assistant response, 16-KiB question, 128 transcript entries, and 256-KiB transcript. TUI prompt output includes only the most recent 16 KiB. Hints stop at three per source revision.
+Codex bounds are a 10-second version probe/startup, 120-second turn, 2-second interrupt/shutdown acknowledgement, 1-second kill/reap, 250-ms reader drain, 64-KiB version output, 1-MiB stderr ring, 2-MiB protocol line, 64-KiB assistant response, 16-KiB question, 128 model-context transcript entries, and 256-KiB model-context transcript. The separate display history retains at most 512 messages and 1 MiB, reports omitted earlier messages, and is never added to model context. TUI prompt output includes only the most recent 16 KiB. Hints stop at three per source revision.
 
 ## Local execution and process cleanup
 

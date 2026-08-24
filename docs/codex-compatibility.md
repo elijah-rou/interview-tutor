@@ -102,7 +102,7 @@ After consent, Interview Tutor intentionally supplies exactly five application f
 4. bounded in-memory transcript
 5. current user question
 
-Questions are capped at 16 KiB. The transcript retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. Hints omit transcript context, allow three levels per source revision, and must not reveal a complete solution. One malformed response receives one correction request in the same transport operation; a second malformed response fails closed.
+Questions are capped at 16 KiB. The transcript supplied back to the model retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. The TUI separately retains at most 512 visible messages and 1 MiB, marks omitted earlier messages at the oldest scroll position, and never supplies that extra display-only history to the model. Hints omit transcript context, allow three levels per source revision, and must not reveal a complete solution. One malformed response receives one correction request in the same transport operation; a second malformed response fails closed.
 
 Submission review starts only after local attempt recording succeeds and uses that submit operation's exact captured source, not a newer editor buffer. A response enters UI/transcript state only while operation, mode, and source revision still match. The local runner remains authoritative. Transcript state is cleared on reset, solve exit, and process exit; Interview Tutor writes no prompt or transcript log.
 

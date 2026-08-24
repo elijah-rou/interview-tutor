@@ -6,6 +6,8 @@ use super::model::{
 use crate::editor::{EditorCommand, Mode};
 use crate::interviewer::Mode as InterviewerMode;
 
+const INTERVIEW_SCROLL_PAGE_ROWS: u16 = 10;
+
 fn load_effect(state: &mut AppState) -> Vec<Effect> {
     let Some(language_slug) = state.language_slug().map(str::to_string) else {
         state.error = Some("no enabled languages".to_string());
@@ -528,6 +530,28 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     .latest_run_revision
                     .is_some_and(|revision| revision != solve.editor.revision);
             }
+            Vec::new()
+        }
+        Action::InterviewPageOlder if solve.pane == SolvePane::Interview => {
+            state.interviewer.scroll = state
+                .interviewer
+                .scroll
+                .saturating_add(INTERVIEW_SCROLL_PAGE_ROWS);
+            Vec::new()
+        }
+        Action::InterviewPageNewer if solve.pane == SolvePane::Interview => {
+            state.interviewer.scroll = state
+                .interviewer
+                .scroll
+                .saturating_sub(INTERVIEW_SCROLL_PAGE_ROWS);
+            Vec::new()
+        }
+        Action::InterviewOldest if solve.pane == SolvePane::Interview => {
+            state.interviewer.scroll = MAX_SCROLL;
+            Vec::new()
+        }
+        Action::InterviewLatest if solve.pane == SolvePane::Interview => {
+            state.interviewer.scroll = 0;
             Vec::new()
         }
         Action::Up => {
@@ -1157,6 +1181,10 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             | Action::InterviewBackspace
             | Action::InterviewSend
             | Action::InterviewEscape
+            | Action::InterviewPageOlder
+            | Action::InterviewPageNewer
+            | Action::InterviewOldest
+            | Action::InterviewLatest
             | Action::InterviewDisclosure(_)
             | Action::Hint
             | Action::ResetInterview
@@ -2682,6 +2710,14 @@ mod tests {
         assert_eq!(state.interviewer.scroll, MAX_SCROLL);
         reduce(&mut state, Event::Command(Action::Down));
         assert_eq!(state.interviewer.scroll, MAX_SCROLL - 1);
+        reduce(&mut state, Event::Command(Action::InterviewLatest));
+        assert_eq!(state.interviewer.scroll, 0);
+        reduce(&mut state, Event::Command(Action::InterviewPageOlder));
+        assert_eq!(state.interviewer.scroll, INTERVIEW_SCROLL_PAGE_ROWS);
+        reduce(&mut state, Event::Command(Action::InterviewPageNewer));
+        assert_eq!(state.interviewer.scroll, 0);
+        reduce(&mut state, Event::Command(Action::InterviewOldest));
+        assert_eq!(state.interviewer.scroll, MAX_SCROLL);
         state
             .interviewer
             .push_message("Interviewer".into(), "new".into());

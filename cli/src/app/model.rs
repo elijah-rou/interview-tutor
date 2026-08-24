@@ -12,6 +12,8 @@ pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_SCROLL: u16 = u16::MAX;
 pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
 pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
+pub const MAX_VISIBLE_TRANSCRIPT_ENTRIES: usize = 512;
+pub const MAX_VISIBLE_TRANSCRIPT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterviewerStatus {
@@ -55,6 +57,7 @@ pub struct InterviewerUi {
     pub composer_focused: bool,
     pub composer: String,
     pub messages: Vec<(String, String)>,
+    pub omitted_messages: usize,
     /// Number of wrapped transcript rows to retain below the visible viewport.
     pub scroll: u16,
     pub connecting: Option<OperationId>,
@@ -85,6 +88,7 @@ impl InterviewerUi {
             composer_focused: false,
             composer: String::new(),
             messages: Vec::new(),
+            omitted_messages: 0,
             scroll: 0,
             connecting: None,
             active: None,
@@ -97,23 +101,35 @@ impl InterviewerUi {
 
     pub fn push_message(&mut self, label: String, message: String) {
         self.messages.push((label, message));
-        while self.messages.len() > 128
+        while self.messages.len() > MAX_VISIBLE_TRANSCRIPT_ENTRIES
             || self
                 .messages
                 .iter()
                 .map(|(label, message)| label.len() + message.len())
                 .sum::<usize>()
-                > 256 * 1024
+                > MAX_VISIBLE_TRANSCRIPT_BYTES
         {
             self.messages.remove(0);
+            self.omitted_messages = self
+                .omitted_messages
+                .checked_add(1)
+                .expect("visible transcript omission count overflow");
         }
-        assert!(self.messages.len() <= 128);
+        assert!(self.messages.len() <= MAX_VISIBLE_TRANSCRIPT_ENTRIES);
+        assert!(
+            self.messages
+                .iter()
+                .map(|(label, message)| label.len() + message.len())
+                .sum::<usize>()
+                <= MAX_VISIBLE_TRANSCRIPT_BYTES
+        );
         self.scroll = 0;
     }
 
     pub fn clear_session(&mut self) {
         self.composer.clear();
         self.messages.clear();
+        self.omitted_messages = 0;
         self.scroll = 0;
         self.connecting = None;
         self.active = None;
@@ -468,6 +484,35 @@ mod tests {
     use super::*;
     use crate::runner::ExecutionPlan;
     use std::path::PathBuf;
+
+    #[test]
+    fn visible_interview_history_outlives_model_context_and_reports_omissions() {
+        let mut interviewer = InterviewerUi::new(crate::interviewer::Backend::Pi);
+        for index in 0..200 {
+            interviewer.push_message(format!("message-{index}"), "x".repeat(1024));
+        }
+        assert_eq!(interviewer.messages.len(), 200);
+        assert_eq!(interviewer.omitted_messages, 0);
+
+        for index in 200..600 {
+            interviewer.push_message(format!("message-{index}"), "x".into());
+        }
+        assert_eq!(interviewer.messages.len(), MAX_VISIBLE_TRANSCRIPT_ENTRIES);
+        assert_eq!(interviewer.omitted_messages, 88);
+        assert_eq!(interviewer.messages[0].0, "message-88");
+        assert!(
+            interviewer
+                .messages
+                .iter()
+                .map(|(label, message)| label.len() + message.len())
+                .sum::<usize>()
+                <= MAX_VISIBLE_TRANSCRIPT_BYTES
+        );
+
+        interviewer.clear_session();
+        assert!(interviewer.messages.is_empty());
+        assert_eq!(interviewer.omitted_messages, 0);
+    }
 
     #[test]
     fn disabling_interviewer_clears_session_state_and_is_sticky_across_solve_sessions() {
