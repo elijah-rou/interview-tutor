@@ -7,6 +7,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn block(title: &str) -> Block<'static> {
@@ -67,6 +68,65 @@ fn wrapped_markdown_text(markdown: &str, width: usize) -> Text<'static> {
             }
             row.push(character);
             row_width = row_width.saturating_add(character_width);
+        }
+        if !row.is_empty() {
+            wrapped.push(Line::from(row));
+        }
+    }
+    Text::from(wrapped)
+}
+
+fn wrapped_dialog_text(dialog: &str, width: usize) -> Text<'static> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in markdown_text(dialog).lines {
+        let content = line
+            .spans
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        if content.trim().is_empty() {
+            wrapped.push(Line::default());
+            continue;
+        }
+
+        let mut row = String::new();
+        let mut row_width = 0usize;
+        for word in content.split_whitespace() {
+            let word_width = UnicodeWidthStr::width(word);
+            if word_width <= width {
+                let separator_width = usize::from(!row.is_empty());
+                if !row.is_empty()
+                    && row_width
+                        .saturating_add(separator_width)
+                        .saturating_add(word_width)
+                        > width
+                {
+                    wrapped.push(Line::from(std::mem::take(&mut row)));
+                    row_width = 0;
+                }
+                if !row.is_empty() {
+                    row.push(' ');
+                    row_width = row_width.saturating_add(1);
+                }
+                row.push_str(word);
+                row_width = row_width.saturating_add(word_width);
+                continue;
+            }
+
+            if !row.is_empty() {
+                wrapped.push(Line::from(std::mem::take(&mut row)));
+                row_width = 0;
+            }
+            for grapheme in UnicodeSegmentation::graphemes(word, true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if !row.is_empty() && row_width.saturating_add(grapheme_width) > width {
+                    wrapped.push(Line::from(std::mem::take(&mut row)));
+                    row_width = 0;
+                }
+                row.push_str(grapheme);
+                row_width = row_width.saturating_add(grapheme_width);
+            }
         }
         if !row.is_empty() {
             wrapped.push(Line::from(row));
@@ -552,7 +612,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                     lines.push(Line::default());
                 }
                 lines.push(speaker_badge(label, backend_name));
-                for mut row in wrapped_markdown_text(message, body_width).lines {
+                for mut row in wrapped_dialog_text(message, body_width).lines {
                     row.spans.insert(0, Span::raw("  "));
                     lines.push(row);
                 }
@@ -984,6 +1044,34 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    #[test]
+    fn wrapped_dialog_preserves_whole_words_and_splits_only_oversized_tokens() {
+        let rows = |text: &str, width| {
+            wrapped_dialog_text(text, width)
+                .lines
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .into_iter()
+                        .map(|span| span.content.into_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            rows("hello are you fine", 8),
+            vec!["hello", "are you", "fine"]
+        );
+        assert_eq!(rows("hello\nare you", 8), vec!["hello", "are you"]);
+        assert_eq!(rows("extraordinary", 5), vec!["extra", "ordin", "ary"]);
+        assert!(
+            rows("café déjà", 6)
+                .iter()
+                .all(|row| UnicodeWidthStr::width(row.as_str()) <= 6)
+        );
     }
 
     #[test]
