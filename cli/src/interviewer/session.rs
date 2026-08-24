@@ -164,23 +164,7 @@ impl InterviewerSession {
             if matches!(mode, Mode::Hint(_)) && request.guidance == GuidanceMode::Interview {
                 String::new()
             } else {
-                self.transcript
-                    .entries()
-                    .map(|entry| {
-                        let label = match entry.speaker {
-                            Speaker::User => "user",
-                            Speaker::Interviewer => "interviewer",
-                            Speaker::Hinter => "hinter",
-                            Speaker::SubmissionReview => "review",
-                        };
-                        format!(
-                            "{} {label}: {}",
-                            entry.guidance.transcript_tag(),
-                            entry.text
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                self.transcript.render_for_prompt()
             };
         let payload = prompt::user_payload(
             request.statement,

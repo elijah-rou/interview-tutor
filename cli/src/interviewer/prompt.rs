@@ -170,7 +170,7 @@ pub fn system_contract(mode: Mode, guidance: GuidanceMode, solved: bool) -> Stri
         Mode::Hint(2) => "Give one level-2 hint: a technique or counterexample. Never provide complete language code. Return only JSON with reveals_solution=false.".into(),
         Mode::Hint(3) => "Give one level-3 hint: pseudocode direction, never complete language code. Return only JSON with reveals_solution=false.".into(),
         Mode::Hint(_) => unreachable!("hint level validated before prompt"),
-        Mode::SubmissionReview => "Review the explicitly recorded local submission for correctness, complexity, edge cases, and communication. The local runner is authoritative. Return only the requested JSON envelope.".into(),
+        Mode::SubmissionReview => "Review the explicitly recorded local submission for correctness, complexity, edge cases, and communication. The local runner is authoritative. Never provide a complete solution or complete language code. Return only the requested JSON envelope.".into(),
     }
 }
 
@@ -364,6 +364,10 @@ mod tests {
                 .len(),
             2
         );
+        let interview_review =
+            system_contract(Mode::SubmissionReview, GuidanceMode::Interview, true);
+        assert!(interview_review.contains("Never provide a complete solution"));
+        assert!(interview_review.contains("complete language code"));
     }
 
     #[test]
