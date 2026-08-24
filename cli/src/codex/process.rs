@@ -2107,6 +2107,7 @@ mod tests {
             session
                 .ask(crate::codex::InterviewRequest {
                     mode: crate::codex::prompt::Mode::Interviewer,
+                    guidance: crate::interviewer::GuidanceMode::Interview,
                     statement: "statement",
                     source: "question-source",
                     latest_output: "question-output",
@@ -2121,6 +2122,7 @@ mod tests {
             session
                 .ask(crate::codex::InterviewRequest {
                     mode: crate::codex::prompt::Mode::Hint(1),
+                    guidance: crate::interviewer::GuidanceMode::Interview,
                     statement: "statement",
                     source: "hint-source",
                     latest_output: "hint-output",
@@ -2135,6 +2137,7 @@ mod tests {
             session
                 .ask(crate::codex::InterviewRequest {
                     mode: crate::codex::prompt::Mode::SubmissionReview,
+                    guidance: crate::interviewer::GuidanceMode::Interview,
                     statement: "statement",
                     source: "recorded-source-bytes",
                     latest_output: "recorded-output",
@@ -2200,6 +2203,98 @@ mod tests {
     }
 
     #[test]
+    fn fake_codex_tutor_schema_and_mode_tagged_context_are_exact() {
+        let environment = FakeEnvironment::new("normal");
+        let mut session = crate::codex::CodexSession::connect_executable(
+            fake_executable(),
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        session
+            .ask(crate::codex::InterviewRequest {
+                mode: crate::codex::prompt::Mode::Interviewer,
+                guidance: crate::interviewer::GuidanceMode::Interview,
+                statement: "statement",
+                source: "source",
+                latest_output: "output",
+                question: "interview question",
+                source_revision: 1,
+                solved: false,
+            })
+            .unwrap();
+        assert_eq!(
+            session
+                .ask(crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::Interviewer,
+                    guidance: crate::interviewer::GuidanceMode::Tutor,
+                    statement: "statement",
+                    source: "source",
+                    latest_output: "output",
+                    question: "show complete code",
+                    source_revision: 1,
+                    solved: false,
+                })
+                .unwrap(),
+            "Direct tutor guidance with complete code [turn-2]"
+        );
+        assert_eq!(
+            session
+                .ask(crate::codex::InterviewRequest {
+                    mode: crate::codex::prompt::Mode::Hint(1),
+                    guidance: crate::interviewer::GuidanceMode::Tutor,
+                    statement: "statement",
+                    source: "source",
+                    latest_output: "output",
+                    question: "",
+                    source_revision: 1,
+                    solved: false,
+                })
+                .unwrap(),
+            "Direct tutor guidance with complete code [turn-3]"
+        );
+        drop(session);
+
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let turns = records
+            .iter()
+            .filter_map(|record| record.get("json"))
+            .filter(|message| message["method"] == "turn/start")
+            .collect::<Vec<_>>();
+        assert_eq!(turns.len(), 3);
+        for turn in &turns[1..] {
+            assert_eq!(
+                turn["params"]["outputSchema"]["properties"]["kind"]["const"],
+                "guidance"
+            );
+            let input = turn["params"]["input"][0]["text"].as_str().unwrap();
+            let payload: Value =
+                serde_json::from_str(input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+            let keys = payload.as_object().unwrap().len();
+            assert_eq!(keys, 5);
+            assert!(
+                payload["transcript"]
+                    .as_str()
+                    .unwrap()
+                    .contains("interview user: interview question")
+            );
+        }
+        let tutor_hint_input = turns[2]["params"]["input"][0]["text"].as_str().unwrap();
+        let tutor_hint_payload: Value =
+            serde_json::from_str(tutor_hint_input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+        assert!(
+            tutor_hint_payload["transcript"]
+                .as_str()
+                .unwrap()
+                .contains("tutor interviewer: Direct tutor guidance")
+        );
+    }
+
+    #[test]
     fn rejected_turn_replaces_remote_thread_without_losing_accepted_transcript() {
         let environment = FakeEnvironment::new("normal");
         let mut session = crate::codex::CodexSession::connect_executable(
@@ -2211,6 +2306,7 @@ mod tests {
         session
             .ask(crate::codex::InterviewRequest {
                 mode: crate::codex::prompt::Mode::Interviewer,
+                guidance: crate::interviewer::GuidanceMode::Interview,
                 statement: "statement",
                 source: "accepted-source",
                 latest_output: "output",
@@ -2223,6 +2319,7 @@ mod tests {
             .ask_deferred_with_cancellation(
                 crate::codex::InterviewRequest {
                     mode: crate::codex::prompt::Mode::Interviewer,
+                    guidance: crate::interviewer::GuidanceMode::Interview,
                     statement: "statement",
                     source: "stale-source",
                     latest_output: "output",
@@ -2237,6 +2334,7 @@ mod tests {
         session
             .ask(crate::codex::InterviewRequest {
                 mode: crate::codex::prompt::Mode::SubmissionReview,
+                guidance: crate::interviewer::GuidanceMode::Interview,
                 statement: "statement",
                 source: "new-source",
                 latest_output: "output",
@@ -2296,6 +2394,7 @@ mod tests {
         .unwrap();
         let request = |question| crate::codex::InterviewRequest {
             mode: crate::codex::prompt::Mode::Interviewer,
+            guidance: crate::interviewer::GuidanceMode::Interview,
             statement: "statement",
             source: "source",
             latest_output: "output",
@@ -2345,6 +2444,7 @@ mod tests {
         .unwrap();
         let request = || crate::codex::InterviewRequest {
             mode: crate::codex::prompt::Mode::Interviewer,
+            guidance: crate::interviewer::GuidanceMode::Interview,
             statement: "statement",
             source: "source",
             latest_output: "output",
@@ -2404,6 +2504,7 @@ mod tests {
         .unwrap();
         let request = || crate::codex::InterviewRequest {
             mode: crate::codex::prompt::Mode::Interviewer,
+            guidance: crate::interviewer::GuidanceMode::Interview,
             statement: "statement",
             source: "source",
             latest_output: "output",

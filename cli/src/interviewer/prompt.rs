@@ -1,8 +1,10 @@
+use super::GuidanceMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const MAX_ASSISTANT_BYTES: usize = 64 * 1024;
 
+/// Operation role. GuidanceMode separately controls teaching policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
     Interviewer,
@@ -72,7 +74,36 @@ enum HintKind {
     Hint,
 }
 
-pub fn output_schema(mode: Mode) -> Value {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TutorGuidanceResponse {
+    kind: TutorGuidanceKind,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum TutorGuidanceKind {
+    Guidance,
+    SubmissionReview,
+}
+
+pub fn output_schema(mode: Mode, guidance: GuidanceMode) -> Value {
+    if guidance == GuidanceMode::Tutor {
+        let kind = if mode == Mode::SubmissionReview {
+            "submission-review"
+        } else {
+            "guidance"
+        };
+        return json!({
+            "type":"object","additionalProperties":false,
+            "required":["kind","text"],
+            "properties":{
+                "kind":{"const":kind},
+                "text":{"type":"string","minLength":1,"maxLength":65536}
+            }
+        });
+    }
     match mode {
         Mode::Interviewer => json!({
             "oneOf":[
@@ -111,7 +142,21 @@ fn response_schema(kind: &str, assessment: Value) -> Value {
     })
 }
 
-pub fn system_contract(mode: Mode, solved: bool) -> String {
+pub fn system_contract(mode: Mode, guidance: GuidanceMode, solved: bool) -> String {
+    if guidance == GuidanceMode::Tutor {
+        return match mode {
+            Mode::Interviewer => format!(
+                "Act as a direct technical tutor, not a Socratic interviewer. Answer the explicit user question directly and explain concepts, exact mistakes, and fixes. A complete solution, complete approach, pseudocode, or language code is allowed when requested or useful. {} Return only the requested JSON envelope.",
+                if solved {
+                    "The local runner has recorded a submission."
+                } else {
+                    "No successful explicit local submission has been recorded."
+                }
+            ),
+            Mode::Hint(_) => "Give direct targeted teaching based on the current source and latest output. Explain the exact issue and fix. A complete solution or complete language code is allowed when useful. Return only the requested JSON envelope.".into(),
+            Mode::SubmissionReview => "Directly review the explicitly recorded local submission for correctness, complexity, edge cases, and communication. Give exact corrections or corrected code when useful. The local runner is authoritative. Return only the requested JSON envelope.".into(),
+        };
+    }
     match mode {
         Mode::Interviewer => format!(
             "Act as a Socratic technical interviewer. Ask exactly one focused question at a time. Give concise feedback. {} Never provide a complete solution or complete language code. Return only the requested JSON envelope.",
@@ -139,52 +184,73 @@ pub fn user_payload(
     json!({"statement":statement,"source":source,"latestTestOutput":output,"transcript":transcript,"userQuestion":question})
 }
 
-pub fn parse_response(mode: Mode, text: &str) -> Result<String, &'static str> {
+pub fn parse_response(
+    mode: Mode,
+    guidance: GuidanceMode,
+    text: &str,
+) -> Result<String, &'static str> {
     if text.len() > MAX_ASSISTANT_BYTES {
         return Err("response exceeds 64 KiB");
     }
-    let response_text = match mode {
-        Mode::Hint(expected) => {
-            let response: HintResponse =
-                serde_json::from_str(text).map_err(|_| "invalid hint envelope")?;
-            let _ = response.kind;
-            if response.level != expected || response.reveals_solution {
-                return Err("hint violated its level or solution boundary");
-            }
-            response.text
-        }
-        Mode::Interviewer => {
-            let response: InterviewResponse =
-                serde_json::from_str(text).map_err(|_| "invalid interview envelope")?;
-            let valid_relation = matches!(
-                (&response.kind, &response.assessment),
-                (
-                    InterviewKind::Question | InterviewKind::Feedback,
-                    Assessment::Continue
-                ) | (InterviewKind::Decision, Assessment::Pass | Assessment::Fail)
-            );
-            if !valid_relation {
-                return Err("interview kind and assessment disagree");
-            }
-            response.text
-        }
-        Mode::SubmissionReview => {
-            let response: SubmissionReviewResponse =
-                serde_json::from_str(text).map_err(|_| "invalid submission review envelope")?;
-            let valid_relation = matches!(
-                (&response.kind, &response.assessment),
-                (
-                    SubmissionReviewKind::Feedback,
-                    SubmissionAssessment::Continue
-                ) | (
-                    SubmissionReviewKind::Decision,
-                    SubmissionAssessment::Pass | SubmissionAssessment::Fail
+    let response_text = if guidance == GuidanceMode::Tutor {
+        let response: TutorGuidanceResponse =
+            serde_json::from_str(text).map_err(|_| "invalid tutor envelope")?;
+        let kind_matches = matches!(
+            (mode, response.kind),
+            (Mode::SubmissionReview, TutorGuidanceKind::SubmissionReview)
+                | (
+                    Mode::Interviewer | Mode::Hint(_),
+                    TutorGuidanceKind::Guidance
                 )
-            );
-            if !valid_relation {
-                return Err("submission review kind and assessment disagree");
+        );
+        if !kind_matches {
+            return Err("tutor kind and operation role disagree");
+        }
+        response.text
+    } else {
+        match mode {
+            Mode::Hint(expected) => {
+                let response: HintResponse =
+                    serde_json::from_str(text).map_err(|_| "invalid hint envelope")?;
+                let _ = response.kind;
+                if response.level != expected || response.reveals_solution {
+                    return Err("hint violated its level or solution boundary");
+                }
+                response.text
             }
-            response.text
+            Mode::Interviewer => {
+                let response: InterviewResponse =
+                    serde_json::from_str(text).map_err(|_| "invalid interview envelope")?;
+                let valid_relation = matches!(
+                    (&response.kind, &response.assessment),
+                    (
+                        InterviewKind::Question | InterviewKind::Feedback,
+                        Assessment::Continue
+                    ) | (InterviewKind::Decision, Assessment::Pass | Assessment::Fail)
+                );
+                if !valid_relation {
+                    return Err("interview kind and assessment disagree");
+                }
+                response.text
+            }
+            Mode::SubmissionReview => {
+                let response: SubmissionReviewResponse =
+                    serde_json::from_str(text).map_err(|_| "invalid submission review envelope")?;
+                let valid_relation = matches!(
+                    (&response.kind, &response.assessment),
+                    (
+                        SubmissionReviewKind::Feedback,
+                        SubmissionAssessment::Continue
+                    ) | (
+                        SubmissionReviewKind::Decision,
+                        SubmissionAssessment::Pass | SubmissionAssessment::Fail
+                    )
+                );
+                if !valid_relation {
+                    return Err("submission review kind and assessment disagree");
+                }
+                response.text
+            }
         }
     };
     if response_text.trim().is_empty() {
@@ -201,40 +267,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strict_envelopes_reject_solution_reveal_unknown_fields_and_empty_text() {
+    fn interview_envelopes_keep_solution_boundary_and_strict_relations() {
         assert_eq!(
             parse_response(
                 Mode::Hint(2),
+                GuidanceMode::Interview,
                 r#"{"kind":"hint","level":2,"text":"Try a map","reveals_solution":false}"#,
             )
             .unwrap(),
             "Try a map"
         );
         for invalid in [
+            r#"{"kind":"hint","level":1,"text":"x","reveals_solution":false}"#,
             r#"{"kind":"hint","level":2,"text":"x","reveals_solution":true}"#,
+            r#"{"kind":"hint","level":2,"text":"x","reveals_solution":false,"extra":1}"#,
             r#"{"kind":"hint","level":2,"text":"","reveals_solution":false}"#,
             r#"{"kind":"hint","level":2,"text":"   ","reveals_solution":false}"#,
         ] {
-            assert!(parse_response(Mode::Hint(2), invalid).is_err(), "{invalid}");
+            assert!(
+                parse_response(Mode::Hint(2), GuidanceMode::Interview, invalid).is_err(),
+                "{invalid}"
+            );
         }
-        assert!(
-            parse_response(
-                Mode::Interviewer,
-                r#"{"kind":"question","text":"Why?","assessment":"continue","extra":1}"#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn response_kind_assessment_relations_and_mode_are_strict() {
         for valid in [
             r#"{"kind":"question","text":"Why?","assessment":"continue"}"#,
             r#"{"kind":"feedback","text":"Good invariant.","assessment":"continue"}"#,
             r#"{"kind":"decision","text":"Accepted.","assessment":"pass"}"#,
             r#"{"kind":"decision","text":"Counterexample.","assessment":"fail"}"#,
         ] {
-            assert!(parse_response(Mode::Interviewer, valid).is_ok(), "{valid}");
+            assert!(
+                parse_response(Mode::Interviewer, GuidanceMode::Interview, valid).is_ok(),
+                "{valid}"
+            );
         }
         for invalid in [
             r#"{"kind":"question","text":"Why?"}"#,
@@ -242,15 +306,17 @@ mod tests {
             r#"{"kind":"feedback","text":"Good.","assessment":"fail"}"#,
             r#"{"kind":"decision","text":"Done.","assessment":"continue"}"#,
             r#"{"kind":"decision","text":"","assessment":"pass"}"#,
+            r#"{"kind":"question","text":"Why?","assessment":"continue","extra":1}"#,
         ] {
             assert!(
-                parse_response(Mode::Interviewer, invalid).is_err(),
+                parse_response(Mode::Interviewer, GuidanceMode::Interview, invalid).is_err(),
                 "{invalid}"
             );
         }
         assert!(
             parse_response(
                 Mode::SubmissionReview,
+                GuidanceMode::Interview,
                 r#"{"kind":"question","text":"Why?","assessment":"continue"}"#,
             )
             .is_err()
@@ -258,9 +324,76 @@ mod tests {
         assert!(
             parse_response(
                 Mode::SubmissionReview,
+                GuidanceMode::Interview,
                 r#"{"kind":"decision","text":"Passes.","assessment":"pass"}"#,
             )
             .is_ok()
+        );
+
+        let interviewer_contract =
+            system_contract(Mode::Interviewer, GuidanceMode::Interview, false);
+        assert!(interviewer_contract.contains("Socratic technical interviewer"));
+        assert!(interviewer_contract.contains("Ask exactly one focused question"));
+        assert!(interviewer_contract.contains("Never provide a complete solution"));
+        for (level, graduated_boundary) in [
+            (1, "invariant or guiding question"),
+            (2, "technique or counterexample"),
+            (3, "pseudocode direction"),
+        ] {
+            let contract = system_contract(Mode::Hint(level), GuidanceMode::Interview, false);
+            assert!(contract.contains(graduated_boundary), "level {level}");
+            assert!(
+                contract.contains("never complete language code")
+                    || contract.contains("Never provide complete language code")
+            );
+            let schema = output_schema(Mode::Hint(level), GuidanceMode::Interview);
+            assert_eq!(schema["properties"]["level"]["const"], level);
+            assert_eq!(schema["properties"]["reveals_solution"]["const"], false);
+        }
+        assert_eq!(
+            output_schema(Mode::Interviewer, GuidanceMode::Interview)["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            output_schema(Mode::SubmissionReview, GuidanceMode::Interview)["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn tutor_ask_hint_and_review_are_direct_and_strict() {
+        let complete_code = "fn solve() { /* complete implementation */ }";
+        for mode in [Mode::Interviewer, Mode::Hint(1)] {
+            let envelope = json!({"kind":"guidance","text":complete_code}).to_string();
+            assert_eq!(
+                parse_response(mode, GuidanceMode::Tutor, &envelope).unwrap(),
+                complete_code
+            );
+            assert_eq!(
+                output_schema(mode, GuidanceMode::Tutor)["properties"]["kind"]["const"],
+                "guidance"
+            );
+            assert!(
+                system_contract(mode, GuidanceMode::Tutor, false).contains("complete solution")
+            );
+        }
+        let review =
+            r#"{"kind":"submission-review","text":"Replace it with complete corrected code."}"#;
+        assert!(parse_response(Mode::SubmissionReview, GuidanceMode::Tutor, review).is_ok());
+        assert!(parse_response(Mode::Interviewer, GuidanceMode::Tutor, review).is_err());
+        assert!(
+            parse_response(
+                Mode::SubmissionReview,
+                GuidanceMode::Tutor,
+                r#"{"kind":"submission-review","text":"x","extra":true}"#
+            )
+            .is_err()
         );
     }
 
@@ -283,36 +416,6 @@ mod tests {
                 "transcript",
                 "userQuestion"
             ]
-        );
-    }
-
-    #[test]
-    fn mode_contracts_are_exactly_bounded() {
-        assert!(system_contract(Mode::Hint(3), false).contains("pseudocode"));
-        assert!(
-            system_contract(Mode::Interviewer, false).contains("Never provide a complete solution")
-        );
-        assert_eq!(
-            output_schema(Mode::Hint(1))["properties"]["level"]["const"],
-            1
-        );
-        assert_eq!(
-            output_schema(Mode::Hint(1))["properties"]["text"]["minLength"],
-            1
-        );
-        assert_eq!(
-            output_schema(Mode::Interviewer)["oneOf"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            output_schema(Mode::SubmissionReview)["oneOf"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
         );
     }
 }

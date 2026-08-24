@@ -139,6 +139,7 @@ impl Transport for CodexTransport {
     fn raw_turn(
         &mut self,
         mode: Mode,
+        _guidance: crate::interviewer::GuidanceMode,
         input: String,
         output_schema: Value,
         _correction: bool,
@@ -267,12 +268,13 @@ impl CodexSession {
     pub fn commit_response(
         &mut self,
         mode: Mode,
+        guidance: crate::interviewer::GuidanceMode,
         source_revision: u64,
         question: &str,
         response: String,
     ) {
         self.0
-            .commit_response(mode, source_revision, question, response);
+            .commit_response(mode, guidance, source_revision, question, response);
     }
 
     pub fn clear(&mut self) {

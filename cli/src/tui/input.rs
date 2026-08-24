@@ -129,6 +129,9 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
             KeyCode::Char('r') if pane == crate::app::model::SolvePane::Interview => {
                 Some(Action::ResetInterview)
             }
+            KeyCode::Char('m') if pane == crate::app::model::SolvePane::Interview => {
+                Some(Action::ToggleGuidanceMode)
+            }
             KeyCode::Char('q') if pane == crate::app::model::SolvePane::Editor => {
                 Some(Action::Quit)
             }
@@ -386,6 +389,42 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn interview_mode_toggle_is_a_leader_action_but_composer_captures_typed_m() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::ToggleGuidanceMode)
+        );
+
+        state.interviewer.composer_focused = true;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::InterviewChar('m'))
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                &mut state
+            ),
+            Some(Action::InterviewChar(' '))
+        );
     }
 
     #[test]

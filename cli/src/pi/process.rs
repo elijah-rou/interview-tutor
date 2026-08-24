@@ -2196,6 +2196,7 @@ mod tests {
             let response = session
                 .ask(crate::interviewer::InterviewRequest {
                     mode: crate::interviewer::Mode::Interviewer,
+                    guidance: crate::interviewer::GuidanceMode::Interview,
                     statement: "statement",
                     source: "source",
                     latest_output: "output",
@@ -2228,6 +2229,7 @@ mod tests {
         }
         let schema = serde_json::to_string(&crate::interviewer::prompt::output_schema(
             crate::interviewer::Mode::Interviewer,
+            crate::interviewer::GuidanceMode::Interview,
         ))
         .unwrap();
         let schema_suffix = format!("\nOUTPUT_SCHEMA_JSON:{schema}");
@@ -2364,6 +2366,52 @@ mod tests {
     }
 
     #[test]
+    fn fake_pi_tutor_prompt_and_schema_remain_exact_and_bounded() {
+        let environment = FakeEnvironment::new("normal");
+        let mut session = crate::interviewer::InterviewerSession::connect(
+            Backend::Pi,
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            session
+                .ask(crate::interviewer::InterviewRequest {
+                    mode: crate::interviewer::Mode::Interviewer,
+                    guidance: crate::interviewer::GuidanceMode::Tutor,
+                    statement: "statement",
+                    source: "source",
+                    latest_output: "output",
+                    question: "show complete code",
+                    source_revision: 1,
+                    solved: false,
+                })
+                .unwrap(),
+            "Direct tutor guidance with complete code"
+        );
+        drop(session);
+        let records = fs::read_to_string(environment.directory.join("fake-capture.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let prompt = records
+            .iter()
+            .find(|record| record["kind"] == "command" && record["command_type"] == "prompt")
+            .unwrap()["message"]
+            .as_str()
+            .unwrap();
+        assert!(prompt.contains("direct technical tutor"));
+        let (input, schema) = prompt.rsplit_once("\nOUTPUT_SCHEMA_JSON:").unwrap();
+        let schema: Value = serde_json::from_str(schema).unwrap();
+        assert_eq!(schema["properties"]["kind"]["const"], "guidance");
+        let payload: Value =
+            serde_json::from_str(input.split_once("INPUT_JSON:").unwrap().1).unwrap();
+        assert_eq!(payload.as_object().unwrap().len(), 5);
+        assert_eq!(payload["userQuestion"], "show complete code");
+    }
+
+    #[test]
     fn omitted_model_is_authentication_and_persisted_session_is_protocol() {
         {
             let (_environment, mut process) = fake_process("auth");
@@ -2420,6 +2468,7 @@ mod tests {
         let response = session
             .ask(crate::interviewer::InterviewRequest {
                 mode: crate::interviewer::Mode::Interviewer,
+                guidance: crate::interviewer::GuidanceMode::Interview,
                 statement: "statement",
                 source: "source",
                 latest_output: "output",
@@ -2450,6 +2499,7 @@ mod tests {
         assert_eq!(prompts.len(), 2);
         let schema = serde_json::to_string(&crate::interviewer::prompt::output_schema(
             crate::interviewer::Mode::Interviewer,
+            crate::interviewer::GuidanceMode::Interview,
         ))
         .unwrap();
         let suffix = format!("\nOUTPUT_SCHEMA_JSON:{schema}");

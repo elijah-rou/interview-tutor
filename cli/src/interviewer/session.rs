@@ -1,7 +1,7 @@
-use super::Backend;
 use super::error::{ErrorKind, InterviewerError};
 use super::prompt::{self, Mode};
 use super::transcript::{self, SessionTranscript, Speaker};
+use super::{Backend, GuidanceMode};
 use crate::runner::CancellationToken;
 use serde_json::Value;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicI32;
 
 pub struct InterviewRequest<'a> {
     pub mode: Mode,
+    pub guidance: GuidanceMode,
     pub statement: &'a str,
     pub source: &'a str,
     pub latest_output: &'a str,
@@ -28,6 +29,7 @@ pub trait Transport: Send {
     fn raw_turn(
         &mut self,
         mode: Mode,
+        guidance: GuidanceMode,
         input: String,
         output_schema: Value,
         correction: bool,
@@ -138,7 +140,9 @@ impl InterviewerSession {
             ));
         }
         let mode = request.mode;
-        if let Mode::Hint(level) = mode {
+        if let Mode::Hint(level) = mode
+            && request.guidance == GuidanceMode::Interview
+        {
             if !(1..=3).contains(&level) {
                 return Err(InterviewerError::configuration(
                     backend,
@@ -156,23 +160,28 @@ impl InterviewerSession {
                 ));
             }
         }
-        let transcript = if matches!(mode, Mode::Hint(_)) {
-            String::new()
-        } else {
-            self.transcript
-                .entries()
-                .map(|entry| {
-                    let label = match entry.speaker {
-                        Speaker::User => "user",
-                        Speaker::Interviewer => "interviewer",
-                        Speaker::Hinter => "hinter",
-                        Speaker::SubmissionReview => "review",
-                    };
-                    format!("{label}: {}", entry.text)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let transcript =
+            if matches!(mode, Mode::Hint(_)) && request.guidance == GuidanceMode::Interview {
+                String::new()
+            } else {
+                self.transcript
+                    .entries()
+                    .map(|entry| {
+                        let label = match entry.speaker {
+                            Speaker::User => "user",
+                            Speaker::Interviewer => "interviewer",
+                            Speaker::Hinter => "hinter",
+                            Speaker::SubmissionReview => "review",
+                        };
+                        format!(
+                            "{} {label}: {}",
+                            entry.guidance.transcript_tag(),
+                            entry.text
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
         let payload = prompt::user_payload(
             request.statement,
             request.source,
@@ -182,15 +191,16 @@ impl InterviewerSession {
         );
         let input = format!(
             "{}\nINPUT_JSON:{}",
-            prompt::system_contract(mode, request.solved),
+            prompt::system_contract(mode, request.guidance, request.solved),
             serde_json::to_string(&payload).map_err(|_| {
                 InterviewerError::configuration(backend, "cannot encode interviewer prompt")
             })?
         );
         let raw = self.transport.raw_turn(
             mode,
+            request.guidance,
             input,
-            prompt::output_schema(mode),
+            prompt::output_schema(mode, request.guidance),
             false,
             cancellation,
         );
@@ -203,14 +213,15 @@ impl InterviewerSession {
                 ));
             }
         };
-        let response = match prompt::parse_response(mode, &raw) {
+        let response = match prompt::parse_response(mode, request.guidance, &raw) {
             Ok(response) => response,
             Err(_) => {
                 let correction = "Your prior response did not match the required JSON envelope. Return only one corrected JSON object, with no markdown or commentary.".to_string();
                 let corrected = self.transport.raw_turn(
                     mode,
+                    request.guidance,
                     correction,
-                    prompt::output_schema(mode),
+                    prompt::output_schema(mode, request.guidance),
                     true,
                     cancellation,
                 );
@@ -223,7 +234,7 @@ impl InterviewerSession {
                         ));
                     }
                 };
-                match prompt::parse_response(mode, &corrected) {
+                match prompt::parse_response(mode, request.guidance, &corrected) {
                     Ok(response) => response,
                     Err(_) => {
                         let error = InterviewerError::protocol(
@@ -245,6 +256,7 @@ impl InterviewerSession {
         if record_response {
             self.commit_response(
                 mode,
+                request.guidance,
                 request.source_revision,
                 request.question,
                 response.clone(),
@@ -260,32 +272,37 @@ impl InterviewerSession {
     pub(crate) fn commit_response(
         &mut self,
         mode: Mode,
+        guidance: GuidanceMode,
         source_revision: u64,
         question: &str,
         response: String,
     ) {
         match mode {
             Mode::Hint(_) => {
-                if self.hint_revision != Some(source_revision) {
+                if guidance == GuidanceMode::Interview
+                    && self.hint_revision != Some(source_revision)
+                {
                     self.hint_revision = Some(source_revision);
                     self.hint_count = 0;
                 }
-                self.hint_count = self.hint_count.saturating_add(1);
+                if guidance == GuidanceMode::Interview {
+                    self.hint_count = self.hint_count.saturating_add(1);
+                }
                 self.transcript
-                    .push(Speaker::Hinter, response)
+                    .push(Speaker::Hinter, guidance, response)
                     .expect("validated hinter response");
             }
             Mode::Interviewer => {
                 self.transcript
-                    .push(Speaker::User, question.to_string())
+                    .push(Speaker::User, guidance, question.to_string())
                     .expect("validated interviewer question");
                 self.transcript
-                    .push(Speaker::Interviewer, response)
+                    .push(Speaker::Interviewer, guidance, response)
                     .expect("validated interviewer response");
             }
             Mode::SubmissionReview => self
                 .transcript
-                .push(Speaker::SubmissionReview, response)
+                .push(Speaker::SubmissionReview, guidance, response)
                 .expect("validated submission review"),
         }
     }

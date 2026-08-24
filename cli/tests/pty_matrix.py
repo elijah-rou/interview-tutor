@@ -341,10 +341,16 @@ def captured_turn_sequence(home: Path) -> list[tuple[str, str]]:
     for turn in captured_turns(home):
         text = turn["params"]["input"][0]["text"]
         payload = json.loads(text.split("INPUT_JSON:", 1)[1])
-        if "Review the explicitly recorded local submission" in text:
+        if "Directly review the explicitly recorded local submission" in text:
+            sequence.append(("tutor-submission-review", payload["userQuestion"]))
+        elif "Review the explicitly recorded local submission" in text:
             sequence.append(("submission-review", payload["userQuestion"]))
-            continue
-        sequence.append(("interviewer", payload["userQuestion"]))
+        elif "direct technical tutor" in text:
+            sequence.append(("tutor", payload["userQuestion"]))
+        elif "direct targeted teaching" in text:
+            sequence.append(("tutor-help", payload["userQuestion"]))
+        else:
+            sequence.append(("interviewer", payload["userQuestion"]))
     return sequence
 
 
@@ -481,7 +487,7 @@ def full_workflow_case(fixture: MatrixFixture) -> str:
 
         session.send(F9)
         wait_turns(session, home, 5)
-        session.wait_screen("Submission review · recorded")
+        session.wait_screen("recorded revision")
         attempts = query_attempts(database)
         assert attempts == [("pass", 0)], attempts
         session.send(b" r")
@@ -690,12 +696,29 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.send(b"y")
         session.wait_screen("Codex: ready")
         session.wait_screen("Interview [active] [-]")
+        session.wait_screen("Interview mode")
+        session.send(ESCAPE)
+        session.drain(0.2)
+        session.wait_screen("Space-m mode")
+        session.send(b" ")
+        session.drain(0.05)
+        session.send(b"m")
+        session.wait_screen("Tutor mode")
+        session.send(b"iTutor-direct-question" + ENTER)
+        wait_turn_completion(session, home, 1)
+        session.wait_screen("Direct tutor guidance with complete code")
+        session.send(b" h")
+        wait_turn_completion(session, home, 2)
+        session.wait_screen("CODEX · TUTOR HELP")
+        session.send(b" ")
+        session.drain(0.05)
+        session.send(b"m")
+        session.wait_screen("Interview mode")
         for index in range(6):
-            if index > 0:
-                session.send(b"i")
+            session.send(b"i")
             question = f"compact-question-{index}-" + "wrapped-content-" * 3
             session.send(question.encode("utf-8") + ENTER)
-            wait_turn_completion(session, home, index + 1)
+            wait_turn_completion(session, home, index + 3)
         session.send(HOME)
         session.wait_screen("compact-question-0-")
         session.send(END)
@@ -721,9 +744,12 @@ def compact_case(fixture: MatrixFixture) -> str:
         )
         session.send(b"\t")
         session.wait_screen("Interview [active]")
-        wait_turn_completion(session, home, 7)
-        session.wait_screen("Submission review · recorded revision")
+        wait_turn_completion(session, home, 9)
+        session.wait_screen("Submission review · Interview · recorded revision")
         expected_sequence = [
+            ("tutor", "Tutor-direct-question"),
+            ("tutor-help", ""),
+        ] + [
             (
                 "interviewer",
                 f"compact-question-{index}-" + "wrapped-content-" * 3,
@@ -731,13 +757,25 @@ def compact_case(fixture: MatrixFixture) -> str:
             for index in range(6)
         ] + [("submission-review", "")]
         assert captured_turn_sequence(home) == expected_sequence
-        assert len(captured_turns(home)) == 7
+        turns = captured_turns(home)
+        assert len(turns) == 9
+        tutor_help_payload = json.loads(
+            turns[1]["params"]["input"][0]["text"].split("INPUT_JSON:", 1)[1]
+        )
+        assert "tutor user: Tutor-direct-question" in tutor_help_payload["transcript"]
+        assert "tutor interviewer: Direct tutor guidance" in tutor_help_payload["transcript"]
+        first_interview_payload = json.loads(
+            turns[2]["params"]["input"][0]["text"].split("INPUT_JSON:", 1)[1]
+        )
+        assert "tutor user: Tutor-direct-question" in first_interview_payload["transcript"]
+        assert "tutor interviewer: Direct tutor guidance" in first_interview_payload["transcript"]
+        assert "tutor hinter: Direct tutor guidance" in first_interview_payload["transcript"]
         session.wait_screen("Submit recorded")
         session.send(b"\t")
         session.wait_screen("Editor · Neovim [active]")
         quit_from_editor(session)
     assert_codex_cleanup(home)
-    return "attempts test=0 submit=1(pass) turns=7 compact=80x24 status=0"
+    return "attempts test=0 submit=1(pass) turns=9 tutor-question+help toggle=preserved compact=80x24 status=0"
 
 
 def autosave_back_case(fixture: MatrixFixture) -> str:

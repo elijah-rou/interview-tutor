@@ -279,6 +279,11 @@ for raw in sys.stdin:
                 break
             continue
         prompt = command.get("message", "")
+        schema = {}
+        schema_marker = "\nOUTPUT_SCHEMA_JSON:"
+        if schema_marker in prompt:
+            schema = json.loads(prompt.rsplit(schema_marker, 1)[1])
+        schema_kind = schema.get("properties", {}).get("kind", {}).get("const")
         if mode == "correction" and prompt_count == 1:
             complete(
                 prompt,
@@ -305,6 +310,28 @@ for raw in sys.stdin:
             )
         elif mode == "non-stop":
             complete(prompt, "not accepted", "length")
+        elif schema_kind == "guidance":
+            complete(
+                prompt,
+                json.dumps(
+                    {
+                        "kind": "guidance",
+                        "text": "Direct tutor guidance with complete code",
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        elif schema_kind == "submission-review":
+            complete(
+                prompt,
+                json.dumps(
+                    {
+                        "kind": "submission-review",
+                        "text": "Direct corrected submission code",
+                    },
+                    separators=(",", ":"),
+                ),
+            )
         else:
             complete(
                 prompt,

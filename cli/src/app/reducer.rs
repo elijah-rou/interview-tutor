@@ -4,7 +4,7 @@ use super::model::{
     MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
 };
 use crate::editor::{EditorCommand, Mode};
-use crate::interviewer::Mode as InterviewerMode;
+use crate::interviewer::{GuidanceMode, Mode as InterviewerMode};
 
 const INTERVIEW_SCROLL_PAGE_ROWS: u16 = 10;
 
@@ -114,11 +114,13 @@ fn dispatch_pending_submission_review(state: &mut AppState) -> Vec<Effect> {
     };
     let operation = next_operation(state);
     let revision = review.revision;
+    let guidance = review.guidance;
     let solve = state.solve.as_ref().expect("solve exists");
     let effect = Effect::InterviewerTurn {
         operation,
         revision,
         mode: InterviewerMode::SubmissionReview,
+        guidance,
         statement: solve.statement.clone(),
         source: review.source().to_string(),
         output: review.output().to_string(),
@@ -126,7 +128,12 @@ fn dispatch_pending_submission_review(state: &mut AppState) -> Vec<Effect> {
         solved: true,
     };
     state.interviewer.status = InterviewerStatus::Thinking;
-    state.interviewer.active = Some((operation, revision, InterviewerMode::SubmissionReview));
+    state.interviewer.active = Some((
+        operation,
+        revision,
+        InterviewerMode::SubmissionReview,
+        guidance,
+    ));
     state.status = format!("Reviewing recorded revision {revision}…");
     vec![effect]
 }
@@ -136,6 +143,7 @@ fn finalize_interviewer_turn_and_dispatch_review(
     operation: OperationId,
     revision: u64,
     mode: InterviewerMode,
+    guidance: GuidanceMode,
     accepted: bool,
 ) -> Vec<Effect> {
     let mut effects = dispatch_pending_submission_review(state);
@@ -144,6 +152,7 @@ fn finalize_interviewer_turn_and_dispatch_review(
         operation,
         revision,
         mode,
+        guidance,
         accepted,
     });
     effects
@@ -153,6 +162,7 @@ fn enter_problem_list(state: &mut AppState) -> Vec<Effect> {
     let neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
     state.solve = None;
     state.interviewer.clear_session();
+    state.interviewer.guidance_mode = GuidanceMode::Interview;
     state.screen = Screen::ProblemList;
     state.focus = Focus::Main;
     state.detail_scroll = 0;
@@ -188,6 +198,16 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
     }
 
     match action {
+        Action::ToggleGuidanceMode
+            if solve.pane == SolvePane::Interview && !state.interviewer.composer_focused =>
+        {
+            state.interviewer.guidance_mode = state.interviewer.guidance_mode.toggled();
+            state.status = format!(
+                "{} mode · transcript preserved",
+                state.interviewer.guidance_mode.display_name()
+            );
+            Vec::new()
+        }
         Action::InterviewFocus => {
             solve.pane = SolvePane::Interview;
             solve.accessory_panes.interview_expanded = true;
@@ -261,15 +281,19 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             let revision = solve.editor.revision;
             state.interviewer.composer.clear();
             state.interviewer.composer_focused = false;
-            state
-                .interviewer
-                .push_message("You".into(), question.clone());
+            let guidance = state.interviewer.guidance_mode;
+            state.interviewer.push_message(
+                format!("You · {}", guidance.display_name()),
+                question.clone(),
+            );
             state.interviewer.status = InterviewerStatus::Thinking;
-            state.interviewer.active = Some((operation, revision, InterviewerMode::Interviewer));
+            state.interviewer.active =
+                Some((operation, revision, InterviewerMode::Interviewer, guidance));
             vec![Effect::InterviewerTurn {
                 operation,
                 revision,
                 mode: InterviewerMode::Interviewer,
+                guidance,
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
                 output: interviewer_output_tail(&solve.output),
@@ -285,23 +309,30 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 ) =>
         {
             let revision = solve.editor.revision;
-            if state.interviewer.hint_revision != Some(revision) {
-                state.interviewer.hint_revision = Some(revision);
-                state.interviewer.hint_count = 0;
-            }
-            if state.interviewer.hint_count >= 3 {
-                state.error = Some("maximum three hints reached for this revision".into());
-                return Vec::new();
-            }
-            let level = state.interviewer.hint_count + 1;
+            let guidance = state.interviewer.guidance_mode;
+            let level = if guidance == GuidanceMode::Interview {
+                if state.interviewer.hint_revision != Some(revision) {
+                    state.interviewer.hint_revision = Some(revision);
+                    state.interviewer.hint_count = 0;
+                }
+                if state.interviewer.hint_count >= 3 {
+                    state.error = Some("maximum three hints reached for this revision".into());
+                    return Vec::new();
+                }
+                state.interviewer.hint_count + 1
+            } else {
+                1
+            };
             let operation = next_operation(state);
             let solve = state.solve.as_ref().expect("solve exists");
             state.interviewer.status = InterviewerStatus::Thinking;
-            state.interviewer.active = Some((operation, revision, InterviewerMode::Hint(level)));
+            state.interviewer.active =
+                Some((operation, revision, InterviewerMode::Hint(level), guidance));
             vec![Effect::InterviewerTurn {
                 operation,
                 revision,
                 mode: InterviewerMode::Hint(level),
+                guidance,
                 statement: solve.statement.clone(),
                 source: solve.editor.text().to_string(),
                 output: interviewer_output_tail(&solve.output),
@@ -315,6 +346,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             vec![Effect::ResetInterviewer]
         }
         Action::SaveTest | Action::Submit => {
+            let submission_guidance = state.interviewer.guidance_mode;
             let intent = if action == Action::Submit {
                 RunIntent::Submit
             } else {
@@ -339,6 +371,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                 solve.submitted_source = Some(super::model::SubmittedSource::new(
                     operation,
                     revision,
+                    submission_guidance,
                     source.clone(),
                 ));
             }
@@ -364,7 +397,7 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
             let interviewer_operation = state
                 .interviewer
                 .active
-                .map(|(operation, _, _)| operation)
+                .map(|(operation, _, _, _)| operation)
                 .or(state.interviewer.connecting);
             let runner_active = solve.running.map(|(operation, _, _)| operation);
             if let Some(operation) = interviewer_operation
@@ -728,12 +761,13 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 return Vec::new();
             }
-            Event::InterviewerFinished(operation, revision, mode, result) => {
-                if state.interviewer.active != Some((operation, revision, mode)) {
+            Event::InterviewerFinished(operation, revision, mode, guidance, result) => {
+                if state.interviewer.active != Some((operation, revision, mode, guidance)) {
                     return vec![Effect::FinalizeInterviewerTurn {
                         operation,
                         revision,
                         mode,
+                        guidance,
                         accepted: false,
                     }];
                 }
@@ -752,6 +786,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                             operation,
                             revision,
                             mode,
+                            guidance,
                             accepted: false,
                         }];
                     }
@@ -768,23 +803,30 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                             .into(),
                     );
                     return finalize_interviewer_turn_and_dispatch_review(
-                        state, operation, revision, mode, false,
+                        state, operation, revision, mode, guidance, false,
                     );
                 }
-                let label = match mode {
-                    InterviewerMode::Interviewer => "Interviewer".to_string(),
-                    InterviewerMode::Hint(_) => "Hinter".to_string(),
-                    InterviewerMode::SubmissionReview => {
-                        format!("Submission review · recorded revision {revision}")
+                let label = match (mode, guidance) {
+                    (InterviewerMode::Interviewer, GuidanceMode::Interview) => {
+                        "Interviewer · Interview".to_string()
                     }
+                    (InterviewerMode::Interviewer, GuidanceMode::Tutor) => "Tutor".to_string(),
+                    (InterviewerMode::Hint(_), GuidanceMode::Interview) => {
+                        "Hinter · Interview".to_string()
+                    }
+                    (InterviewerMode::Hint(_), GuidanceMode::Tutor) => "Tutor help".to_string(),
+                    (InterviewerMode::SubmissionReview, guidance) => format!(
+                        "Submission review · {} · recorded revision {revision}",
+                        guidance.display_name()
+                    ),
                 };
-                if matches!(mode, InterviewerMode::Hint(_)) {
+                if matches!(mode, InterviewerMode::Hint(_)) && guidance == GuidanceMode::Interview {
                     state.interviewer.hint_count = state.interviewer.hint_count.saturating_add(1);
                 }
                 state.interviewer.push_message(label, message);
                 state.interviewer.status = InterviewerStatus::Feedback;
                 return finalize_interviewer_turn_and_dispatch_review(
-                    state, operation, revision, mode, true,
+                    state, operation, revision, mode, guidance, true,
                 );
             }
             Event::InterviewerDisconnected(error) => {
@@ -859,7 +901,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 let submitted_source = if intent == RunIntent::Submit {
                     solve.submitted_source.take().and_then(|submitted| {
                         (submitted.operation == operation && submitted.revision == revision)
-                            .then(|| submitted.source().to_string())
+                            .then(|| (submitted.source().to_string(), submitted.guidance))
                     })
                 } else {
                     None
@@ -911,8 +953,8 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 if intent == RunIntent::Submit && succeeded {
                     solve.refresh_after_submit = true;
                     state.interviewer.submission_recorded = true;
-                    let source = submitted_source
-                        .expect("successful matching submit retains its captured source");
+                    let (source, review_guidance) = submitted_source
+                        .expect("successful matching submit retains its captured source and mode");
                     let output = interviewer_output_tail(&solve.output);
                     let review_allowed = state.interviewer.enabled
                         && state.interviewer.disclosure_accepted
@@ -930,7 +972,12 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                         let replaced = state
                             .interviewer
                             .pending_submission_review
-                            .replace(RecordedSubmissionReview::new(revision, source, output))
+                            .replace(RecordedSubmissionReview::new(
+                                revision,
+                                review_guidance,
+                                source,
+                                output,
+                            ))
                             .is_some();
                         if replaced {
                             state
@@ -958,7 +1005,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                                 review.revision
                             )
                         };
-                    } else if let Some((_, review_revision, InterviewerMode::SubmissionReview)) =
+                    } else if let Some((_, review_revision, InterviewerMode::SubmissionReview, _)) =
                         state.interviewer.active
                     {
                         state.status = format!(
@@ -992,7 +1039,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                                     review.revision
                                 )
                             }
-                        } else if let Some((_, revision, InterviewerMode::SubmissionReview)) =
+                        } else if let Some((_, revision, InterviewerMode::SubmissionReview, _)) =
                             state.interviewer.active
                         {
                             format!(
@@ -1108,11 +1155,12 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             }
             Screen::Solve => unreachable!("solve events handled above"),
         },
-        Event::InterviewerFinished(operation, revision, mode, _) => {
+        Event::InterviewerFinished(operation, revision, mode, guidance, _) => {
             return vec![Effect::FinalizeInterviewerTurn {
                 operation,
                 revision,
                 mode,
+                guidance,
                 accepted: false,
             }];
         }
@@ -1188,6 +1236,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             | Action::InterviewDisclosure(_)
             | Action::Hint
             | Action::ResetInterview
+            | Action::ToggleGuidanceMode
             | Action::ToggleCollapse
             | Action::EditorCollapse
             | Action::Editor(_),
@@ -1421,10 +1470,265 @@ mod tests {
     }
 
     #[test]
+    fn guidance_toggle_is_ignored_while_composer_captures_ordinary_text() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.guidance_mode = GuidanceMode::Tutor;
+        state.interviewer.composer_focused = true;
+        state.interviewer.composer = " m remains text".into();
+
+        assert!(reduce(&mut state, Event::Command(Action::ToggleGuidanceMode)).is_empty());
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Tutor);
+        assert_eq!(state.interviewer.composer, " m remains text");
+    }
+
+    #[test]
+    fn guidance_defaults_to_interview_and_toggle_preserves_transcript_and_active_identity() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Ready;
+        state
+            .interviewer
+            .push_message("Interviewer · Interview".into(), "preserved".into());
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Interview);
+
+        assert!(reduce(&mut state, Event::Command(Action::ToggleGuidanceMode)).is_empty());
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Tutor);
+        assert_eq!(state.interviewer.messages.len(), 1);
+        assert!(state.interviewer.connecting.is_none());
+
+        state.interviewer.composer_focused = true;
+        state.interviewer.composer = "show the code".into();
+        let effects = reduce(&mut state, Event::Command(Action::InterviewSend));
+        let [
+            Effect::InterviewerTurn {
+                operation,
+                revision,
+                mode: InterviewerMode::Interviewer,
+                guidance: GuidanceMode::Tutor,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("Tutor question must capture Tutor guidance")
+        };
+        let operation = *operation;
+        let revision = *revision;
+        reduce(&mut state, Event::Command(Action::ToggleGuidanceMode));
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Interview);
+        assert_eq!(
+            state.interviewer.active,
+            Some((
+                operation,
+                revision,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Tutor
+            ))
+        );
+        let wrong_guidance = reduce(
+            &mut state,
+            Event::InterviewerFinished(
+                operation,
+                revision,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Interview,
+                Ok("mislabeled response".into()),
+            ),
+        );
+        assert!(matches!(
+            wrong_guidance.as_slice(),
+            [Effect::FinalizeInterviewerTurn {
+                guidance: GuidanceMode::Interview,
+                accepted: false,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state.interviewer.active,
+            Some((
+                operation,
+                revision,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Tutor
+            ))
+        );
+
+        let completion = reduce(
+            &mut state,
+            Event::InterviewerFinished(
+                operation,
+                revision,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Tutor,
+                Ok("complete direct answer".into()),
+            ),
+        );
+        assert!(matches!(
+            completion.as_slice(),
+            [Effect::FinalizeInterviewerTurn {
+                guidance: GuidanceMode::Tutor,
+                accepted: true,
+                ..
+            }]
+        ));
+        assert_eq!(state.interviewer.messages.last().unwrap().0, "Tutor");
+        assert!(
+            state
+                .interviewer
+                .messages
+                .iter()
+                .any(|(label, _)| label == "You · Tutor")
+        );
+    }
+
+    #[test]
+    fn interview_reset_preserves_selected_guidance_but_solve_exit_restores_default() {
+        let mut state = solve_state();
+        state.interviewer.guidance_mode = GuidanceMode::Tutor;
+        state
+            .interviewer
+            .push_message("Tutor".into(), "private".into());
+        reduce(&mut state, Event::Command(Action::ResetInterview));
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Tutor);
+        assert!(state.interviewer.messages.is_empty());
+
+        assert!(matches!(
+            reduce(&mut state, Event::Command(Action::Back)).as_slice(),
+            [Effect::LeaveSolve]
+        ));
+        reduce(&mut state, Event::RunnerLeftSolve(Ok(())));
+        assert_eq!(state.interviewer.guidance_mode, GuidanceMode::Interview);
+        assert_eq!(state.screen, Screen::ProblemList);
+    }
+
+    #[test]
+    fn queued_review_and_uncapped_tutor_help_retain_tutor_guidance() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.disclosure_accepted = true;
+        state.interviewer.status = InterviewerStatus::Connecting;
+        state.interviewer.connecting = Some(OperationId(900));
+        state.interviewer.guidance_mode = GuidanceMode::Tutor;
+        let submit = reduce(&mut state, Event::Command(Action::Submit));
+        let Effect::SaveRun {
+            operation,
+            revision,
+            source,
+            intent: RunIntent::Submit,
+            ..
+        } = submit[0].clone()
+        else {
+            panic!("expected Tutor submit")
+        };
+        state.interviewer.guidance_mode = GuidanceMode::Interview;
+        reduce(
+            &mut state,
+            Event::RunFinished(
+                operation,
+                revision,
+                RunIntent::Submit,
+                Some(source),
+                Ok(crate::runner::ExecutionResult::test_result(
+                    crate::runner::Termination::Exited(0),
+                    "output",
+                )),
+            ),
+        );
+        assert_eq!(
+            state
+                .interviewer
+                .pending_submission_review
+                .as_ref()
+                .unwrap()
+                .guidance,
+            GuidanceMode::Tutor
+        );
+        state.interviewer.connecting = None;
+        state.interviewer.status = InterviewerStatus::Ready;
+        let review = dispatch_pending_submission_review(&mut state);
+        let [
+            Effect::InterviewerTurn {
+                operation: review_operation,
+                revision: review_revision,
+                mode: InterviewerMode::SubmissionReview,
+                guidance: GuidanceMode::Tutor,
+                ..
+            },
+        ] = review.as_slice()
+        else {
+            panic!("queued review must dispatch with captured Tutor guidance")
+        };
+        let review_operation = *review_operation;
+        let review_revision = *review_revision;
+        let completion = reduce(
+            &mut state,
+            Event::InterviewerFinished(
+                review_operation,
+                review_revision,
+                InterviewerMode::SubmissionReview,
+                GuidanceMode::Tutor,
+                Ok("direct recorded correction".into()),
+            ),
+        );
+        assert!(matches!(
+            completion.as_slice(),
+            [Effect::FinalizeInterviewerTurn {
+                guidance: GuidanceMode::Tutor,
+                accepted: true,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state.interviewer.messages.last().unwrap().0,
+            format!("Submission review · Tutor · recorded revision {review_revision}")
+        );
+
+        state.interviewer.status = InterviewerStatus::Ready;
+        state.interviewer.guidance_mode = GuidanceMode::Tutor;
+        state.interviewer.hint_count = 3;
+        for _ in 0..5 {
+            let effects = reduce(&mut state, Event::Command(Action::Hint));
+            let [
+                Effect::InterviewerTurn {
+                    operation,
+                    revision,
+                    mode,
+                    guidance: GuidanceMode::Tutor,
+                    ..
+                },
+            ] = effects.as_slice()
+            else {
+                panic!("Tutor help must remain available without Interview's cap")
+            };
+            let operation = *operation;
+            let revision = *revision;
+            let mode = *mode;
+            reduce(
+                &mut state,
+                Event::InterviewerFinished(
+                    operation,
+                    revision,
+                    mode,
+                    GuidanceMode::Tutor,
+                    Ok("direct fix".into()),
+                ),
+            );
+            assert_eq!(state.interviewer.hint_count, 3);
+            state.interviewer.status = InterviewerStatus::Ready;
+        }
+    }
+
+    #[test]
     fn accessory_panes_collapse_independently_and_interview_focus_expands() {
         let mut state = solve_state();
         state.interviewer.status = InterviewerStatus::Thinking;
-        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(90),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         state.interviewer.composer_focused = true;
         state
             .interviewer
@@ -1441,7 +1745,12 @@ mod tests {
         assert!(!state.interviewer.composer_focused);
         assert_eq!(
             state.interviewer.active,
-            Some((OperationId(90), 0, InterviewerMode::Interviewer))
+            Some((
+                OperationId(90),
+                0,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Interview
+            ))
         );
         assert_eq!(state.interviewer.messages.last().unwrap().1, "preserved");
 
@@ -1467,7 +1776,12 @@ mod tests {
         );
         assert_eq!(
             state.interviewer.active,
-            Some((OperationId(90), 0, InterviewerMode::Interviewer))
+            Some((
+                OperationId(90),
+                0,
+                InterviewerMode::Interviewer,
+                GuidanceMode::Interview
+            ))
         );
 
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
@@ -2259,6 +2573,7 @@ mod tests {
                 OperationId(operation.0 + 1),
                 revision,
                 InterviewerMode::Interviewer,
+                GuidanceMode::Interview,
                 Ok("stale".into()),
             ),
         );
@@ -2283,6 +2598,7 @@ mod tests {
                 operation,
                 revision,
                 InterviewerMode::Interviewer,
+                GuidanceMode::Interview,
                 Err(crate::interviewer::InterviewerError::protocol(
                     crate::interviewer::Backend::Pi,
                     "protocol failed",
@@ -2344,6 +2660,7 @@ mod tests {
                 operation,
                 revision,
                 InterviewerMode::Hint(1),
+                GuidanceMode::Interview,
                 Ok("wrong mode".into()),
             ),
         );
@@ -2374,7 +2691,13 @@ mod tests {
         );
         reduce(
             &mut state,
-            Event::InterviewerFinished(operation, revision, mode, Ok("stale response".into())),
+            Event::InterviewerFinished(
+                operation,
+                revision,
+                mode,
+                GuidanceMode::Interview,
+                Ok("stale response".into()),
+            ),
         );
         assert!(state.interviewer.active.is_none());
         assert!(
@@ -2446,6 +2769,7 @@ mod tests {
                 review_operation,
                 review_revision,
                 InterviewerMode::SubmissionReview,
+                GuidanceMode::Interview,
                 Ok("recorded result passes".into()),
             ),
         );
@@ -2456,7 +2780,7 @@ mod tests {
         assert_eq!(
             state.interviewer.messages.last(),
             Some(&(
-                format!("Submission review · recorded revision {review_revision}"),
+                format!("Submission review · Interview · recorded revision {review_revision}"),
                 "recorded result passes".into()
             ))
         );
@@ -2468,7 +2792,12 @@ mod tests {
         let mut turning = solve_state();
         turning.interviewer.disclosure_accepted = true;
         turning.interviewer.status = InterviewerStatus::Thinking;
-        turning.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
+        turning.interviewer.active = Some((
+            OperationId(90),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         let effects = finish_successful_submit(&mut turning, "TURN-BUSY");
         assert!(
             effects
@@ -2489,6 +2818,7 @@ mod tests {
                 OperationId(90),
                 0,
                 InterviewerMode::Interviewer,
+                GuidanceMode::Interview,
                 Ok("question complete".into()),
             ),
         );
@@ -2534,7 +2864,12 @@ mod tests {
         let mut state = solve_state();
         state.interviewer.disclosure_accepted = true;
         state.interviewer.status = InterviewerStatus::Thinking;
-        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(90),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         finish_successful_submit(&mut state, "FIRST");
         reduce(
             &mut state,
@@ -2571,6 +2906,7 @@ mod tests {
         assert!(state.interviewer.pending_submission_review.is_none());
         state.interviewer.pending_submission_review = Some(RecordedSubmissionReview::new(
             1,
+            GuidanceMode::Interview,
             "private".into(),
             "output".into(),
         ));
@@ -2586,7 +2922,12 @@ mod tests {
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         state.interviewer.disclosure_accepted = true;
         state.interviewer.status = InterviewerStatus::Thinking;
-        state.interviewer.active = Some((OperationId(90), 0, InterviewerMode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(90),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         finish_successful_submit(&mut state, "RECORDED");
         let failed = reduce(
             &mut state,
@@ -2594,6 +2935,7 @@ mod tests {
                 OperationId(90),
                 0,
                 InterviewerMode::Interviewer,
+                GuidanceMode::Interview,
                 Err(crate::interviewer::InterviewerError::protocol(
                     crate::interviewer::Backend::Pi,
                     "turn failed",
@@ -2738,7 +3080,12 @@ mod tests {
         else {
             panic!("expected runner")
         };
-        state.interviewer.active = Some((OperationId(99), 0, InterviewerMode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(99),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
         assert!(matches!(
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
@@ -2749,7 +3096,12 @@ mod tests {
             reduce(&mut state, Event::Command(Action::Cancel)).as_slice(),
             [Effect::CancelInterviewer { operation }] if *operation == OperationId(99)
         ));
-        state.interviewer.active = Some((OperationId(100), 0, InterviewerMode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(100),
+            0,
+            InterviewerMode::Interviewer,
+            GuidanceMode::Interview,
+        ));
         state.solve.as_mut().unwrap().running = None;
         state.solve.as_mut().unwrap().pane = SolvePane::Problem;
         assert!(matches!(
@@ -2782,7 +3134,8 @@ mod tests {
                         operation,
                         revision,
                         mode,
-                        Ok(format!("hint-{level}"))
+                        GuidanceMode::Interview,
+                        Ok(format!("hint-{level}")),
                     )
                 )
                 .as_slice(),

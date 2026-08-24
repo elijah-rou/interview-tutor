@@ -12,6 +12,36 @@ use clap::ValueEnum;
 use std::fmt;
 use std::str::FromStr;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GuidanceMode {
+    #[default]
+    Interview,
+    Tutor,
+}
+
+impl GuidanceMode {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Interview => "Interview",
+            Self::Tutor => "Tutor",
+        }
+    }
+
+    pub fn transcript_tag(self) -> &'static str {
+        match self {
+            Self::Interview => "interview",
+            Self::Tutor => "tutor",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Interview => Self::Tutor,
+            Self::Tutor => Self::Interview,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum Backend {

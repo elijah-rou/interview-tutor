@@ -322,7 +322,7 @@ def main() -> int:
                 process,
                 output,
                 screen,
-                "Submission review · recorded",
+                "RECORDED_SUBMISSION_REVIEW",
                 deadline,
             )
             wait_for(master, process, output, screen, "revision 0", deadline)

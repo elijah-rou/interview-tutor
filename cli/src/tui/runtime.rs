@@ -154,6 +154,7 @@ enum InterviewerWorkerCommand {
         generation: u64,
         revision: u64,
         mode: crate::interviewer::Mode,
+        guidance: crate::interviewer::GuidanceMode,
         statement: String,
         source: String,
         output: String,
@@ -173,6 +174,7 @@ enum InterviewerWorkerCommand {
 struct InterviewerTurnRequest {
     revision: u64,
     mode: crate::interviewer::Mode,
+    guidance: crate::interviewer::GuidanceMode,
     statement: String,
     source: String,
     output: String,
@@ -239,6 +241,7 @@ impl InterviewerWorkerBackend for SessionInterviewerBackend {
         session.ask_deferred_with_cancellation(
             crate::interviewer::InterviewRequest {
                 mode: request.mode,
+                guidance: request.guidance,
                 statement: &request.statement,
                 source: &request.source,
                 latest_output: &request.output,
@@ -256,6 +259,7 @@ impl InterviewerWorkerBackend for SessionInterviewerBackend {
             .expect("successful turn requires session")
             .commit_response(
                 pending.mode,
+                pending.guidance,
                 pending.revision,
                 &pending.question,
                 pending.response,
@@ -285,6 +289,7 @@ struct PendingInterviewerResponse {
     operation: crate::app::model::OperationId,
     revision: u64,
     mode: crate::interviewer::Mode,
+    guidance: crate::interviewer::GuidanceMode,
     question: String,
     response: String,
 }
@@ -294,6 +299,7 @@ struct InterviewerTurnFinalization {
     operation: crate::app::model::OperationId,
     revision: u64,
     mode: crate::interviewer::Mode,
+    guidance: crate::interviewer::GuidanceMode,
     accepted: bool,
 }
 
@@ -440,12 +446,17 @@ impl InterviewerWorker {
                             .lock()
                             .expect("Interviewer pending response lock");
                         if pending.as_ref().is_some_and(|response| {
-                            (response.operation, response.revision, response.mode)
-                                == (
-                                    finalization.operation,
-                                    finalization.revision,
-                                    finalization.mode,
-                                )
+                            (
+                                response.operation,
+                                response.revision,
+                                response.mode,
+                                response.guidance,
+                            ) == (
+                                finalization.operation,
+                                finalization.revision,
+                                finalization.mode,
+                                finalization.guidance,
+                            )
                         }) {
                             pending.take()
                         } else {
@@ -501,6 +512,7 @@ impl InterviewerWorker {
                         generation,
                         revision,
                         mode,
+                        guidance,
                         statement,
                         source,
                         output,
@@ -516,6 +528,7 @@ impl InterviewerWorker {
                         let request = InterviewerTurnRequest {
                             revision,
                             mode,
+                            guidance,
                             statement,
                             source,
                             output,
@@ -568,6 +581,7 @@ impl InterviewerWorker {
                                 operation,
                                 revision,
                                 mode,
+                                guidance,
                                 question: request.question,
                                 response: response.clone(),
                             });
@@ -575,7 +589,7 @@ impl InterviewerWorker {
                         drop(pending);
                         if event_sender
                             .send(Event::InterviewerFinished(
-                                operation, revision, mode, result,
+                                operation, revision, mode, guidance, result,
                             ))
                             .is_err()
                         {
@@ -747,6 +761,7 @@ impl InterviewerWorker {
         operation: crate::app::model::OperationId,
         revision: u64,
         mode: crate::interviewer::Mode,
+        guidance: crate::interviewer::GuidanceMode,
         accepted: bool,
     ) -> Result<(), String> {
         if self.join.is_none() {
@@ -763,6 +778,7 @@ impl InterviewerWorker {
             operation,
             revision,
             mode,
+            guidance,
             accepted,
         });
         Ok(())
@@ -1326,6 +1342,7 @@ fn apply_effects(
                 operation,
                 revision,
                 mode,
+                guidance,
                 statement,
                 source,
                 output,
@@ -1337,6 +1354,7 @@ fn apply_effects(
                     generation: interviewer_worker.generation(),
                     revision,
                     mode,
+                    guidance,
                     statement,
                     source,
                     output,
@@ -1350,6 +1368,7 @@ fn apply_effects(
                             operation,
                             revision,
                             mode,
+                            guidance,
                             Err(crate::interviewer::InterviewerError::transport(
                                 state.interviewer.backend,
                                 error,
@@ -1362,10 +1381,11 @@ fn apply_effects(
                 operation,
                 revision,
                 mode,
+                guidance,
                 accepted,
             } => {
                 if let Err(error) =
-                    interviewer_worker.finalize_turn(operation, revision, mode, accepted)
+                    interviewer_worker.finalize_turn(operation, revision, mode, guidance, accepted)
                 {
                     state.interviewer.status = crate::app::model::InterviewerStatus::ProtocolError;
                     state.error = Some(error);
@@ -2528,6 +2548,7 @@ mod tests {
                 generation,
                 revision: 0,
                 mode: crate::interviewer::Mode::Interviewer,
+                guidance: crate::interviewer::GuidanceMode::Interview,
                 statement: format!("statement-{operation}"),
                 source: source.into(),
                 output: String::new(),
@@ -2934,7 +2955,12 @@ mod tests {
     fn interviewer_poll_reports_disconnect_once_joins_and_allows_reconnect() {
         let (mut worker, _, _) = test_interviewer_worker(None);
         let mut state = interviewer_solve_state();
-        state.interviewer.active = Some((OperationId(8), 0, crate::interviewer::Mode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(8),
+            0,
+            crate::interviewer::Mode::Interviewer,
+            crate::interviewer::GuidanceMode::Interview,
+        ));
         state.interviewer.status = crate::app::model::InterviewerStatus::Thinking;
         worker.send(InterviewerWorkerCommand::Panic).unwrap();
 
@@ -2970,7 +2996,12 @@ mod tests {
         ));
 
         let mut state = interviewer_solve_state();
-        state.interviewer.active = Some((OperationId(2), 0, crate::interviewer::Mode::Interviewer));
+        state.interviewer.active = Some((
+            OperationId(2),
+            0,
+            crate::interviewer::Mode::Interviewer,
+            crate::interviewer::GuidanceMode::Interview,
+        ));
         state.interviewer.status = crate::app::model::InterviewerStatus::Thinking;
         state
             .interviewer
@@ -3002,6 +3033,7 @@ mod tests {
                 operation,
                 revision,
                 mode,
+                guidance,
                 accepted: false,
             },
         ] = effects.as_slice()
@@ -3009,7 +3041,7 @@ mod tests {
             panic!("cancelled completion must be explicitly discarded")
         };
         worker
-            .finalize_turn(*operation, *revision, *mode, false)
+            .finalize_turn(*operation, *revision, *mode, *guidance, false)
             .unwrap();
         assert!(
             !state
@@ -3027,7 +3059,7 @@ mod tests {
         send_interviewer_turn(&mut worker, 4, "new-source", "new-question");
         assert!(matches!(
             poll_interviewer_one(&mut worker),
-            Event::InterviewerFinished(OperationId(4), 0, _, Ok(ref response))
+            Event::InterviewerFinished(OperationId(4), 0, _, _, Ok(ref response))
                 if response == "response-2"
         ));
         {
@@ -3051,7 +3083,7 @@ mod tests {
         send_interviewer_turn(&mut worker, 2, "prior-source", "prior-question");
         assert!(matches!(
             poll_interviewer_one(&mut worker),
-            Event::InterviewerFinished(OperationId(2), 0, mode, Ok(_))
+            Event::InterviewerFinished(OperationId(2), 0, mode, _, Ok(_))
                 if mode == crate::interviewer::Mode::Interviewer
         ));
         worker
@@ -3059,6 +3091,7 @@ mod tests {
                 OperationId(2),
                 0,
                 crate::interviewer::Mode::Interviewer,
+                crate::interviewer::GuidanceMode::Interview,
                 true,
             )
             .unwrap();
@@ -3111,7 +3144,7 @@ mod tests {
         wait_for_queued_interviewer_event(&worker, 91);
         let events = worker.poll();
         assert!(events.iter().any(|event| {
-            matches!(event, Event::InterviewerFinished(OperationId(3), 0, _, Err(error)) if error.contains("reset"))
+            matches!(event, Event::InterviewerFinished(OperationId(3), 0, _, _, Err(error)) if error.contains("reset"))
         }));
         send_interviewer_connect(&mut worker, 10);
         assert!(matches!(
@@ -3121,7 +3154,7 @@ mod tests {
         send_interviewer_turn(&mut worker, 11, "next-source", "next-question");
         assert!(matches!(
             poll_interviewer_one(&mut worker),
-            Event::InterviewerFinished(OperationId(11), 0, _, Ok(_))
+            Event::InterviewerFinished(OperationId(11), 0, _, _, Ok(_))
         ));
 
         let backend = backend.lock().expect("test Interviewer backend lock");

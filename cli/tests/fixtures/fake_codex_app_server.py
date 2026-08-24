@@ -194,17 +194,30 @@ for raw in sys.stdin:
                 if time.monotonic() >= release_deadline:
                     raise SystemExit("held fake interviewer turn was not released")
                 time.sleep(0.01)
-        hint_level = (
-            params.get("outputSchema", {})
-            .get("properties", {})
-            .get("level", {})
-            .get("const")
-        )
+        output_schema = params.get("outputSchema", {})
+        hint_level = output_schema.get("properties", {}).get("level", {}).get("const")
+        guidance_kind = output_schema.get("properties", {}).get("kind", {}).get("const")
         role = "interviewer"
         if mode == "malformed-envelope" or (
             mode == "malformed-envelope-restart" and start_count == 1
         ):
             text = "{}"
+        elif guidance_kind == "guidance":
+            role = "tutor-help" if "direct targeted teaching" in input_text else "tutor"
+            text = json.dumps(
+                {
+                    "kind": "guidance",
+                    "text": f"Direct tutor guidance with complete code [turn-{turn_number}]",
+                }
+            )
+        elif guidance_kind == "submission-review":
+            role = "tutor-submission-review"
+            text = json.dumps(
+                {
+                    "kind": "submission-review",
+                    "text": f"Direct corrected submission code [turn-{turn_number}]",
+                }
+            )
         elif hint_level is not None:
             role = f"hint-{hint_level}"
             text = json.dumps(

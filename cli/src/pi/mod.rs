@@ -56,6 +56,7 @@ impl Transport for PiTransport {
     fn raw_turn(
         &mut self,
         mode: Mode,
+        guidance: crate::interviewer::GuidanceMode,
         mut input: String,
         output_schema: Value,
         correction: bool,
@@ -63,7 +64,7 @@ impl Transport for PiTransport {
     ) -> Result<String, InterviewerError> {
         assert_eq!(
             output_schema,
-            crate::interviewer::prompt::output_schema(mode)
+            crate::interviewer::prompt::output_schema(mode, guidance)
         );
         let output_schema = serde_json::to_string(&output_schema).map_err(|_| {
             InterviewerError::configuration(Backend::Pi, "cannot encode Pi output schema")

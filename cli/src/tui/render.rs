@@ -158,9 +158,10 @@ fn header(state: &AppState) -> Paragraph<'static> {
     ))];
     if state.solve.is_some() {
         lines.push(Line::from(format!(
-            " {}: {} · memory only",
+            " {}: {} · memory only · {} mode",
             state.interviewer.backend.display_name(),
-            state.interviewer.status.label()
+            state.interviewer.status.label(),
+            state.interviewer.guidance_mode.display_name()
         )));
     }
     Paragraph::new(lines).style(
@@ -242,17 +243,17 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
             {
                 vec![
                     format!(
-                        "i retry · Space t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
+                        "i retry · Space-m mode · t test · s submit · b back · c {collapse_verb} · ? help · Tab panes"
                     ),
                     format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
                 ]
             }
             (SolvePane::Interview, _) => vec![
                 format!(
-                    "i ask · ↑/↓ row · PgUp/PgDn page · Home/End oldest/latest · Space t/s/b/c/? · Tab panes"
+                    "i ask · Space-m mode · ↑/↓ row · PgUp/PgDn page · Home/End · Space t/s/b/c/? · Tab panes"
                 ),
                 format!(
-                    "i ask · PgUp/PgDn/Home/End scroll · Space t/s/b/? · c {collapse_verb} · Tab panes"
+                    "i ask · Space-m mode · PgUp/PgDn/Home/End · Space t/s/b/? · c {collapse_verb} · Tab panes"
                 ),
                 format!("Space t/s/b/? · c {collapse_verb} · Tab panes"),
             ],
@@ -502,25 +503,40 @@ fn speaker_badge(label: &str, backend_name: &str) -> Line<'static> {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )
     };
-    match label {
-        "You" => badge(" YOU ".into(), Color::Cyan),
-        "Hinter" => badge(" HINTER ".into(), Color::Yellow),
-        "Interviewer" => badge(
-            format!(" {} · INTERVIEWER ", backend_name.to_uppercase()),
+    if label.starts_with("You · ") {
+        badge(format!(" {} ", label.to_uppercase()), Color::Cyan)
+    } else if label == "Hinter · Interview" {
+        badge(" HINTER · INTERVIEW ".into(), Color::Yellow)
+    } else if label == "Interviewer · Interview" {
+        badge(
+            format!(
+                " {} · INTERVIEWER · INTERVIEW ",
+                backend_name.to_uppercase()
+            ),
             Color::Magenta,
-        ),
-        submission if submission.starts_with("Submission review · recorded revision ") => {
-            badge(format!(" {submission} "), Color::Green)
-        }
-        other => badge(format!(" {other} "), Color::White),
+        )
+    } else if label == "Tutor" || label == "Tutor help" {
+        badge(
+            format!(
+                " {} · {} ",
+                backend_name.to_uppercase(),
+                label.to_uppercase()
+            ),
+            Color::Green,
+        )
+    } else if label.starts_with("Submission review · ") {
+        badge(format!(" {label} "), Color::Green)
+    } else {
+        badge(format!(" {label} "), Color::White)
     }
 }
 fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let solve = state.solve.as_ref().unwrap();
     let backend_name = state.interviewer.backend.display_name();
     let mut lines = vec![Line::from(format!(
-        "{backend_name} {} · Transcript memory only · not saved",
-        state.interviewer.status.label()
+        "{backend_name} {} · Transcript memory only · {} mode · not saved",
+        state.interviewer.status.label(),
+        state.interviewer.guidance_mode.display_name()
     ))];
     match state.interviewer.status {
         crate::app::model::InterviewerStatus::Disabled => lines.push(Line::from(
@@ -551,7 +567,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                 match state.interviewer.backend {
                     crate::interviewer::Backend::Pi => {
                         lines.push(Line::from(
-                        "in-memory transcript, and your question go to Pi's selected model provider.",
+                        "in-memory transcript, and your question go to Pi's configured default model/provider.",
                     ));
                         lines.push(Line::from(
                             "Configured executable is user-selected and trusted.",
@@ -573,7 +589,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                     }
                     crate::interviewer::Backend::Codex => {
                         lines.push(Line::from(
-                            "in-memory transcript, and your question may be sent to OpenAI.",
+                            "in-memory transcript, and your question use Codex's configured default model (not reported to Interview Tutor) through OpenAI.",
                         ));
                         lines.push(Line::from("Configured executable is"));
                         lines.push(Line::from("user-selected and trusted."));
@@ -649,9 +665,9 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
                 state.interviewer.composer
             )));
             lines.push(Line::from(
-                "i ask · Enter send · ↑/↓ row · PgUp/PgDn page · Home/End · Space-h hint",
+                "i ask · Enter send · ↑/↓ row · PgUp/PgDn page · Home/End · Space-h help",
             ));
-            lines.push(Line::from("Space-r reset · Ctrl-C cancel"));
+            lines.push(Line::from("Space-m mode · Space-r reset · Ctrl-C cancel"));
         }
     }
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
@@ -671,11 +687,15 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
     let retained_below = usize::from(state.interviewer.scroll).min(latest_offset);
     let offset = latest_offset.saturating_sub(retained_below);
     Paragraph::new(lines)
-        .block(block(if solve.pane == SolvePane::Interview {
-            "Interview [active] [-]"
-        } else {
-            "Interview [-]"
-        }))
+        .block(block(&format!(
+            "Interview{} [-] · {} mode",
+            if solve.pane == SolvePane::Interview {
+                " [active]"
+            } else {
+                ""
+            },
+            state.interviewer.guidance_mode.display_name(),
+        )))
         .wrap(Wrap { trim: false })
         .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
 }
@@ -960,7 +980,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         frame.render_widget(Clear, popup);
         let help = if state.screen == Screen::Solve {
             format!(
-                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab switches panes in Normal/Visual/Command and accessories, but goes to Neovim in Insert/Replace/terminal modes\nProblem/Output/Interview: i expands and focuses Interview; focused accessories widen\nComposer captures typed spaces; Interview uses ↑/↓ by row, PgUp/PgDn by page, Home/End oldest/latest\nCompatibility aliases: F5 test · F9 submit",
+                "Solve help\n\nCurrent: {}\nSpace leader in Editor Normal/accessories: t test · s submit · b autosave back · c toggle pane · ? help\nCtrl-Q quits from every pane and editor mode; dirty source requires confirmation\nEditor cannot collapse; Tab/Shift-Tab switches panes in Normal/Visual/Command and accessories, but goes to Neovim in Insert/Replace/terminal modes\nProblem/Output/Interview: i expands and focuses Interview; focused accessories widen\nInterview Space-m toggles Interview/Tutor; Tutor gives direct help and may show complete solutions\nComposer captures typed spaces; Interview uses ↑/↓ by row, PgUp/PgDn by page, Home/End oldest/latest\nCompatibility aliases: F5 test · F9 submit",
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
@@ -1344,11 +1364,11 @@ mod tests {
         state
             .interviewer
             .messages
-            .push(("Interviewer".into(), "Question".into()));
+            .push(("Interviewer · Interview".into(), "Question".into()));
         state
             .interviewer
             .messages
-            .push(("Hinter".into(), "Hint".into()));
+            .push(("Hinter · Interview".into(), "Hint".into()));
         state.interviewer.messages.push((
             "Submission review · recorded revision 7".into(),
             "Review".into(),
@@ -1367,15 +1387,16 @@ mod tests {
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         state.interviewer.backend = crate::interviewer::Backend::Pi;
         state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        state.interviewer.push_message(
+            "You · Interview".into(),
+            format!("{}界界", "my question ".repeat(8)),
+        );
         state
             .interviewer
-            .push_message("You".into(), format!("{}界界", "my question ".repeat(8)));
+            .push_message("Interviewer · Interview".into(), "interviewer reply".into());
         state
             .interviewer
-            .push_message("Interviewer".into(), "interviewer reply".into());
-        state
-            .interviewer
-            .push_message("Hinter".into(), "hint body".into());
+            .push_message("Hinter · Interview".into(), "hint body".into());
         state.interviewer.push_message(
             "Submission review · recorded revision 7".into(),
             "review body".into(),
@@ -1436,6 +1457,27 @@ mod tests {
             .filter(|row| !row.trim().is_empty())
         {
             assert!(row.starts_with("  "), "body row lacks prefix: {row:?}");
+        }
+    }
+
+    #[test]
+    fn guidance_mode_and_originating_turn_labels_are_unmistakable_at_supported_widths() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        state.interviewer.guidance_mode = crate::interviewer::GuidanceMode::Tutor;
+        state
+            .interviewer
+            .push_message("You · Tutor".into(), "show the implementation".into());
+        state
+            .interviewer
+            .push_message("Tutor".into(), "complete direct answer".into());
+        for (width, height) in [(60, 24), (80, 24), (120, 40)] {
+            let view = rendered(&state, width, height);
+            assert!(view.contains("Interview [active] [-]"), "{width}x{height}");
+            assert!(view.contains("Tutor mode"), "{width}x{height}");
+            assert!(view.contains("YOU · TUTOR"), "{width}x{height}");
+            assert!(view.contains("PI · TUTOR"), "{width}x{height}");
         }
     }
 
@@ -1716,7 +1758,7 @@ mod tests {
                 let row = rendered_row(&state, width, 24, 1);
                 assert_eq!(
                     row,
-                    format!(" Pi: {} · memory only", status.label()),
+                    format!(" Pi: {} · memory only · Interview mode", status.label()),
                     "width {width}"
                 );
             }
@@ -1789,6 +1831,7 @@ mod tests {
             crate::app::model::OperationId(2),
             0,
             crate::interviewer::Mode::Interviewer,
+            crate::interviewer::GuidanceMode::Interview,
         ));
         assert!(rendered_footer(&state, 80).contains("Ctrl-C Interviewer"));
         for width in [1_u16, 10, 20, 60, 80, 120] {

@@ -3,7 +3,7 @@ use crate::database::{
     Difficulty, EnabledLanguage, MAX_STATEMENT_LENGTH, ProblemImplementation, ProgressSummary,
 };
 use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES};
-use crate::interviewer::Mode as InterviewerMode;
+use crate::interviewer::{GuidanceMode, Mode as InterviewerMode};
 use crate::runner::{CancellationToken, ExecutionPlan};
 use std::sync::Arc;
 
@@ -53,6 +53,7 @@ pub struct InterviewerUi {
     pub backend: crate::interviewer::Backend,
     pub enabled: bool,
     pub status: InterviewerStatus,
+    pub guidance_mode: GuidanceMode,
     pub disclosure_accepted: bool,
     pub composer_focused: bool,
     pub composer: String,
@@ -61,7 +62,7 @@ pub struct InterviewerUi {
     /// Number of wrapped transcript rows to retain below the visible viewport.
     pub scroll: u16,
     pub connecting: Option<OperationId>,
-    pub active: Option<(OperationId, u64, InterviewerMode)>,
+    pub active: Option<(OperationId, u64, InterviewerMode, GuidanceMode)>,
     pub hint_revision: Option<u64>,
     pub hint_count: u8,
     pub submission_recorded: bool,
@@ -84,6 +85,7 @@ impl InterviewerUi {
             } else {
                 InterviewerStatus::Disabled
             },
+            guidance_mode: GuidanceMode::Interview,
             disclosure_accepted: false,
             composer_focused: false,
             composer: String::new(),
@@ -200,17 +202,19 @@ impl Default for AccessoryPaneState {
 #[derive(Clone, Debug)]
 pub struct RecordedSubmissionReview {
     pub revision: u64,
+    pub guidance: GuidanceMode,
     pub replaced_older: bool,
     source: String,
     output: String,
 }
 
 impl RecordedSubmissionReview {
-    pub fn new(revision: u64, source: String, output: String) -> Self {
+    pub fn new(revision: u64, guidance: GuidanceMode, source: String, output: String) -> Self {
         assert!(source.len() <= MAX_DOCUMENT_BYTES);
         assert!(output.len() <= 16 * 1024);
         Self {
             revision,
+            guidance,
             replaced_older: false,
             source,
             output,
@@ -246,15 +250,22 @@ impl Drop for RecordedSubmissionReview {
 pub struct SubmittedSource {
     pub operation: OperationId,
     pub revision: u64,
+    pub guidance: GuidanceMode,
     source: String,
 }
 
 impl SubmittedSource {
-    pub fn new(operation: OperationId, revision: u64, source: String) -> Self {
+    pub fn new(
+        operation: OperationId,
+        revision: u64,
+        guidance: GuidanceMode,
+        source: String,
+    ) -> Self {
         assert!(source.len() <= MAX_DOCUMENT_BYTES);
         Self {
             operation,
             revision,
+            guidance,
             source,
         }
     }

@@ -13,11 +13,11 @@ The interviewer is optional. Local browsing, Neovim editing, testing, submission
 
 Using both CLI selectors is an error. Empty, non-UTF-8, mixed-case, whitespace-padded, and unknown selected values are rejected. There is no silent fallback between Pi and Codex. `none` probes or spawns neither executable.
 
-Both transports require visible in-app consent before version probing, authentication/configuration access, or model turns. They receive the same application-owned prompt, transcript, hint, structured-envelope, revision, and stale-response validation.
+Both transports require visible in-app consent before version probing, authentication/configuration access, or model turns. Guidance defaults to Socratic Interview; `Space m` switches the focused pane to direct Tutor without reconnecting or clearing transcript state. They receive the same application-owned payload and strict role-plus-guidance structured-envelope, revision, and stale-response validation.
 
 ## Pi default
 
-Install trusted Pi 0.84.2, configure its default model/provider and credentials, then run `./interview`. The executable resolves from `INTERVIEW_TUTOR_PI_EXECUTABLE` and then `PATH`. Only exact `pi --version` output `0.84.2` is accepted.
+Install trusted Pi 0.84.2, configure its default model/provider and credentials, then run `./interview`. Interview Tutor supplies no model override: Pi uses that configured default. The Codex compatibility backend likewise uses Codex's configured default, which the accepted app-server subset does not report. The executable resolves from `INTERVIEW_TUTOR_PI_EXECUTABLE` and then `PATH`. Only exact `pi --version` output `0.84.2` is accepted.
 
 The resolved executable must be a regular file owned by the effective user or root and must not be group- or world-writable. Device, inode, owner, mode, size, and change timestamps are checked before and after the bounded version probe and again before RPC spawn. This reduces replacement races and establishes compatibility, not provenance.
 
@@ -102,9 +102,9 @@ After consent, Interview Tutor intentionally supplies exactly five application f
 4. bounded in-memory transcript
 5. current user question
 
-Questions are capped at 16 KiB. The transcript supplied back to the model retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. The TUI separately retains at most 512 visible messages and 1 MiB, marks omitted earlier messages at the oldest scroll position, and never supplies that extra display-only history to the model. Hints omit transcript context, allow three levels per source revision, and must not reveal a complete solution. One malformed response receives one correction request in the same transport operation; a second malformed response fails closed.
+Questions are capped at 16 KiB. The transcript supplied back to the model retains at most 128 entries and 256 KiB; each assistant response is at most 64 KiB. The TUI separately retains at most 512 visible messages and 1 MiB, marks omitted earlier messages at the oldest scroll position, and never supplies that extra display-only history to the model. Interview hints omit transcript context, allow three levels per source revision, and must not reveal a complete solution. Tutor help includes mode-tagged transcript context, is not capped at three, and uses a separate strict guidance envelope that permits complete solutions and code. One malformed response receives one correction request in the same transport operation; a second malformed response fails closed.
 
-Submission review starts only after local attempt recording succeeds and uses that submit operation's exact captured source, not a newer editor buffer. A response enters UI/transcript state only while operation, mode, and source revision still match. The local runner remains authoritative. Transcript state is cleared on reset, solve exit, and process exit; Interview Tutor writes no prompt or transcript log.
+Submission review starts only after local attempt recording succeeds and uses that submit operation's exact captured source, not a newer editor buffer. A response enters UI/transcript state only while operation, role, captured guidance mode, and source revision still match. The local runner remains authoritative. Transcript state is cleared on reset, solve exit, and process exit; Interview Tutor writes no prompt or transcript log.
 
 ## Bounds and recovery
 
