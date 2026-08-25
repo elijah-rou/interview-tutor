@@ -107,7 +107,7 @@ Starter APIs follow LeetCode where an official public template exists; otherwise
 
 Shipped statement briefs remain in `catalog/problems.json`. They were independently written from checked-in interfaces, data structures, and public executable cases; executable cases are authoritative if a brief conflicts. [Catalog provenance](catalog/README.md), the [problem-set index](problem_sets/README.md), the [anti-metal selection rationales](problem_sets/anti-metal.md), and the [original Blind 75 local brief](problem_sets/blind75.md) remain checked in and visible.
 
-See [architecture](docs/architecture.md), [testing](docs/testing.md), and [security](SECURITY.md) for implementation boundaries and verification gates.
+See the [Python interview cheat sheet](docs/python-interview-cheat-sheet.html) for heaps, stacks, queues, graphs, linked lists, and `asyncio` patterns. See [architecture](docs/architecture.md), [testing](docs/testing.md), and [security](SECURITY.md) for implementation boundaries and verification gates.
 
 ## License
 

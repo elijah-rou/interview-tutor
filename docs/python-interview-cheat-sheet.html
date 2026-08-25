@@ -1,0 +1,1294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A practical Python interview reference for heaps, queues, graphs, linked lists, and asyncio.">
+  <title>Python interview cheat sheet</title>
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("python-cheat-sheet:theme");
+      if (savedTheme === "light" || savedTheme === "dark") {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch (_) {}
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --background: #f6f4ef;
+      --surface: #fffdf8;
+      --surface-raised: #ffffff;
+      --text: #1d2523;
+      --muted: #5e6965;
+      --border: #d8ddd7;
+      --accent: #087f6d;
+      --accent-strong: #056554;
+      --accent-soft: #dff3ed;
+      --code-background: #15201e;
+      --code-text: #e8f4f0;
+      --shadow: 0 14px 34px rgb(25 45 40 / 8%);
+      --radius: 16px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --background: #101614;
+        --surface: #161e1c;
+        --surface-raised: #1b2522;
+        --text: #e7eeeb;
+        --muted: #a8b5b0;
+        --border: #30413c;
+        --accent: #62d4bd;
+        --accent-strong: #8ce4d1;
+        --accent-soft: #193b34;
+        --code-background: #0a0f0e;
+        --code-text: #e5f4ef;
+        --shadow: 0 14px 34px rgb(0 0 0 / 24%);
+      }
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --background: #101614;
+      --surface: #161e1c;
+      --surface-raised: #1b2522;
+      --text: #e7eeeb;
+      --muted: #a8b5b0;
+      --border: #30413c;
+      --accent: #62d4bd;
+      --accent-strong: #8ce4d1;
+      --accent-soft: #193b34;
+      --code-background: #0a0f0e;
+      --code-text: #e5f4ef;
+      --shadow: 0 14px 34px rgb(0 0 0 / 24%);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+
+    button, input, select { font: inherit; }
+    button, select { cursor: pointer; }
+    a { color: var(--accent-strong); }
+    a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      left: 1rem;
+      top: -5rem;
+      z-index: 100;
+      padding: .7rem 1rem;
+      border-radius: .5rem;
+      background: var(--text);
+      color: var(--background);
+    }
+    .skip-link:focus { top: 1rem; }
+
+    .page-progress {
+      position: fixed;
+      inset: 0 0 auto;
+      z-index: 50;
+      height: 4px;
+      background: transparent;
+    }
+    .page-progress > span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(15rem, 19rem) minmax(0, 58rem);
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 2.25rem 1.5rem;
+      border-right: 1px solid var(--border);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: .65rem;
+      margin-bottom: 2rem;
+      color: var(--text);
+      font-weight: 760;
+      text-decoration: none;
+    }
+    .brand-mark {
+      display: grid;
+      width: 2rem;
+      height: 2rem;
+      place-items: center;
+      border-radius: .55rem;
+      background: var(--accent);
+      color: #071612;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: .8rem;
+    }
+    .sidebar-label {
+      margin: 0 0 .55rem;
+      color: var(--muted);
+      font-size: .72rem;
+      font-weight: 750;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    .section-nav { margin: 0; padding: 0; list-style: none; }
+    .section-nav li { margin: .2rem 0; }
+    .section-nav a {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      padding: .55rem .7rem;
+      border-radius: .55rem;
+      color: var(--muted);
+      font-size: .9rem;
+      line-height: 1.3;
+      text-decoration: none;
+    }
+    .section-nav a::before {
+      width: .55rem;
+      height: .55rem;
+      flex: 0 0 auto;
+      border: 1.5px solid var(--border);
+      border-radius: 50%;
+      content: "";
+    }
+    .section-nav a:hover, .section-nav a.active {
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+    .section-nav a.completed::before {
+      border-color: var(--accent);
+      background: var(--accent);
+      box-shadow: inset 0 0 0 2px var(--surface);
+    }
+    .sidebar-progress {
+      margin-top: 2rem;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      border-radius: .8rem;
+      background: var(--surface);
+    }
+    .sidebar-progress p {
+      display: flex;
+      justify-content: space-between;
+      margin: 0 0 .55rem;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+    .meter {
+      height: .45rem;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--border);
+    }
+    .meter span {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+    .reset-button {
+      margin-top: .7rem;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: .78rem;
+      text-decoration: underline;
+      text-underline-offset: .2rem;
+    }
+
+    .content { min-width: 0; padding: 0 2.5rem 5rem; }
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      display: flex;
+      gap: .65rem;
+      align-items: center;
+      padding: 1rem 0;
+      background: color-mix(in srgb, var(--background) 88%, transparent);
+      backdrop-filter: blur(12px);
+    }
+    .search-wrap { position: relative; flex: 1; }
+    .search-wrap::before {
+      position: absolute;
+      left: .85rem;
+      top: 50%;
+      color: var(--muted);
+      content: "⌕";
+      font-size: 1.15rem;
+      transform: translateY(-52%);
+      pointer-events: none;
+    }
+    #search {
+      width: 100%;
+      padding: .72rem 1rem .72rem 2.35rem;
+      border: 1px solid var(--border);
+      border-radius: .7rem;
+      background: var(--surface);
+      color: var(--text);
+    }
+    #section-picker { display: none; }
+    .toolbar-button, #section-picker {
+      padding: .72rem .85rem;
+      border: 1px solid var(--border);
+      border-radius: .7rem;
+      background: var(--surface);
+      color: var(--text);
+    }
+
+    .eyebrow {
+      margin: 3.8rem 0 .4rem;
+      color: var(--accent-strong);
+      font-size: .75rem;
+      font-weight: 800;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .level1 > h1 {
+      max-width: 14ch;
+      margin: 0;
+      font-size: clamp(2.6rem, 8vw, 5.25rem);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+    .level1 > h1 + p {
+      max-width: 46rem;
+      margin: 1.35rem 0 3rem;
+      color: var(--muted);
+      font-size: 1.12rem;
+    }
+
+    .level2 {
+      margin: 1.5rem 0;
+      padding: clamp(1.2rem, 4vw, 2rem);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      scroll-margin-top: 5rem;
+    }
+    .level2[hidden] { display: none; }
+    .section-heading {
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+    .section-heading h2 {
+      margin: 0;
+      font-size: clamp(1.5rem, 4vw, 2.05rem);
+      line-height: 1.2;
+      letter-spacing: -.025em;
+    }
+    .complete-button {
+      flex: 0 0 auto;
+      padding: .45rem .7rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-raised);
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .complete-button[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+
+    h3 {
+      margin: 2rem 0 .65rem;
+      font-size: 1.18rem;
+      line-height: 1.3;
+      scroll-margin-top: 5rem;
+    }
+    p { margin: .75rem 0; }
+    ul, ol { padding-left: 1.35rem; }
+    li + li { margin-top: .35rem; }
+    strong { font-weight: 750; }
+
+    code {
+      padding: .08em .3em;
+      border-radius: .3rem;
+      background: var(--accent-soft);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .89em;
+    }
+    .code-block {
+      position: relative;
+      margin: 1rem 0;
+    }
+    pre {
+      margin: 0;
+      padding: 1.15rem;
+      overflow-x: auto;
+      border-radius: .8rem;
+      background: var(--code-background);
+      color: var(--code-text);
+      font-size: .84rem;
+      line-height: 1.6;
+      tab-size: 4;
+    }
+    pre code {
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+    }
+    .copy-button {
+      position: absolute;
+      right: .55rem;
+      top: .55rem;
+      padding: .35rem .55rem;
+      border: 1px solid rgb(255 255 255 / 20%);
+      border-radius: .4rem;
+      background: rgb(0 0 0 / 35%);
+      color: #dceae6;
+      font-size: .72rem;
+    }
+    .copy-button:hover { background: rgb(0 0 0 / 65%); }
+
+    .table-wrap { margin: 1rem 0; overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .9rem;
+    }
+    th, td {
+      padding: .75rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: .72rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+
+    .search-status {
+      min-height: 1.4rem;
+      margin: 0 0 .8rem;
+      color: var(--muted);
+      font-size: .84rem;
+    }
+    .no-results {
+      display: none;
+      padding: 3rem 1rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .no-results.visible { display: block; }
+
+    @media (max-width: 860px) {
+      .layout { display: block; }
+      .sidebar { display: none; }
+      .content { padding: 0 1rem 4rem; }
+      #section-picker {
+        display: block;
+        max-width: 42%;
+      }
+      .eyebrow { margin-top: 2.5rem; }
+      .level2 { padding: 1.2rem; }
+    }
+
+    @media (max-width: 560px) {
+      .toolbar { flex-wrap: wrap; }
+      .search-wrap { flex-basis: calc(100% - 3.5rem); }
+      #section-picker {
+        max-width: none;
+        flex: 1 1 100%;
+      }
+      .section-heading { display: block; }
+      .complete-button { margin-top: .75rem; }
+      .level1 > h1 { font-size: 3rem; }
+    }
+
+    @media print {
+      :root {
+        --background: #fff;
+        --surface: #fff;
+        --text: #000;
+        --muted: #333;
+        --border: #bbb;
+        --code-background: #f3f3f3;
+        --code-text: #000;
+        --shadow: none;
+      }
+      .sidebar, .toolbar, .page-progress, .complete-button, .copy-button,
+      .search-status, .no-results { display: none !important; }
+      .layout { display: block; }
+      .content { padding: 0; }
+      .eyebrow { margin-top: 0; }
+      .level1 > h1 { max-width: none; font-size: 2.4rem; }
+      .level2 {
+        break-inside: avoid-page;
+        border: 0;
+        border-top: 1px solid #bbb;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      pre { white-space: pre-wrap; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#guide">Skip to guide</a>
+  <div class="page-progress" aria-hidden="true"><span id="page-progress"></span></div>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="Guide navigation">
+      <a class="brand" href="#python-interview-cheat-sheet">
+        <span class="brand-mark">Py</span>
+        Interview patterns
+      </a>
+      <p class="sidebar-label">Sections</p>
+      <nav aria-label="Sections"><ol class="section-nav" id="section-nav"></ol></nav>
+      <div class="sidebar-progress">
+        <p><span>Progress</span><strong id="progress-count">0 / 0</strong></p>
+        <div class="meter" aria-hidden="true"><span id="progress-meter"></span></div>
+        <button class="reset-button" id="reset-progress" type="button">Reset progress</button>
+      </div>
+    </aside>
+
+    <main class="content" id="guide">
+      <div class="toolbar" aria-label="Guide controls">
+        <label class="search-wrap">
+          <span hidden>Search the guide</span>
+          <input id="search" type="search" placeholder="Search patterns…" autocomplete="off">
+        </label>
+        <select id="section-picker" aria-label="Jump to section">
+          <option value="">Jump to section…</option>
+        </select>
+        <button class="toolbar-button" id="theme-toggle" type="button">Theme</button>
+      </div>
+      <p class="eyebrow">Interview prep · Python 3.11+</p>
+      <p class="search-status" id="search-status" role="status" aria-live="polite"></p>
+      <section id="python-interview-cheat-sheet" class="level1">
+      <h1>Python interview cheat sheet</h1>
+      <p>This reference targets Python 3.11 or newer. It favors the
+      standard library and patterns that are easy to explain under
+      interview pressure.</p>
+      <section id="choose-the-right-structure" class="level2">
+      <h2>Choose the right structure</h2>
+      <table>
+      <thead>
+      <tr>
+      <th>Need</th>
+      <th>Python structure</th>
+      <th>Important operations</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+      <td>LIFO stack</td>
+      <td><code>list</code></td>
+      <td><code>append</code> / <code>pop</code>: amortized O(1)</td>
+      </tr>
+      <tr>
+      <td>FIFO queue</td>
+      <td><code>collections.deque</code></td>
+      <td><code>append</code> / <code>popleft</code>: O(1)</td>
+      </tr>
+      <tr>
+      <td>Double-ended queue</td>
+      <td><code>collections.deque</code></td>
+      <td>append/pop at either end: O(1)</td>
+      </tr>
+      <tr>
+      <td>Smallest item or priority queue</td>
+      <td><code>heapq</code> over a <code>list</code></td>
+      <td>peek: O(1), push/pop: O(log n)</td>
+      </tr>
+      <tr>
+      <td>Membership or deduplication</td>
+      <td><code>set</code></td>
+      <td>average O(1) lookup/add/remove</td>
+      </tr>
+      <tr>
+      <td>Key to value/node</td>
+      <td><code>dict</code></td>
+      <td>average O(1) lookup/insert/delete</td>
+      </tr>
+      <tr>
+      <td>Sorted search over a list</td>
+      <td><code>bisect</code></td>
+      <td>search: O(log n), insertion: O(n)</td>
+      </tr>
+      </tbody>
+      </table>
+      <p>Do not use <code>list.pop(0)</code> as a queue: shifting the
+      remaining elements costs O(n).</p>
+      </section>
+      <section id="heaps-and-priority-queues" class="level2">
+      <h2>Heaps and priority queues</h2>
+      <p><code>heapq</code> is a min-heap. The smallest item is always
+      at index <code>0</code>; the rest of the list is heap-ordered, not
+      fully sorted.</p>
+      <pre class="python"><code>import heapq
+
+heap = [7, 2, 5]
+heapq.heapify(heap)          # O(n), heap is now [2, 7, 5] or equivalent
+heapq.heappush(heap, 3)     # O(log n)
+smallest = heap[0]          # O(1), does not remove
+smallest = heapq.heappop(heap)  # O(log n)</code></pre>
+      <p>Useful combined operations:</p>
+      <pre class="python"><code>removed = heapq.heappushpop(heap, item)  # push, then remove the smallest
+removed = heapq.heapreplace(heap, item)  # remove the smallest, then push</code></pre>
+      <p><code>heappushpop</code> may return <code>item</code> without
+      changing the existing heap. <code>heapreplace</code> always
+      removes an existing item and requires a non-empty heap.</p>
+      <section id="max-heap-pattern" class="level3">
+      <h3>Max-heap pattern</h3>
+      <p>For a max-heap on Python 3.11+, negate numeric priorities:</p>
+      <pre class="python"><code>max_heap: list[int] = []
+heapq.heappush(max_heap, -value)
+largest = -heapq.heappop(max_heap)</code></pre>
+      <p>For <code>(priority, value)</code> entries, negate only the
+      priority.</p>
+      </section>
+      <section id="stable-priorities-and-incomparable-payloads"
+      class="level3">
+      <h3>Stable priorities and incomparable payloads</h3>
+      <p>Tuples compare from left to right. If two priorities tie,
+      Python tries to compare the payloads and may raise
+      <code>TypeError</code>. Add a unique sequence number as the
+      tie-breaker:</p>
+      <pre class="python"><code>from itertools import count
+from typing import Any
+
+sequence = count()
+priority_queue: list[tuple[int, int, Any]] = []
+
+heapq.heappush(priority_queue, (priority, next(sequence), item))
+priority, _, item = heapq.heappop(priority_queue)</code></pre>
+      <p>Negate <code>priority</code> as well when a larger number means
+      higher priority.</p>
+      </section>
+      <section id="keep-the-k-largest-values" class="level3">
+      <h3>Keep the k largest values</h3>
+      <p>Keep a min-heap containing only the best <code>k</code> values.
+      Its root is the current cutoff:</p>
+      <pre class="python"><code>def k_largest(values: list[int], k: int) -&gt; list[int]:
+    if k &lt;= 0:
+        return []
+
+    heap: list[int] = []
+    for value in values:
+        if len(heap) &lt; k:
+            heapq.heappush(heap, value)
+        elif value &gt; heap[0]:
+            heapq.heapreplace(heap, value)
+
+    return sorted(heap, reverse=True)</code></pre>
+      <p>Time is O(n log k); extra space is O(k). To keep the
+      <code>k</code> smallest values, maintain a size-<code>k</code>
+      max-heap using negated values.</p>
+      </section>
+      </section>
+      <section id="stacks-queues-and-monotonic-structures"
+      class="level2">
+      <h2>Stacks, queues, and monotonic structures</h2>
+      <section id="stack-and-queue" class="level3">
+      <h3>Stack and queue</h3>
+      <pre class="python"><code>from collections import deque
+
+stack: list[int] = []
+stack.append(10)
+top = stack[-1]
+value = stack.pop()
+
+queue: deque[int] = deque()
+queue.append(10)
+front = queue[0]
+value = queue.popleft()</code></pre>
+      </section>
+      <section id="monotonic-stack-next-greater-value" class="level3">
+      <h3>Monotonic stack: next greater value</h3>
+      <p>Store indices when answers depend on position. This stack keeps
+      unresolved values in decreasing order:</p>
+      <pre class="python"><code>def next_greater_values(numbers: list[int]) -&gt; list[int]:
+    answers = [-1] * len(numbers)
+    stack: list[int] = []
+
+    for index, value in enumerate(numbers):
+        while stack and numbers[stack[-1]] &lt; value:
+            answers[stack.pop()] = value
+        stack.append(index)
+
+    return answers</code></pre>
+      <p>Each index enters and leaves the stack once, so total time is
+      O(n), not O(n²).</p>
+      </section>
+      <section id="monotonic-deque-sliding-window-maximum"
+      class="level3">
+      <h3>Monotonic deque: sliding-window maximum</h3>
+      <p>The deque stores useful indices in decreasing value order:</p>
+      <pre class="python"><code>from collections import deque
+
+
+def sliding_maximum(numbers: list[int], window_size: int) -&gt; list[int]:
+    if not 1 &lt;= window_size &lt;= len(numbers):
+        return []
+
+    candidates: deque[int] = deque()
+    maxima: list[int] = []
+
+    for index, value in enumerate(numbers):
+        while candidates and candidates[0] &lt;= index - window_size:
+            candidates.popleft()
+        while candidates and numbers[candidates[-1]] &lt;= value:
+            candidates.pop()
+        candidates.append(index)
+
+        if index &gt;= window_size - 1:
+            maxima.append(numbers[candidates[0]])
+
+    return maxima</code></pre>
+      <p>This template treats a non-positive or oversized window as
+      invalid and returns an empty list.</p>
+      </section>
+      </section>
+      <section id="graph-representations-and-traversal" class="level2">
+      <h2>Graph representations and traversal</h2>
+      <p>Choose a representation based on the operations the problem
+      needs:</p>
+      <pre class="python"><code># Unweighted directed graph with nodes 0..n-1.
+directed: list[list[int]] = [[] for _ in range(node_count)]
+for source, destination in edges:
+    directed[source].append(destination)
+
+# Undirected graph: add each edge in both directions.
+undirected: list[list[int]] = [[] for _ in range(node_count)]
+for source, destination in edges:
+    undirected[source].append(destination)
+    undirected[destination].append(source)
+
+# Weighted graph: each input edge is (source, destination, weight).
+weighted: list[list[tuple[int, int]]] = [[] for _ in range(node_count)]
+for source, destination, weight in weighted_edges:
+    weighted[source].append((destination, weight))</code></pre>
+      <p>Use <code>set</code> neighbors when deduplication or edge
+      removal matters. Use <code>dict[node, list[node]]</code> when node
+      IDs are sparse or not integers. <code>defaultdict(list)</code> is
+      concise, but reading a missing key also inserts it.</p>
+      <section id="breadth-first-search" class="level3">
+      <h3>Breadth-first search</h3>
+      <p>BFS finds shortest path lengths in an unweighted graph. Mark a
+      node seen when enqueuing it, not when dequeuing it, to avoid
+      duplicate queue entries.</p>
+      <pre class="python"><code>from collections import deque
+
+
+def shortest_hops(graph: list[list[int]], start: int) -&gt; list[int]:
+    distances = [-1] * len(graph)
+    distances[start] = 0
+    queue = deque([start])
+
+    while queue:
+        node = queue.popleft()
+        for neighbor in graph[node]:
+            if distances[neighbor] != -1:
+                continue
+            distances[neighbor] = distances[node] + 1
+            queue.append(neighbor)
+
+    return distances</code></pre>
+      </section>
+      <section id="iterative-depth-first-search" class="level3">
+      <h3>Iterative depth-first search</h3>
+      <pre class="python"><code>def reachable_nodes(graph: list[list[int]], start: int) -&gt; set[int]:
+    seen = {start}
+    stack = [start]
+
+    while stack:
+        node = stack.pop()
+        for neighbor in graph[node]:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            stack.append(neighbor)
+
+    return seen</code></pre>
+      <p>Iterative DFS avoids Python's shallow recursion limit. To visit
+      every component, start a new traversal from each node not already
+      seen.</p>
+      </section>
+      <section id="topological-sort-with-kahns-algorithm"
+      class="level3">
+      <h3>Topological sort with Kahn's algorithm</h3>
+      <p>An order containing fewer than <code>node_count</code> nodes
+      means the directed graph has a cycle.</p>
+      <pre class="python"><code>from collections import deque
+
+
+def topological_order(graph: list[list[int]]) -&gt; list[int]:
+    indegree = [0] * len(graph)
+    for neighbors in graph:
+        for neighbor in neighbors:
+            indegree[neighbor] += 1
+
+    ready = deque(
+        node for node, degree in enumerate(indegree) if degree == 0
+    )
+    order: list[int] = []
+
+    while ready:
+        node = ready.popleft()
+        order.append(node)
+        for neighbor in graph[node]:
+            indegree[neighbor] -= 1
+            if indegree[neighbor] == 0:
+                ready.append(neighbor)
+
+    return order if len(order) == len(graph) else []</code></pre>
+      </section>
+      <section id="dijkstras-algorithm" class="level3">
+      <h3>Dijkstra's algorithm</h3>
+      <p>Use Dijkstra only when edge weights are non-negative.
+      <code>heapq</code> has no decrease-key operation, so push the
+      improved distance and skip stale entries later.</p>
+      <pre class="python"><code>import heapq
+from itertools import count
+
+
+def shortest_weighted_paths(
+    graph: dict[str, list[tuple[str, int]]], start: str
+) -&gt; dict[str, int]:
+    sequence = count()
+    distances = {start: 0}
+    heap = [(0, next(sequence), start)]
+
+    while heap:
+        distance, _, node = heapq.heappop(heap)
+        if distance != distances[node]:
+            continue
+
+        for neighbor, weight in graph.get(node, []):
+            assert weight &gt;= 0
+            candidate = distance + weight
+            if candidate &gt;= distances.get(neighbor, float(&quot;inf&quot;)):
+                continue
+            distances[neighbor] = candidate
+            heapq.heappush(
+                heap, (candidate, next(sequence), neighbor)
+            )
+
+    return distances</code></pre>
+      </section>
+      </section>
+      <section id="doubly-linked-lists" class="level2">
+      <h2>Doubly linked lists</h2>
+      <p>A doubly linked list is useful when a dictionary locates nodes
+      and the algorithm must unlink or move any node in O(1), as in an
+      LRU cache. Dummy head and tail sentinels remove most empty-list
+      and endpoint branches.</p>
+      <pre class="python"><code>from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(eq=False, slots=True)
+class Node:
+    key: int | None = None
+    value: int | None = None
+    previous: Node | None = None
+    next: Node | None = None
+
+
+class DoublyLinkedList:
+    def __init__(self) -&gt; None:
+        self.head = Node()
+        self.tail = Node()
+        self.head.next = self.tail
+        self.tail.previous = self.head
+
+    def add_first(self, node: Node) -&gt; None:
+        assert node.previous is None
+        assert node.next is None
+        first = self.head.next
+        assert first is not None
+
+        node.previous = self.head
+        node.next = first
+        self.head.next = node
+        first.previous = node
+
+    def remove(self, node: Node) -&gt; None:
+        previous = node.previous
+        following = node.next
+        assert previous is not None
+        assert following is not None
+
+        previous.next = following
+        following.previous = previous
+        node.previous = None
+        node.next = None
+
+    def remove_last(self) -&gt; Node | None:
+        last = self.tail.previous
+        assert last is not None
+        if last is self.head:
+            return None
+        self.remove(last)
+        return last</code></pre>
+      <p>LRU operations then become:</p>
+      <ul>
+      <li>hit: dictionary lookup, <code>remove(node)</code>, then
+      <code>add_first(node)</code></li>
+      <li>insert: add to the dictionary and front of the list</li>
+      <li>eviction: <code>remove_last()</code>, then delete that node's
+      key from the dictionary</li>
+      </ul>
+      <p>In application code, <code>collections.OrderedDict</code>
+      already provides <code>move_to_end</code> and
+      <code>popitem(last=False)</code>. Interviews may still ask for the
+      explicit dictionary plus linked-list implementation.</p>
+      </section>
+      <section id="asyncio-essentials" class="level2">
+      <h2><code>asyncio</code> essentials</h2>
+      <p><code>asyncio</code> provides cooperative concurrency,
+      primarily for waiting on network, subprocess, timer, or other
+      asynchronous I/O. It does not make CPU-bound Python execute in
+      parallel.</p>
+      <ul>
+      <li>Calling an <code>async def</code> function creates a coroutine
+      object; it does not run it.</li>
+      <li><code>await</code> suspends only the current task and lets
+      another ready task run.</li>
+      <li><code>asyncio.create_task</code> schedules a coroutine
+      concurrently on the current event loop.</li>
+      <li>Code between <code>await</code> points runs without another
+      task on that event-loop thread taking over.</li>
+      <li>Shared state can still race when a read-modify-write operation
+      spans an <code>await</code>.</li>
+      </ul>
+      <section id="entry-point-and-sequential-awaits" class="level3">
+      <h3>Entry point and sequential awaits</h3>
+      <pre class="python"><code>import asyncio
+
+
+async def main() -&gt; None:
+    first = await fetch_one(&quot;/first&quot;)
+    second = await fetch_one(&quot;/second&quot;)  # starts after first completes
+    print(first, second)
+
+
+if __name__ == &quot;__main__&quot;:
+    asyncio.run(main())</code></pre>
+      <p>Use one <code>asyncio.run</code> at the synchronous program
+      boundary. In an already asynchronous framework,
+      <code>await main()</code> instead of starting a nested event
+      loop.</p>
+      </section>
+      <section id="structured-concurrency-with-taskgroup"
+      class="level3">
+      <h3>Structured concurrency with <code>TaskGroup</code></h3>
+      <p>A task group waits for all child tasks. If one fails, it
+      cancels the unfinished siblings and eventually raises an
+      <code>ExceptionGroup</code>.</p>
+      <pre class="python"><code>import asyncio
+
+
+async def load_pair() -&gt; tuple[bytes, bytes]:
+    async with asyncio.TaskGroup() as group:
+        first_task = group.create_task(fetch_one(&quot;/first&quot;))
+        second_task = group.create_task(fetch_one(&quot;/second&quot;))
+
+    return first_task.result(), second_task.result()</code></pre>
+      <p>Prefer <code>TaskGroup</code> when the child operations form
+      one unit of work. Keep task references when their results are
+      needed.</p>
+      </section>
+      <section id="gather-completion-order-and-timeouts" class="level3">
+      <h3><code>gather</code>, completion order, and timeouts</h3>
+      <pre class="python"><code># Results preserve the input order, not completion order.
+results = await asyncio.gather(*(fetch_one(url) for url in urls))
+
+# Consume results in completion order.
+for completed in asyncio.as_completed(
+    [fetch_one(url) for url in urls]
+):
+    result = await completed
+
+# Bound one operation or block. Raises TimeoutError on expiry.
+async with asyncio.timeout(2.0):
+    result = await fetch_one(url)</code></pre>
+      <p>Unlike <code>TaskGroup</code>, default <code>gather</code>
+      propagation of one exception does not automatically cancel other
+      already-scheduled awaitables. Choose deliberately rather than
+      treating the two APIs as interchangeable.</p>
+      </section>
+      <section id="bound-concurrent-work" class="level3">
+      <h3>Bound concurrent work</h3>
+      <p>A semaphore bounds active operations, though the following
+      still creates one task per URL and is therefore appropriate only
+      for a bounded input collection:</p>
+      <pre class="python"><code>import asyncio
+
+
+async def fetch_all(urls: list[str]) -&gt; list[bytes]:
+    semaphore = asyncio.Semaphore(20)
+
+    async def fetch_bounded(url: str) -&gt; bytes:
+        async with semaphore:
+            return await fetch_one(url)
+
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(fetch_bounded(url)) for url in urls]
+
+    return [task.result() for task in tasks]</code></pre>
+      <p>For a large or streaming input, use a fixed worker pool and a
+      bounded queue so both active operations and buffered work stay
+      bounded:</p>
+      <pre class="python"><code>import asyncio
+from collections.abc import Iterable
+
+STOP = object()
+
+
+async def worker(queue: asyncio.Queue[object]) -&gt; None:
+    while True:
+        item = await queue.get()
+        try:
+            if item is STOP:
+                return
+            await process(item)
+        finally:
+            queue.task_done()
+
+
+async def process_all(items: Iterable[object]) -&gt; None:
+    worker_count = 20
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=100)
+
+    async with asyncio.TaskGroup() as group:
+        for _ in range(worker_count):
+            group.create_task(worker(queue))
+
+        for item in items:
+            await queue.put(item)
+        await queue.join()
+
+        for _ in range(worker_count):
+            await queue.put(STOP)</code></pre>
+      <p><code>queue.task_done()</code> belongs in <code>finally</code>;
+      otherwise an exception or early return can leave
+      <code>queue.join()</code> blocked forever.</p>
+      </section>
+      <section id="cancellation-and-cleanup" class="level3">
+      <h3>Cancellation and cleanup</h3>
+      <p>Cancellation is normal control flow in async programs. Use
+      async context managers for resources, put cleanup in
+      <code>finally</code>, and do not swallow
+      <code>CancelledError</code>:</p>
+      <pre class="python"><code>import asyncio
+
+
+async def consume(connection: Connection) -&gt; None:
+    try:
+        async with connection:
+            while message := await connection.receive():
+                await handle(message)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        record_disconnect()</code></pre>
+      <p>A broad <code>except BaseException</code> catches cancellation.
+      A normal <code>except Exception</code> does not catch
+      <code>asyncio.CancelledError</code> on supported Python
+      versions.</p>
+      </section>
+      <section id="locks-and-blocking-code" class="level3">
+      <h3>Locks and blocking code</h3>
+      <p>Protect state transitions that span an <code>await</code>:</p>
+      <pre class="python"><code>lock = asyncio.Lock()
+
+async with lock:
+    current = balances[account_id]
+    updated = await validate_update(current, change)
+    balances[account_id] = updated</code></pre>
+      <p>Keep critical sections small. Do not hold a lock while awaiting
+      unrelated slow I/O.</p>
+      <p>Move a blocking I/O call off the event-loop thread:</p>
+      <pre class="python"><code>contents = await asyncio.to_thread(path.read_bytes)</code></pre>
+      <p><code>to_thread</code> is mainly for blocking I/O. Use a
+      process pool or native code that releases the GIL for CPU-bound
+      parallel work.</p>
+      </section>
+      <section id="async-failure-checklist" class="level3">
+      <h3>Async failure checklist</h3>
+      <p>When async code hangs or behaves sequentially, check these
+      first:</p>
+      <ol type="1">
+      <li>A blocking call such as <code>time.sleep</code>, synchronous
+      HTTP, or ordinary file I/O is running on the event-loop
+      thread.</li>
+      <li>Coroutines are created but never awaited or scheduled.</li>
+      <li>Independent operations are awaited one at a time instead of
+      placed in a <code>TaskGroup</code>.</li>
+      <li>A queue consumer forgot <code>task_done</code>, or shutdown
+      sent too few sentinels.</li>
+      <li>A lock is held across slow or re-entrant work.</li>
+      <li>Cancellation is caught and suppressed.</li>
+      <li>Tasks are created without a bound, retained reference, or
+      observed result.</li>
+      </ol>
+      <p>Use <code>await asyncio.sleep(delay)</code>, not
+      <code>time.sleep(delay)</code>, inside async code.</p>
+      </section>
+      </section>
+      </section>
+      <p class="no-results" id="no-results">No sections match that search.</p>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const storageKey = "python-cheat-sheet:completed:v1";
+      const sections = Array.from(document.querySelectorAll(".level2"));
+      const nav = document.getElementById("section-nav");
+      const picker = document.getElementById("section-picker");
+      const search = document.getElementById("search");
+      const searchStatus = document.getElementById("search-status");
+      const noResults = document.getElementById("no-results");
+      const progressCount = document.getElementById("progress-count");
+      const progressMeter = document.getElementById("progress-meter");
+      const pageProgress = document.getElementById("page-progress");
+      const navLinks = new Map();
+      const completeButtons = new Map();
+
+      function loadCompleted() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(storageKey) || "[]");
+          return new Set(Array.isArray(parsed) ? parsed : []);
+        } catch (_) {
+          return new Set();
+        }
+      }
+
+      let completed = loadCompleted();
+
+      function storeCompleted() {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(Array.from(completed)));
+        } catch (_) {}
+      }
+
+      function updateProgress() {
+        const validCompleted = sections.filter((section) => completed.has(section.id));
+        const percentage = sections.length === 0
+          ? 0
+          : Math.round((validCompleted.length / sections.length) * 100);
+        progressCount.textContent = validCompleted.length + " / " + sections.length;
+        progressMeter.style.width = percentage + "%";
+
+        sections.forEach((section) => {
+          const isComplete = completed.has(section.id);
+          const link = navLinks.get(section.id);
+          const button = completeButtons.get(section.id);
+          link.classList.toggle("completed", isComplete);
+          button.setAttribute("aria-pressed", String(isComplete));
+          button.textContent = isComplete ? "✓ Complete" : "Mark complete";
+        });
+      }
+
+      sections.forEach((section, index) => {
+        const heading = section.querySelector(":scope > h2");
+        if (!heading) return;
+
+        const headingRow = document.createElement("div");
+        headingRow.className = "section-heading";
+        section.insertBefore(headingRow, heading);
+        headingRow.appendChild(heading);
+
+        const completeButton = document.createElement("button");
+        completeButton.type = "button";
+        completeButton.className = "complete-button";
+        completeButton.addEventListener("click", () => {
+          if (completed.has(section.id)) completed.delete(section.id);
+          else completed.add(section.id);
+          storeCompleted();
+          updateProgress();
+        });
+        headingRow.appendChild(completeButton);
+        completeButtons.set(section.id, completeButton);
+
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = "#" + section.id;
+        link.textContent = heading.textContent;
+        item.appendChild(link);
+        nav.appendChild(item);
+        navLinks.set(section.id, link);
+
+        const option = document.createElement("option");
+        option.value = section.id;
+        option.textContent = (index + 1) + ". " + heading.textContent;
+        picker.appendChild(option);
+      });
+
+      updateProgress();
+
+      document.querySelectorAll("pre").forEach((pre) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "code-block";
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(pre);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "copy-button";
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", "Copy code example");
+        button.addEventListener("click", async () => {
+          const text = pre.textContent;
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(text);
+            } else {
+              const textarea = document.createElement("textarea");
+              textarea.value = text;
+              textarea.style.position = "fixed";
+              textarea.style.opacity = "0";
+              document.body.appendChild(textarea);
+              textarea.select();
+              document.execCommand("copy");
+              textarea.remove();
+            }
+            button.textContent = "Copied";
+          } catch (_) {
+            button.textContent = "Select code";
+          }
+          window.setTimeout(() => { button.textContent = "Copy"; }, 1400);
+        });
+        wrapper.appendChild(button);
+      });
+
+      document.querySelectorAll("table").forEach((table) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "table-wrap";
+        table.parentNode.insertBefore(wrapper, table);
+        wrapper.appendChild(table);
+      });
+
+      function filterSections() {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visibleCount = 0;
+
+        sections.forEach((section) => {
+          const visible = !query || section.textContent.toLocaleLowerCase().includes(query);
+          section.hidden = !visible;
+          navLinks.get(section.id).parentElement.hidden = !visible;
+          if (visible) visibleCount += 1;
+        });
+
+        noResults.classList.toggle("visible", visibleCount === 0);
+        searchStatus.textContent = query
+          ? visibleCount + " of " + sections.length + " sections match"
+          : sections.length + " sections · mark each complete as you review it";
+      }
+
+      search.addEventListener("input", filterSections);
+      filterSections();
+
+      picker.addEventListener("change", () => {
+        if (!picker.value) return;
+        search.value = "";
+        filterSections();
+        document.getElementById(picker.value).scrollIntoView();
+        picker.value = "";
+      });
+
+      document.getElementById("reset-progress").addEventListener("click", () => {
+        completed = new Set();
+        storeCompleted();
+        updateProgress();
+      });
+
+      const themeToggle = document.getElementById("theme-toggle");
+      function updateThemeLabel() {
+        const isDark = getComputedStyle(document.documentElement).colorScheme === "dark";
+        themeToggle.textContent = isDark ? "Light mode" : "Dark mode";
+      }
+      themeToggle.addEventListener("click", () => {
+        const isDark = getComputedStyle(document.documentElement).colorScheme === "dark";
+        const theme = isDark ? "light" : "dark";
+        document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem("python-cheat-sheet:theme", theme); } catch (_) {}
+        updateThemeLabel();
+      });
+      updateThemeLabel();
+
+      document.addEventListener("keydown", (event) => {
+        const editing = event.target instanceof HTMLInputElement ||
+          event.target instanceof HTMLTextAreaElement ||
+          event.target instanceof HTMLSelectElement;
+        if (event.key === "/" && !editing) {
+          event.preventDefault();
+          search.focus();
+        } else if (event.key === "Escape" && document.activeElement === search) {
+          search.value = "";
+          filterSections();
+          search.blur();
+        }
+      });
+
+      if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            navLinks.forEach((link) => link.classList.remove("active"));
+            const active = navLinks.get(entry.target.id);
+            if (active) active.classList.add("active");
+          });
+        }, { rootMargin: "-18% 0px -68% 0px" });
+        sections.forEach((section) => observer.observe(section));
+      }
+
+      function updatePageProgress() {
+        const root = document.documentElement;
+        const distance = root.scrollHeight - root.clientHeight;
+        const percentage = distance <= 0 ? 100 : (root.scrollTop / distance) * 100;
+        pageProgress.style.width = Math.min(100, Math.max(0, percentage)) + "%";
+      }
+      document.addEventListener("scroll", updatePageProgress, { passive: true });
+      window.addEventListener("resize", updatePageProgress);
+      updatePageProgress();
+    })();
+  </script>
+</body>
+</html>
