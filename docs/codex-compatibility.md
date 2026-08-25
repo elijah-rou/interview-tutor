@@ -17,7 +17,7 @@ Both transports require visible in-app consent before version probing, authentic
 
 ## Pi default
 
-Install trusted Pi 0.84.2, configure its default model/provider and credentials, then run `./interview`. Interview Tutor supplies no model override: Pi uses that configured default. The Codex compatibility backend likewise uses Codex's configured default, which the accepted app-server subset does not report. The executable resolves from `INTERVIEW_TUTOR_PI_EXECUTABLE` and then `PATH`. Only exact `pi --version` output `0.84.2` is accepted.
+Install trusted Pi 0.84.3, configure its default model/provider and credentials, then run `./interview`. Interview Tutor supplies no model override: Pi uses that configured default. The Codex compatibility backend likewise uses Codex's configured default, which the accepted app-server subset does not report. The executable resolves from `INTERVIEW_TUTOR_PI_EXECUTABLE` and then `PATH`. Only exact `pi --version` output `0.84.3` is accepted.
 
 The resolved executable must be a regular file owned by the effective user or root and must not be group- or world-writable. Device, inode, owner, mode, size, and change timestamps are checked before and after the bounded version probe and again before RPC spawn. This reduces replacement races and establishes compatibility, not provenance.
 
@@ -30,7 +30,7 @@ pi --mode rpc --no-session --no-tools --no-extensions --no-skills \
 
 The process is retained only for one structured-output correction, then terminated and reaped. The environment is cleared. Interview Tutor restores a bounded allowlist for `HOME`, `PATH`, locale, proxy, certificate, Pi agent/package directories, documented provider credential variables, and cloud-provider authentication variables. It forces `PI_OFFLINE=1`, `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0`, and `NO_COLOR=1`. Secrets are never placed on argv or application logs.
 
-The exact Pi 0.84.2 provider credential allowlist is:
+The exact Pi 0.84.3 provider credential allowlist is:
 
 ```text
 ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN
@@ -62,7 +62,7 @@ GOOGLE_CLOUD_PROJECT GCLOUD_PROJECT GOOGLE_CLOUD_LOCATION PI_CACHE_RETENTION
 
 This list follows the pinned provider key map, provider implementations, and cloud-provider requirements. IRSA requires `AWS_ROLE_ARN` plus `AWS_WEB_IDENTITY_TOKEN_FILE`; `AWS_ROLE_SESSION_NAME` is optional. Vertex ADC requires its credentials path or default ADC under `HOME`, project, and location. No arbitrary environment variables are inherited.
 
-Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. A credential whose `auth.json` key begins with `!command` causes Pi to execute that command through a shell and use its stdout, as documented by Pi 0.84.2. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
+Pi can read its selected settings, models, auth file, and allowlisted provider-auth environment and can contact the selected model provider for the disclosed turn. A credential whose `auth.json` key begins with `!command` causes Pi to execute that command through a shell and use its stdout, as documented by Pi 0.84.3. Session persistence, tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations are disabled. These controls are a bounded execution profile, not proof that a trusted executable or provider is safe.
 
 ### Pi RPC contract
 

@@ -29,7 +29,7 @@ def emit(value):
 
 if "--version" in sys.argv:
     record({"kind": "version"})
-    print("0.84.2")
+    print("0.84.3")
     raise SystemExit(0)
 
 expected = [

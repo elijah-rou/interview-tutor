@@ -30,6 +30,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const SUPPORTED_PI_VERSION: &str = "0.84.3";
 const _: () = assert!(PROTOCOL_QUEUE_CAPACITY >= 1);
 const _: () = assert!(MAX_PROTOCOL_AGGREGATE_BYTES >= MAX_JSON_RECORD_BYTES);
 
@@ -1483,10 +1484,12 @@ fn validate_validated_version_with_timeout(
             )
         })?
         .trim();
-    if version != "0.84.2" {
+    if version != SUPPORTED_PI_VERSION {
         return Err(InterviewerError::configuration(
             Backend::Pi,
-            format!("unsupported Pi CLI {version}; install verified version 0.84.2"),
+            format!(
+                "unsupported Pi CLI {version}; install verified version {SUPPORTED_PI_VERSION}"
+            ),
         ));
     }
     Ok(())
@@ -2096,12 +2099,14 @@ mod tests {
     fn exact_version_and_trusted_executable_are_required() {
         let directory = empty_temp_dir().unwrap();
         let executable = directory.join("pi");
-        fs::write(&executable, "#!/bin/sh\necho 0.84.1\n").unwrap();
+        fs::write(&executable, "#!/bin/sh\necho 0.84.3\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        validate_version(&executable, &CancellationToken::new()).unwrap();
+        fs::write(&executable, "#!/bin/sh\necho 0.84.2\n").unwrap();
         assert!(
             validate_version(&executable, &CancellationToken::new())
                 .unwrap_err()
-                .contains("0.84.2")
+                .contains("0.84.3")
         );
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o720)).unwrap();
         assert!(
@@ -2148,7 +2153,7 @@ mod tests {
         fs::write(
             &replacing,
             format!(
-                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then mv '{}' '{}'; printf '0.84.2\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\nif [ \"${{1-}}\" = --version ]; then mv '{}' '{}'; printf '0.84.3\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
                 replacement.display(), replacing.display(), fake_executable().display()
             ),
         )
