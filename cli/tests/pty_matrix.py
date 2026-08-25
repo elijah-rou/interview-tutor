@@ -23,6 +23,8 @@ F5 = b"\x1b[15~"
 F9 = b"\x1b[20~"
 HOME = b"\x1b[H"
 END = b"\x1b[F"
+ARROW_UP = b"\x1b[A"
+ARROW_DOWN = b"\x1b[B"
 SHIFT_TAB = b"\x1b[Z"
 CTRL_C = b"\x03"
 CTRL_Q = b"\x11"
@@ -723,6 +725,12 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.wait_screen("compact-question-0-")
         session.send(END)
         session.wait_screen("compact-question-5-")
+        session.send(b"i")
+        session.send(ARROW_UP * 40)
+        session.wait_screen("compact-question-0-")
+        session.send(ARROW_DOWN * 40)
+        session.wait_screen("compact-question-5-")
+        session.send(ESCAPE)
 
         session.send(b"\t")
         session.wait_screen("Editor · Neovim [active]")
@@ -775,7 +783,7 @@ def compact_case(fixture: MatrixFixture) -> str:
         session.wait_screen("Editor · Neovim [active]")
         quit_from_editor(session)
     assert_codex_cleanup(home)
-    return "attempts test=0 submit=1(pass) turns=9 tutor-question+help toggle=preserved compact=80x24 status=0"
+    return "attempts test=0 submit=1(pass) turns=9 tutor-question+help toggle=preserved composer-scroll=arrows compact=80x24 status=0"
 
 
 def autosave_back_case(fixture: MatrixFixture) -> str:

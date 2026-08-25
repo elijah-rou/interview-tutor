@@ -1587,6 +1587,21 @@ fn routes_mouse_to_neovim(state: &AppState) -> bool {
             .is_some_and(|solve| solve.pane == SolvePane::Editor)
 }
 
+fn accessory_mouse_scroll_action(
+    state: &AppState,
+    kind: crossterm::event::MouseEventKind,
+) -> Option<crate::app::Action> {
+    let solve = state.solve.as_ref()?;
+    if solve.pane == SolvePane::Editor {
+        return None;
+    }
+    match kind {
+        crossterm::event::MouseEventKind::ScrollUp => Some(crate::app::Action::Up),
+        crossterm::event::MouseEventKind::ScrollDown => Some(crate::app::Action::Down),
+        _ => None,
+    }
+}
+
 fn neovim_mouse_kind(
     kind: crossterm::event::MouseEventKind,
 ) -> Option<(&'static str, &'static str)> {
@@ -1990,7 +2005,16 @@ pub fn run(
                     let size = terminal
                         .size()
                         .map_err(|error| format!("cannot read terminal size: {error}"))?;
-                    if routes_mouse_to_neovim(&state)
+                    if let Some(action) = accessory_mouse_scroll_action(&state, mouse.kind) {
+                        apply_event(
+                            &mut state,
+                            &repository,
+                            &root,
+                            &mut workers,
+                            Event::Command(action),
+                        );
+                        needs_draw = true;
+                    } else if routes_mouse_to_neovim(&state)
                         && let Some(area) =
                             render::neovim_grid_area(&state, size.width, size.height)
                         && mouse.column >= area.x
@@ -2295,6 +2319,27 @@ mod tests {
         assert!(!routes_mouse_to_neovim(&state));
         state.solve.as_mut().unwrap().pane = SolvePane::Editor;
         assert!(routes_mouse_to_neovim(&state));
+    }
+
+    #[test]
+    fn accessory_mouse_wheel_scrolls_the_host_pane_with_the_composer_open() {
+        use crossterm::event::MouseEventKind;
+        let mut state = interviewer_solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.composer_focused = true;
+        assert_eq!(
+            accessory_mouse_scroll_action(&state, MouseEventKind::ScrollUp),
+            Some(crate::app::Action::Up)
+        );
+        assert_eq!(
+            accessory_mouse_scroll_action(&state, MouseEventKind::ScrollDown),
+            Some(crate::app::Action::Down)
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Editor;
+        assert_eq!(
+            accessory_mouse_scroll_action(&state, MouseEventKind::ScrollUp),
+            None
+        );
     }
 
     #[test]

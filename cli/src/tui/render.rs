@@ -212,9 +212,9 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
         ]
     } else if solve.pane == SolvePane::Interview && state.interviewer.composer_focused {
         vec![
-            "Type question · PgUp/PgDn/Home/End scroll · Enter send · Esc close · Tab panes"
+            "Type question · ↑/↓/PgUp/PgDn/Home/End scroll · Enter send · Esc close · Tab panes"
                 .to_string(),
-            "Enter send · Esc close · PgUp/PgDn scroll · Tab panes".to_string(),
+            "Enter send · Esc close · ↑/↓/PgUp/PgDn scroll · Tab panes".to_string(),
         ]
     } else {
         match (solve.pane, solve.editor.mode) {
@@ -740,11 +740,6 @@ fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
         return None;
     }
     let solve = state.solve.as_ref()?;
-    let vertical = if solve.accessory_panes.output_expanded {
-        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(area)
-    } else {
-        Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(area)
-    };
     let problem_width = side_width(
         area.width,
         solve.accessory_panes.problem_expanded,
@@ -756,17 +751,20 @@ fn full_solve_layout(state: &AppState, area: Rect) -> Option<FullSolveLayout> {
         solve.pane == SolvePane::Interview,
     );
     assert!(problem_width.saturating_add(interview_width) < area.width);
-    let upper = Layout::horizontal([
-        Constraint::Length(problem_width),
-        Constraint::Min(1),
-        Constraint::Length(interview_width),
-    ])
-    .split(vertical[0]);
+    let columns =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(interview_width)]).split(area);
+    let left = if solve.accessory_panes.output_expanded {
+        Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]).split(columns[0])
+    } else {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(columns[0])
+    };
+    let upper =
+        Layout::horizontal([Constraint::Length(problem_width), Constraint::Min(1)]).split(left[0]);
     Some(FullSolveLayout {
         problem: upper[0],
         editor: upper[1],
-        interview: upper[2],
-        output: vertical[1],
+        interview: columns[1],
+        output: left[1],
     })
 }
 
@@ -1513,6 +1511,10 @@ mod tests {
         let layout = |state: &AppState| full_solve_layout(state, area).unwrap();
         let base = layout(&state);
         assert_eq!(base.problem.width, 33, "unfocused expanded problem width");
+        assert_eq!(base.interview.y, area.y);
+        assert_eq!(base.interview.height, area.height);
+        assert_eq!(base.output.right(), base.interview.x);
+        assert_eq!(base.output.width, area.width - base.interview.width);
         assert_eq!(
             base.interview.width, 33,
             "unfocused expanded interview width"

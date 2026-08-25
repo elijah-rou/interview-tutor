@@ -88,6 +88,8 @@ pub fn action_for_key(key: KeyEvent, state: &mut AppState) -> Option<Action> {
 
     if pane == crate::app::model::SolvePane::Interview {
         let scroll_action = match key.code {
+            KeyCode::Up => Some(Action::Up),
+            KeyCode::Down => Some(Action::Down),
             KeyCode::PageUp => Some(Action::InterviewPageOlder),
             KeyCode::PageDown => Some(Action::InterviewPageNewer),
             KeyCode::Home => Some(Action::InterviewOldest),
@@ -374,11 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn interview_page_and_endpoint_scroll_keys_precede_the_composer() {
+    fn interview_row_page_and_endpoint_scroll_keys_precede_the_composer() {
         let mut state = solve_state();
         state.solve.as_mut().unwrap().pane = SolvePane::Interview;
         state.interviewer.composer_focused = true;
         for (code, expected) in [
+            (KeyCode::Up, Action::Up),
+            (KeyCode::Down, Action::Down),
             (KeyCode::PageUp, Action::InterviewPageOlder),
             (KeyCode::PageDown, Action::InterviewPageNewer),
             (KeyCode::Home, Action::InterviewOldest),
