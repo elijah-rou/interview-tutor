@@ -1,5 +1,6 @@
 //! Set-agnostic Rust problem adapter registry.
 
+pub mod accounts_merge;
 pub mod alien_dictionary;
 pub mod best_time_to_buy_and_sell_stock;
 pub mod binary_tree_level_order_traversal;
@@ -15,6 +16,7 @@ pub mod counting_bits;
 pub mod course_schedule;
 pub mod decode_ways;
 pub mod design_add_and_search_words_data_structure;
+pub mod design_hit_counter;
 pub mod encode_and_decode_strings;
 pub mod find_median_from_data_stream;
 pub mod find_minimum_in_rotated_sorted_array;
@@ -23,6 +25,7 @@ pub mod group_anagrams;
 pub mod house_robber;
 pub mod house_robber_ii;
 pub mod implement_trie_prefix_tree;
+pub mod insert_delete_getrandom_o1;
 pub mod insert_interval;
 pub mod invert_binary_tree;
 pub mod jump_game;
@@ -100,6 +103,7 @@ impl Problem {
 
 pub const PROBLEMS: &[Problem] = &[
     Problem::new("3sum", three_sum::run_case),
+    Problem::new("accounts-merge", accounts_merge::run_case),
     Problem::new("alien-dictionary", alien_dictionary::run_case),
     Problem::new(
         "best-time-to-buy-and-sell-stock",
@@ -133,6 +137,7 @@ pub const PROBLEMS: &[Problem] = &[
         "design-add-and-search-words-data-structure",
         design_add_and_search_words_data_structure::run_case,
     ),
+    Problem::new("design-hit-counter", design_hit_counter::run_case),
     Problem::new(
         "encode-and-decode-strings",
         encode_and_decode_strings::run_case,
@@ -152,6 +157,10 @@ pub const PROBLEMS: &[Problem] = &[
     Problem::new(
         "implement-trie-prefix-tree",
         implement_trie_prefix_tree::run_case,
+    ),
+    Problem::new(
+        "insert-delete-getrandom-o1",
+        insert_delete_getrandom_o1::run_case,
     ),
     Problem::new("insert-interval", insert_interval::run_case),
     Problem::new("invert-binary-tree", invert_binary_tree::run_case),

@@ -80,9 +80,48 @@ EXPECTED_INTERVIEW_SETS = {
             "coin-change",
         ],
     },
+    "jane-street": {
+        "name": "Jane Street",
+        "members": [
+            "time-based-key-value-store",
+            "insert-delete-getrandom-o1",
+            "number-of-islands",
+            "insert-interval",
+            "find-median-from-data-stream",
+            "design-add-and-search-words-data-structure",
+            "design-hit-counter",
+            "accounts-merge",
+            "lru-cache",
+            "kth-largest-element-in-a-stream",
+            "search-in-rotated-sorted-array",
+            "construct-binary-tree-from-preorder-and-inorder-traversal",
+            "graph-valid-tree",
+            "longest-substring-without-repeating-characters",
+            "merge-intervals",
+        ],
+    },
 }
 
 EXPECTED_NEW_PROBLEMS = {
+    "accounts-merge": {
+        "title": "Accounts Merge",
+        "difficulty": "Medium",
+        "leetcode_id": 721,
+        "leetcode_url": "https://leetcode.com/problems/accounts-merge/",
+    },
+    "design-hit-counter": {
+        "title": "Design Hit Counter",
+        "difficulty": "Medium",
+        "leetcode_id": 362,
+        "leetcode_url": "https://leetcode.com/problems/design-hit-counter/",
+        "premium": True,
+    },
+    "insert-delete-getrandom-o1": {
+        "title": "Insert Delete GetRandom O(1)",
+        "difficulty": "Medium",
+        "leetcode_id": 380,
+        "leetcode_url": "https://leetcode.com/problems/insert-delete-getrandom-o1/",
+    },
     "subarray-sum-equals-k": {
         "title": "Subarray Sum Equals K",
         "difficulty": "Medium",
@@ -149,9 +188,9 @@ class CatalogContentTests(unittest.TestCase):
         self.assertEqual(len(set(statements)), len(statements))
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
-    def test_catalog_has_82_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 5)
-        self.assertEqual(len(self.problems), 82)
+    def test_catalog_has_85_problems_and_expected_new_canonical_metadata(self) -> None:
+        self.assertEqual(self.catalog["catalog_revision"], 6)
+        self.assertEqual(len(self.problems), 85)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
             with self.subTest(slug=slug):
@@ -160,13 +199,13 @@ class CatalogContentTests(unittest.TestCase):
                     {field: problem[field] for field in expected},
                     expected,
                 )
-                self.assertFalse(problem["premium"])
+                self.assertEqual(problem["premium"], expected.get("premium", False))
                 self.assertEqual(problem["test_revision"], 1)
 
-    def test_all_five_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
+    def test_all_six_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
         self.assertEqual(
             set(self.problem_sets),
-            {"anti-metal", "blind75", "convex", "core", "depot"},
+            {"anti-metal", "blind75", "convex", "core", "depot", "jane-street"},
         )
 
         blind75_members = self.problem_sets["blind75"]["members"]

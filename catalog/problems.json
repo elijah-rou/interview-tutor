@@ -24,6 +24,28 @@
       ]
     },
     {
+      "slug": "accounts-merge",
+      "title": "Accounts Merge",
+      "difficulty": "Medium",
+      "topic": "Graphs",
+      "leetcode_id": 721,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/accounts-merge/",
+      "neetcode_url": "https://neetcode.io/problems/accounts-merge/question",
+      "statement_markdown": "## Task\n\nGiven accounts whose first field is a name and remaining fields are email addresses, merge accounts that share any email directly or transitively. Every merged account starts with its name followed by its distinct emails in sorted order. Account ordering is unrestricted.\n\n## Example\n\nAccounts `[John, a@mail, b@mail]`, `[John, b@mail, c@mail]`, and `[Mary, m@mail]` merge into `[John, a@mail, b@mail, c@mail]` and `[Mary, m@mail]`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/accounts_merge.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/accounts_merge.rs"
+        }
+      ]
+    },
+    {
       "slug": "alien-dictionary",
       "title": "Alien Dictionary",
       "difficulty": "Hard",
@@ -354,6 +376,28 @@
       ]
     },
     {
+      "slug": "design-hit-counter",
+      "title": "Design Hit Counter",
+      "difficulty": "Medium",
+      "topic": "Design",
+      "leetcode_id": 362,
+      "premium": true,
+      "leetcode_url": "https://leetcode.com/problems/design-hit-counter/",
+      "neetcode_url": "https://neetcode.io/problems/design-hit-counter/question",
+      "statement_markdown": "## Task\n\nCreate or initialize a counter that records hits at integer timestamps and returns the number recorded during the five minutes ending at a query timestamp. Timestamps arrive in nondecreasing order, and a hit exactly 300 seconds before a query is outside the window.\n\n## Example\n\nAfter hits at timestamps `1`, `2`, and `3`, a query at `4` returns `3`; after another hit at `300`, a query at `300` returns `4` and a query at `301` returns `3`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/design_hit_counter.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/design_hit_counter.rs"
+        }
+      ]
+    },
+    {
       "slug": "encode-and-decode-strings",
       "title": "Encode and Decode Strings",
       "difficulty": "Medium",
@@ -526,6 +570,28 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/implement_trie_prefix_tree.rs"
+        }
+      ]
+    },
+    {
+      "slug": "insert-delete-getrandom-o1",
+      "title": "Insert Delete GetRandom O(1)",
+      "difficulty": "Medium",
+      "topic": "Design",
+      "leetcode_id": 380,
+      "premium": false,
+      "leetcode_url": "https://leetcode.com/problems/insert-delete-getrandom-o1/",
+      "neetcode_url": "https://neetcode.io/problems/randomized-set/question",
+      "statement_markdown": "## Task\n\nCreate or initialize a set that supports inserting a value, removing a value, and returning a uniformly random stored value. Insert and remove report whether they changed the set. Each operation must take expected constant time. A random value is requested only while the set is nonempty.\n\n## Example\n\nInsert `1`, remove absent value `2`, insert `2`, then request a random value; the result is either `1` or `2`. After removing `1`, the next random value is `2`.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/insert_delete_getrandom_o1.py"
+        },
+        {
+          "language": "rust",
+          "solution_path": "rust/src/problems/insert_delete_getrandom_o1.rs"
         }
       ]
     },
@@ -1806,5 +1872,5 @@
       ]
     }
   ],
-  "catalog_revision": 5
+  "catalog_revision": 6
 }

@@ -1,6 +1,6 @@
 # Problem sets
 
-A problem set is metadata plus an ordered list of global problem slugs. It never copies titles, difficulty, tests, source paths, or completion. Five sets ship against the 82-problem global catalog:
+A problem set is metadata plus an ordered list of global problem slugs. It never copies titles, difficulty, tests, source paths, or completion. Six sets ship against the 85-problem global catalog:
 
 | ID | Name | Members |
 | --- | --- | ---: |
@@ -9,7 +9,8 @@ A problem set is metadata plus an ordered list of global problem slugs. It never
 | `convex` | Convex | 10 |
 | `core` | Core | 17 |
 | `depot` | Depot | 10 |
+| `jane-street` | Jane Street | 15 |
 
-No LeetCode round is publicly evidenced for Depot; this is the bounded preparation set. Blind 75 remains an exact 75-member set rather than an alias for the larger catalog. The [anti-metal notes](anti-metal.md) and [Core notes](core.md) preserve grouping and per-problem rationales outside the v2 JSON because that schema intentionally represents only ordered membership.
+No LeetCode round is publicly evidenced for Depot; this is the bounded preparation set. Blind 75 remains an exact 75-member set rather than an alias for the larger catalog. The [anti-metal notes](anti-metal.md), [Core notes](core.md), and [Jane Street notes](jane-street.md) preserve grouping and per-problem rationales outside the v2 JSON because that schema intentionally represents only ordered membership.
 
 Create and compose local sets through `practice sets create/add/move/remove`. Local sets live in the runtime database. Checked-in JSON files are versioned distribution seeds validated against the global catalog.

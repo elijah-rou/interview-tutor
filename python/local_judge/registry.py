@@ -13,6 +13,7 @@ class Problem:
 
 PROBLEMS = (
     Problem("3sum", "problems/medium/3sum.py", "Solution", "threeSum"),
+    Problem("accounts-merge", "problems/medium/accounts_merge.py", "Solution", "accountsMerge"),
     Problem("alien-dictionary", "problems/hard/alien_dictionary.py", "Solution", "alienOrder"),
     Problem(
         "best-time-to-buy-and-sell-stock",
@@ -61,6 +62,12 @@ PROBLEMS = (
         None,
     ),
     Problem(
+        "design-hit-counter",
+        "problems/medium/design_hit_counter.py",
+        "HitCounter",
+        None,
+    ),
+    Problem(
         "encode-and-decode-strings", "problems/medium/encode_and_decode_strings.py", "Codec", None
     ),
     Problem(
@@ -81,6 +88,12 @@ PROBLEMS = (
     Problem("house-robber-ii", "problems/medium/house_robber_ii.py", "Solution", "rob"),
     Problem(
         "implement-trie-prefix-tree", "problems/medium/implement_trie_prefix_tree.py", "Trie", None
+    ),
+    Problem(
+        "insert-delete-getrandom-o1",
+        "problems/medium/insert_delete_getrandom_o1.py",
+        "RandomizedSet",
+        None,
     ),
     Problem("insert-interval", "problems/medium/insert_interval.py", "Solution", "insert"),
     Problem("invert-binary-tree", "problems/easy/invert_binary_tree.py", "Solution", "invertTree"),

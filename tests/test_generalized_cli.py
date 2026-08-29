@@ -65,6 +65,23 @@ EXPECTED_INTERVIEW_SETS = {
         "kth-largest-element-in-a-stream",
         "coin-change",
     ],
+    "jane-street": [
+        "time-based-key-value-store",
+        "insert-delete-getrandom-o1",
+        "number-of-islands",
+        "insert-interval",
+        "find-median-from-data-stream",
+        "design-add-and-search-words-data-structure",
+        "design-hit-counter",
+        "accounts-merge",
+        "lru-cache",
+        "kth-largest-element-in-a-stream",
+        "search-in-rotated-sorted-array",
+        "construct-binary-tree-from-preorder-and-inorder-traversal",
+        "graph-valid-tree",
+        "longest-substring-without-repeating-characters",
+        "merge-intervals",
+    ],
 }
 
 
@@ -165,9 +182,9 @@ class GeneralizedCliTests(unittest.TestCase):
         rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
         self.assertEqual(
             [row[0] for row in rows],
-            ["anti-metal", "blind75", "convex", "core", "depot"],
+            ["anti-metal", "blind75", "convex", "core", "depot", "jane-street"],
         )
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10", "15"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -526,7 +543,7 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(
             global_stats.stdout.splitlines()[0],
-            "All Problems progress (python): 1/82 (1.2%)",
+            "All Problems progress (python): 1/85 (1.2%)",
         )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:

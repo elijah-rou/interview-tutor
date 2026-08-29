@@ -114,6 +114,20 @@ def test_3sum(module: ModuleType) -> None:
     assert_equal(sorted(sorted(group) for group in actual), [[-1, -1, 2], [-1, 0, 1]])
 
 
+def test_accounts_merge(module: ModuleType) -> None:
+    accounts = [
+        ["John", "a@mail", "b@mail"],
+        ["John", "b@mail", "c@mail"],
+        ["Mary", "m@mail"],
+    ]
+    actual = call_solution(module, "accountsMerge", accounts)
+    normalized = sorted([account[0], *sorted(account[1:])] for account in actual)
+    assert_equal(
+        normalized,
+        [["John", "a@mail", "b@mail", "c@mail"], ["Mary", "m@mail"]],
+    )
+
+
 def test_alien_dictionary(module: ModuleType) -> None:
     assert_equal(call_solution(module, "alienOrder", ["wrt", "wrf", "er", "ett", "rftt"]), "wertf")
 
@@ -180,6 +194,17 @@ def test_word_dictionary(module: ModuleType) -> None:
     assert_equal(value.search(".ad"), True)
 
 
+def test_hit_counter(module: ModuleType) -> None:
+    counter = module.HitCounter()
+    counter.hit(1)
+    counter.hit(2)
+    counter.hit(3)
+    assert_equal(counter.getHits(4), 3)
+    counter.hit(300)
+    assert_equal(counter.getHits(300), 4)
+    assert_equal(counter.getHits(301), 3)
+
+
 def test_encode_decode(module: ModuleType) -> None:
     values = ["lint", "code", "", "a#b"]
     codec = module.Codec()
@@ -212,6 +237,18 @@ def test_invert_binary_tree(module: ModuleType) -> None:
         tree_values(call_solution(module, "invertTree", tree([4, 2, 7, 1, 3, 6, 9]))),
         [4, 7, 2, 9, 6, 3, 1],
     )
+
+
+def test_randomized_set(module: ModuleType) -> None:
+    values = module.RandomizedSet()
+    assert_equal(values.insert(1), True)
+    assert_equal(values.remove(2), False)
+    assert_equal(values.insert(2), True)
+    if values.getRandom() not in {1, 2}:
+        raise AssertionError("random value must be a stored member")
+    assert_equal(values.remove(1), True)
+    assert_equal(values.insert(2), False)
+    assert_equal(values.getRandom(), 2)
 
 
 def test_kth_largest_stream(module: ModuleType) -> None:
@@ -373,6 +410,7 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "two-sum": test_two_sum,
     "two-sum-ii-input-array-is-sorted": test_two_sum_ii,
     "3sum": test_3sum,
+    "accounts-merge": test_accounts_merge,
     "alien-dictionary": test_alien_dictionary,
     "binary-tree-level-order-traversal": test_binary_tree_level_order_traversal,
     "maximum-depth-of-binary-tree": test_binary_tree_maximum_depth,
@@ -381,10 +419,12 @@ CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
     "combination-sum": test_combination_sum,
     "construct-binary-tree-from-preorder-and-inorder-traversal": test_construct_tree,
     "design-add-and-search-words-data-structure": test_word_dictionary,
+    "design-hit-counter": test_hit_counter,
     "encode-and-decode-strings": test_encode_decode,
     "find-median-from-data-stream": test_median_finder,
     "group-anagrams": test_group_anagrams,
     "implement-trie-prefix-tree": test_trie,
+    "insert-delete-getrandom-o1": test_randomized_set,
     "invert-binary-tree": test_invert_binary_tree,
     "kth-largest-element-in-a-stream": test_kth_largest_stream,
     "kth-smallest-element-in-a-bst": test_kth_smallest,
