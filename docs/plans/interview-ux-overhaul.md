@@ -44,7 +44,7 @@
 1. Introduce `interviewer/` domain modules for mode, strict prompt/response envelopes, transcript, hint accounting, typed errors, and backend-neutral session behavior. Retain Codex transport under `codex/`; add Pi transport under `pi/`.
 2. Generalize Codex-named app state/effects/events/worker/UI to Interviewer equivalents. Use one race-safe worker and one selected transport, not parallel duplicated workers.
 3. Add `--interviewer <pi|codex|none>` with precedence: CLI, legacy `--no-codex`→none, `INTERVIEW_TUTOR_INTERVIEWER`, default `pi`. Reject conflicts/invalid/empty values. Add `INTERVIEW_TUTOR_PI_EXECUTABLE`; retain the Codex variable.
-4. Pin compatibility to Pi 0.84.3. Canonicalize and verify executable identity before and after the bounded version probe; require a regular effective-user/root-owned file that is not group/world writable.
+4. Pin compatibility to Pi 0.84.4. Canonicalize and verify executable identity before and after the bounded version probe; require a regular effective-user/root-owned file that is not group/world writable.
 5. Launch Pi in a mode-0700 empty cwd and fresh process group:
    `pi --mode rpc --no-session --no-tools --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`.
    Clear the environment, then copy a documented Pi/provider-auth allowlist; force update checks and telemetry off. Never pass secrets on argv.

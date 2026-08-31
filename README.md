@@ -11,7 +11,7 @@ Required on Linux:
 - GNU Make and GNU coreutils (`timeout` and `readlink -f`)
 - a UTF-8, `xterm-256color`-compatible terminal for the TUI
 
-SQLite is bundled into the Rust CLI. Neovim 0.9 through 1.x is required for the embedded interview editor; Turso and the Pi/Codex interviewer executables are optional. Pi integration accepts exactly Pi 0.84.3.
+SQLite is bundled into the Rust CLI. Neovim 0.9 through 1.x is required for the embedded interview editor; Turso and the Pi/Codex interviewer executables are optional. Pi integration accepts exactly Pi 0.84.4.
 
 ```console
 git clone https://github.com/elijah-rou/interview-tutor.git
@@ -86,7 +86,7 @@ Problem metadata is independent of ordered set membership:
 
 ## Optional interviewer
 
-`./interview` defaults to Pi after an in-app disclosure. Install trusted Pi 0.84.3 and configure its default model provider. Interview Tutor does not override the model; Pi uses its configured default, and explicit Codex uses Codex's configured default. Each accepted application turn uses a fresh no-session RPC process with tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations disabled. Pi reads its own bounded configuration/auth inputs and may contact the selected model provider for the disclosed turn. Pi `auth.json` credentials beginning with `!command` execute that command through a shell, per Pi's credential resolution contract.
+`./interview` defaults to Pi after an in-app disclosure. Install trusted Pi 0.84.4 and configure its default model provider. Interview Tutor does not override the model; Pi uses its configured default, and explicit Codex uses Codex's configured default. Each accepted application turn uses a fresh no-session RPC process with tools/bash, extensions, skills, prompt templates, themes, context files, approvals, telemetry, update checks, and startup network operations disabled. Pi reads its own bounded configuration/auth inputs and may contact the selected model provider for the disclosed turn. Pi `auth.json` credentials beginning with `!command` execute that command through a shell, per Pi's credential resolution contract.
 
 Codex remains available only through `--interviewer codex` or `INTERVIEW_TUTOR_INTERVIEWER=codex`. Install a trusted Codex CLI and authenticate with `codex login`; versions 0.146.0 and 0.147.0 remain accepted exactly. There is no silent Pi/Codex fallback.
 

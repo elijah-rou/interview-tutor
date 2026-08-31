@@ -48,7 +48,7 @@ The host accepts at most 1 MiB and 100,000 logical lines. An oversized native op
 - `runner.rs` and `signals.rs`: shell-free execution, process groups, bounded output/events, cancellation, and signal finalization.
 - `app/` and `tui/`: pure effects/reducer state plus the terminal runtime and worker channels.
 - `interviewer/`: backend selection, typed errors, shared prompt/envelope validation, hint accounting, and bounded memory-only transcript.
-- `pi/`: pinned Pi 0.84.3 RPC transport with fresh per-turn processes and strict JSONL validation.
+- `pi/`: pinned Pi 0.84.4 RPC transport with fresh per-turn processes and strict JSONL validation.
 - `codex/`: exact-version Codex app-server compatibility transport.
 
 `runner::execute` is synchronous so the CLI can call it directly and the TUI can place it on one worker thread. Defaults are one direct child, a 30-second wall timeout, 250-ms TERM grace, 256-KiB rendered output, 8-KiB reads, and 64 queued events. Event delivery is nonblocking; the bounded final `ExecutionResult` is authoritative. The TUI reuses the same execution plan and recording APIs rather than parsing CLI output. See [architecture](../docs/architecture.md) and [testing](../docs/testing.md).
