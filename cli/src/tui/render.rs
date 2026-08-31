@@ -530,7 +530,7 @@ fn speaker_badge(label: &str, backend_name: &str) -> Line<'static> {
         badge(format!(" {label} "), Color::White)
     }
 }
-fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
+fn build_solve_interview(state: &AppState, area: Rect) -> (Paragraph<'static>, u16) {
     let solve = state.solve.as_ref().unwrap();
     let backend_name = state.interviewer.backend.display_name();
     let mut lines = vec![Line::from(format!(
@@ -670,23 +670,7 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
             lines.push(Line::from("Space-m mode · Space-r reset · Ctrl-C cancel"));
         }
     }
-    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-    let visible_rows = usize::from(area.height.saturating_sub(2)).max(1);
-    let wrapped_rows = lines
-        .iter()
-        .map(|line| {
-            let width = line
-                .spans
-                .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum::<usize>();
-            width.max(1).div_ceil(inner_width)
-        })
-        .sum::<usize>();
-    let latest_offset = wrapped_rows.saturating_sub(visible_rows);
-    let retained_below = usize::from(state.interviewer.scroll).min(latest_offset);
-    let offset = latest_offset.saturating_sub(retained_below);
-    Paragraph::new(lines)
+    let paragraph = Paragraph::new(lines)
         .block(block(&format!(
             "Interview{} [-] · {} mode",
             if solve.pane == SolvePane::Interview {
@@ -696,8 +680,19 @@ fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
             },
             state.interviewer.guidance_mode.display_name(),
         )))
-        .wrap(Wrap { trim: false })
-        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
+        .wrap(Wrap { trim: false });
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let latest_offset = paragraph
+        .line_count(inner_width)
+        .saturating_sub(usize::from(area.height));
+    let retained_below = usize::from(state.interviewer.scroll).min(latest_offset);
+    let offset = latest_offset.saturating_sub(retained_below);
+    let paragraph = paragraph.scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
+    (paragraph, u16::try_from(latest_offset).unwrap_or(u16::MAX))
+}
+
+fn solve_interview(state: &AppState, area: Rect) -> Paragraph<'static> {
+    build_solve_interview(state, area).0
 }
 const FULL_SOLVE_WIDTH: u16 = 100;
 const FULL_SOLVE_CONTENT_HEIGHT: u16 = 27;
@@ -870,6 +865,26 @@ pub fn neovim_grid_area(state: &AppState, width: u16, height: u16) -> Option<Rec
 
 pub fn neovim_grid_size(state: &AppState, width: u16, height: u16) -> Option<(u16, u16)> {
     neovim_grid_area(state, width, height).map(|area| (area.width, area.height))
+}
+
+fn interview_view_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
+    if state.screen != Screen::Solve || width < 60 || height < 20 {
+        return None;
+    }
+    let solve = state.solve.as_ref()?;
+    if !solve.accessory_panes.interview_expanded {
+        return None;
+    }
+    let content = Rect::new(0, 2, width, height.saturating_sub(3));
+    if let Some(layout) = full_solve_layout(state, content) {
+        return Some(layout.interview);
+    }
+    Some(Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(content)[1])
+}
+
+pub(super) fn interview_scroll_max(state: &AppState, width: u16, height: u16) -> Option<u16> {
+    let area = interview_view_area(state, width, height)?;
+    Some(build_solve_interview(state, area).1)
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -1784,6 +1799,49 @@ mod tests {
         assert!(oldest.contains("1 earlier message omitted"));
         assert!(oldest.contains("message-1"));
         assert!(!oldest.contains("message-0"));
+    }
+
+    #[test]
+    fn latest_interview_view_includes_controls_below_a_wrapped_composer() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        state
+            .interviewer
+            .push_message("Tutor".into(), "OLDEST-COMPOSER-SENTINEL".into());
+        for index in 1..48 {
+            state.interviewer.push_message(
+                "Tutor".into(),
+                format!("message-{index}: {}", "wrapped content ".repeat(3)),
+            );
+        }
+        state.interviewer.composer = vec!["x".repeat(69); 10].join(" ");
+        let latest = rendered(&state, 80, 24);
+        assert!(latest.contains("Question:"));
+        assert!(latest.contains("Space-m mode"));
+    }
+
+    #[test]
+    fn scrolling_newer_after_oldest_changes_the_interview_view() {
+        let mut state = solve_state();
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.status = crate::app::model::InterviewerStatus::Feedback;
+        for index in 0..48 {
+            state.interviewer.push_message(
+                "Tutor".into(),
+                format!("message-{index}: {}", "wrapped content ".repeat(3)),
+            );
+        }
+        reduce(&mut state, Event::Command(Action::InterviewOldest));
+        let max_scroll = interview_scroll_max(&state, 80, 24).unwrap();
+        state.interviewer.clamp_scroll(max_scroll);
+        assert_eq!(state.interviewer.scroll, max_scroll);
+        let oldest = rendered(&state, 80, 24);
+
+        reduce(&mut state, Event::Command(Action::Down));
+        let one_row_newer = rendered(&state, 80, 24);
+
+        assert_ne!(one_row_newer, oldest);
     }
 
     #[test]

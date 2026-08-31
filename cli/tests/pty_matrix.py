@@ -23,6 +23,7 @@ F5 = b"\x1b[15~"
 F9 = b"\x1b[20~"
 HOME = b"\x1b[H"
 END = b"\x1b[F"
+PAGE_DOWN = b"\x1b[6~"
 ARROW_UP = b"\x1b[A"
 ARROW_DOWN = b"\x1b[B"
 SHIFT_TAB = b"\x1b[Z"
@@ -723,6 +724,12 @@ def compact_case(fixture: MatrixFixture) -> str:
             wait_turn_completion(session, home, index + 3)
         session.send(HOME)
         session.wait_screen("compact-question-0-")
+        oldest_screen = session.screen.text()
+        session.send(PAGE_DOWN)
+        session.wait_predicate(
+            "page down moves newer from oldest transcript view",
+            lambda: session.screen.text() != oldest_screen,
+        )
         session.send(END)
         session.wait_screen("compact-question-5-")
         session.send(b"i")

@@ -1885,6 +1885,11 @@ pub fn run(
             let terminal_size = terminal
                 .size()
                 .map_err(|error| format!("cannot read terminal size: {error}"))?;
+            if let Some(max_scroll) =
+                render::interview_scroll_max(&state, terminal_size.width, terminal_size.height)
+            {
+                state.interviewer.clamp_scroll(max_scroll);
+            }
             let expected_grid_size =
                 render::neovim_grid_size(&state, terminal_size.width, terminal_size.height);
             if expected_grid_size != last_neovim_grid_size {

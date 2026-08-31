@@ -128,6 +128,11 @@ impl InterviewerUi {
         self.scroll = 0;
     }
 
+    pub fn clamp_scroll(&mut self, max_scroll: u16) {
+        self.scroll = self.scroll.min(max_scroll);
+        assert!(self.scroll <= max_scroll);
+    }
+
     pub fn clear_session(&mut self) {
         self.composer.clear();
         self.messages.clear();
