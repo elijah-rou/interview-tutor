@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_INTERVIEW_SETS = {
+    "runtime-practice": ["bounded-async-job-runner", "backend-run-dashboard"],
     "core": [
         "merge-intervals",
         "top-k-frequent-elements",
@@ -182,9 +183,9 @@ class GeneralizedCliTests(unittest.TestCase):
         rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
         self.assertEqual(
             [row[0] for row in rows],
-            ["anti-metal", "blind75", "convex", "core", "depot", "jane-street"],
+            ["anti-metal", "blind75", "convex", "core", "depot", "jane-street", "runtime-practice"],
         )
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10", "15"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10", "15", "2"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -242,6 +243,12 @@ class GeneralizedCliTests(unittest.TestCase):
             recorded_attempt,
             ("time-based-key-value-store", "convex", "fail", 1),
         )
+
+    def test_runtime_practice_starters_dispatch_by_set_index(self) -> None:
+        for index, slug in enumerate(EXPECTED_INTERVIEW_SETS["runtime-practice"], start=1):
+            result = self.run_command(str(ROOT / "run"), "python", "runtime-practice", str(index))
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(f"FAIL {slug}: starter is not implemented", result.stderr)
 
     def test_new_python_starters_have_explicit_unimplemented_diagnostics(self) -> None:
         self.environment["PRACTICE_NO_RECORD"] = "1"
@@ -543,7 +550,7 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(
             global_stats.stdout.splitlines()[0],
-            "All Problems progress (python): 1/85 (1.2%)",
+            "All Problems progress (python): 1/87 (1.1%)",
         )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:

@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "id": "runtime-practice",
+  "name": "Runtime Practice",
+  "description": "Python coding drills 3 and 10 from Ten interview practice problems: bounded async execution and a retry-safe run dashboard. Original local practice specifications, not reported interview questions.",
+  "members": [
+    {
+      "ordinal": 1,
+      "problem_slug": "bounded-async-job-runner"
+    },
+    {
+      "ordinal": 2,
+      "problem_slug": "backend-run-dashboard"
+    }
+  ]
+}

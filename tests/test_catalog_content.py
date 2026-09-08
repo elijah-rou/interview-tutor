@@ -12,7 +12,13 @@ PROBLEM_SET_DIRECTORY = ROOT / "problem_sets"
 MAX_STATEMENT_LENGTH = 1_000_000
 REGISTRY_TIMEOUT_SECONDS = 10
 
+PYTHON_ONLY_SLUGS = {"bounded-async-job-runner", "backend-run-dashboard"}
+
 EXPECTED_INTERVIEW_SETS = {
+    "runtime-practice": {
+        "name": "Runtime Practice",
+        "members": ["bounded-async-job-runner", "backend-run-dashboard"],
+    },
     "core": {
         "name": "Core",
         "members": [
@@ -188,9 +194,9 @@ class CatalogContentTests(unittest.TestCase):
         self.assertEqual(len(set(statements)), len(statements))
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
-    def test_catalog_has_85_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 6)
-        self.assertEqual(len(self.problems), 85)
+    def test_catalog_has_87_problems_and_expected_new_canonical_metadata(self) -> None:
+        self.assertEqual(self.catalog["catalog_revision"], 7)
+        self.assertEqual(len(self.problems), 87)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
             with self.subTest(slug=slug):
@@ -202,10 +208,10 @@ class CatalogContentTests(unittest.TestCase):
                 self.assertEqual(problem["premium"], expected.get("premium", False))
                 self.assertEqual(problem["test_revision"], 1)
 
-    def test_all_six_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
+    def test_all_seven_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
         self.assertEqual(
             set(self.problem_sets),
-            {"anti-metal", "blind75", "convex", "core", "depot", "jane-street"},
+            {"anti-metal", "blind75", "convex", "core", "depot", "jane-street", "runtime-practice"},
         )
 
         blind75_members = self.problem_sets["blind75"]["members"]
@@ -231,7 +237,7 @@ class CatalogContentTests(unittest.TestCase):
                 )
                 self.assertLessEqual(set(expected["members"]), set(self.by_slug))
 
-    def test_every_problem_has_exactly_the_registered_python_and_rust_adapters(
+    def test_every_problem_has_exactly_its_registered_language_adapters(
         self,
     ) -> None:
         python_contract = json.loads(
@@ -296,7 +302,7 @@ class CatalogContentTests(unittest.TestCase):
 
         self.assertEqual(set(self.by_slug), set(python_slugs))
         self.assertEqual(set(self.by_slug), set(case_slugs))
-        self.assertEqual(set(self.by_slug), set(rust_registry_slugs))
+        self.assertEqual(set(self.by_slug) - PYTHON_ONLY_SLUGS, set(rust_registry_slugs))
         rust_paths = {slug: f"rust/src/problems/{module}.rs" for slug, module in rust_entries}
         for slug, problem in self.by_slug.items():
             adapter_languages = [adapter["language"] for adapter in problem["adapters"]]
@@ -304,11 +310,13 @@ class CatalogContentTests(unittest.TestCase):
             adapters = {
                 adapter["language"]: adapter["solution_path"] for adapter in problem["adapters"]
             }
-            self.assertEqual(set(adapters), {"python", "rust"})
+            expected_languages = {"python"} if slug in PYTHON_ONLY_SLUGS else {"python", "rust"}
+            self.assertEqual(set(adapters), expected_languages)
             self.assertEqual(adapters["python"], f"python/{python_paths[slug]}")
-            self.assertEqual(adapters["rust"], rust_paths[slug])
             self.assertTrue((ROOT / adapters["python"]).is_file())
-            self.assertTrue((ROOT / adapters["rust"]).is_file())
+            if "rust" in expected_languages:
+                self.assertEqual(adapters["rust"], rust_paths[slug])
+                self.assertTrue((ROOT / adapters["rust"]).is_file())
 
     def test_statements_have_local_task_and_example_structure(self) -> None:
         for problem in self.problems:

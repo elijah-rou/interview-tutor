@@ -68,6 +68,24 @@
       ]
     },
     {
+      "slug": "backend-run-dashboard",
+      "title": "Backend Product API: Run Dashboard",
+      "difficulty": "Medium",
+      "topic": "Backend API",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** build a small useful product boundary around job state. Relevant to backend/API work at Convex and runtime products; the goal is a dashboard whose create/cancel actions and pagination behave predictably.\n\n**60-minute core:** implement pure in-memory handlers, without an HTTP framework:\n\n```text\ncreate_run(tenant_id, request_id, payload) -> run\nget_run(tenant_id, run_id) -> run | NOT_FOUND\ncancel_run(tenant_id, run_id) -> run | NOT_FOUND\nlist_runs(tenant_id, limit, cursor?) -> page, next_cursor?\n```\n\nThe caller's tenant identity is already authenticated; do not build login. Use immutable string payloads, unique monotonic internal run sequence numbers, and at most 1,000 retained runs. `create_run` reserves `(tenant_id, request_id)`: repeating it with the same payload returns the same run, while a different payload produces `CONFLICT`. This reservation remains valid for the exercise lifetime. New runs start `queued`. Cancellation transitions queued/running runs to `cancel_requested`; repeating it returns the current state. Succeeded, failed, and cancelled runs stay terminal. A private test helper may set worker states; implementing a worker is outside scope. Cross-tenant lookup/cancellation returns `NOT_FOUND`.\n\nList newest first, with limits 1–100 and a cursor tied to the tenant. The first page captures a maximum sequence watermark. Later pages include only runs at or below that watermark and strictly below the last returned sequence. Cursor fields may be a validated tuple in this exercise; production cursor signing is discussion-only. No run deletion occurs. Validate wrong types and malformed cursors before mutation, and return copies or immutable records.\n\nLocal Python contract: implement `Dashboard`. Runs are dictionaries with `run_id`, `tenant_id`, `request_id`, `payload`, and `state`; return copies. `run_id` is the creation sequence, starting at 1. Return literal `CONFLICT` and `NOT_FOUND`. Tenant and request IDs are nonempty strings; payload may be an empty string. Invalid input raises `ValueError` (bool is not an integer). Run IDs are positive integers. Exhausting the 1,000-run limit raises `RuntimeError`, but existing request retries still deduplicate or conflict. `list_runs` returns `(runs, next_cursor)`; `None` means no more pages. A cursor is exactly `(tenant_id, watermark, last)`, with positive integer bounds and `last <= watermark`, and must match the caller tenant. Omitted cursor or `None` starts a new page sequence. The watermark is the tenant's maximum sequence at the first page. `_set_state(run_id, state)` is a test-only hook for simulating worker states, not a public handler. Extensions are discussion-only.\n\n## Example\n\ntenant A creates sequence 1 and 2; tenant B creates sequence 3. A requests limit 1 and sees sequence 2 plus cursor `(watermark=2,last=2)`. A then creates sequence 4. Its next page returns sequence 1, never B's sequence 3 or newly inserted sequence 4. Repeating sequence 2's create request returns the same ID. Changing its payload returns conflict.\n\n**Acceptance cases:** duplicate request/same payload; duplicate/different payload; cross-tenant access; empty page; exact final page; inserted run between pages; terminal cancellation; repeated cancellation; invalid limit/cursor. State that a cancellation request is an observable intent, not proof an external job stopped.\n\n**Extension:** move handlers into two API replicas sharing a database. Identify required uniqueness constraints and atomic state updates. Explain why a process-local dictionary or mutex no longer protects deduplication or cancellation races.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/run_dashboard.py"
+        }
+      ]
+    },
+    {
       "slug": "best-time-to-buy-and-sell-stock",
       "title": "Best Time to Buy and Sell Stock",
       "difficulty": "Easy",
@@ -130,6 +148,24 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/binary_tree_maximum_path_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "bounded-async-job-runner",
+      "title": "Bounded Asynchronous Job Runner",
+      "difficulty": "Hard",
+      "topic": "Async Runtime",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** demonstrate backpressure, task lifetime, failure isolation, and shutdown. Relevant to runtime/tool execution and the scheduler theme in Fireworks notes; this is an original drill.\n\n**60-minute core:** implement a Python `asyncio` runner:\n\n```text\nRunner(worker_count, queue_capacity)\nawait start()\nsubmit(job_id, async_callable) -> accepted | queue_full\nstatus(job_id) -> state | NOT_FOUND\ncancel(job_id) -> state | NOT_FOUND\nawait close() -> outcomes_by_id\n```\n\n`submit` is synchronous and must not create an unbounded population of waiting tasks. Allow 1–16 workers and 1–100 queued jobs. A job is a zero-argument async callable; invoke it to create its coroutine only when a worker is ready. IDs are unique for the runner lifetime, including rejected retry policy: queue-full submissions do not reserve their ID, accepted submissions do. Reject duplicate accepted IDs. Preserve FIFO dequeue order, but completion order can differ. Job exceptions become failure outcomes and do not kill a worker. `close` stops admission, drains accepted work, stops workers, and returns each accepted ID exactly once. Repeated `close` returns the same outcomes. Calls happen on one event loop; job code eventually returns or raises. Bound accepted jobs to 1,000 for the exercise so outcome retention is explicit.\n\n**Status and cancellation:** expose `queued`, `running`, `succeeded`, `failed`, and `cancelled`. Cancelling a queued job marks it cancelled and prevents execution; its queue slot may remain occupied until dequeued. Cancelling a running job requests cooperative task cancellation, with state remaining running until execution acknowledges it. If completion wins the race, preserve the completed outcome. Terminal cancellation is a no-op. For this core, jobs yield to the event loop and do not suppress cancellation. Cancelled accepted jobs still appear exactly once in close outcomes.\n\nLocal Python contract: implement `Runner`. Return literal strings for admission, states, and `NOT_FOUND`; `close()` returns `{job_id: terminal_state}` (job values and exception objects are outside the result contract). IDs must be nonempty strings. Invalid arguments (including bool instead of int), duplicate accepted IDs, or a non-callable job raise `ValueError`. Capacity is 1,000 accepted jobs over the lifetime; exceeding it raises `RuntimeError`. Admission before start or after closing raises `RuntimeError`. Call `start()` once before other lifecycle operations; repeated start raises `RuntimeError`. Empty close means a started runner with no jobs. All public methods run on the same event loop. Extensions are discussion-only.\n\n## Example\n\nwith one worker, hold A inside an event-controlled job. Queue B and C with queue capacity 2. D returns `queue_full`. Release A; B raises `ValueError`; C succeeds. Closing returns one success for A, one failure for B, and one success for C, with no D outcome. The worker survives B.\n\n**Acceptance cases:** queue at capacity; duplicate ID; submission after close; empty close; failing job; queued and running cancellation; completion/cancellation race; FIFO start order; all accepted jobs accounted for. Use events to hold running work; a race between worker scheduling and submission should not make the expected queue state ambiguous.\n\n**Extension:** support `close(timeout)` and relax the assumption that jobs cooperate with cancellation. Specify whether queued jobs become cancelled outcomes and what happens if job code suppresses cancellation. Do not promise a hard deadline for arbitrary Python code in one process.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/bounded_async_job_runner.py"
         }
       ]
     },
@@ -1872,5 +1908,5 @@
       ]
     }
   ],
-  "catalog_revision": 6
+  "catalog_revision": 7
 }

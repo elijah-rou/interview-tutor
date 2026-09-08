@@ -4,6 +4,8 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
+from .runtime_cases import test_bounded_async_job_runner, test_run_dashboard
+
 from local_judge.structures import (
     graph,
     linked,
@@ -407,6 +409,8 @@ def test_word_search_ii(module: ModuleType) -> None:
 
 
 CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
+    "backend-run-dashboard": test_run_dashboard,
+    "bounded-async-job-runner": test_bounded_async_job_runner,
     "two-sum": test_two_sum,
     "two-sum-ii-input-array-is-sorted": test_two_sum_ii,
     "3sum": test_3sum,

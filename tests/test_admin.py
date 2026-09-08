@@ -518,7 +518,7 @@ class ProjectCliTests(unittest.TestCase):
     def test_language_registries_cover_the_seeded_global_catalog(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
         expected = {problem["slug"] for problem in catalog["problems"]}
-        self.assertEqual(len(expected), 85)
+        self.assertEqual(len(expected), 87)
 
         python_result = self.run_command(str(ROOT / "python" / "run"), "--list")
         self.assertEqual(python_result.returncode, 0, python_result.stderr)
@@ -528,7 +528,14 @@ class ProjectCliTests(unittest.TestCase):
         rust_result = self.run_command(str(ROOT / "rust" / "run"), "--list")
         self.assertEqual(rust_result.returncode, 0, rust_result.stderr)
         rust_slugs = set(rust_result.stdout.splitlines())
-        self.assertEqual(rust_slugs, expected)
+        self.assertEqual(
+            rust_slugs,
+            {
+                problem["slug"]
+                for problem in catalog["problems"]
+                if any(adapter["language"] == "rust" for adapter in problem["adapters"])
+            },
+        )
 
     def test_blind75_is_only_an_ordered_set_of_global_problem_references(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
@@ -538,7 +545,7 @@ class ProjectCliTests(unittest.TestCase):
         self.assertEqual(len(member_slugs), 75)
         self.assertEqual(len(set(member_slugs)), 75)
         self.assertLessEqual(set(member_slugs), global_slugs)
-        self.assertEqual(len(global_slugs), 85)
+        self.assertEqual(len(global_slugs), 87)
         self.assertEqual(
             [member["ordinal"] for member in problem_set["members"]], list(range(1, 76))
         )
@@ -546,6 +553,7 @@ class ProjectCliTests(unittest.TestCase):
             all(
                 problem["neetcode_url"].startswith("https://neetcode.io/problems/")
                 for problem in catalog["problems"]
+                if problem["neetcode_url"]
             )
         )
 
@@ -636,7 +644,7 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(archived.returncode, 0, archived.stderr)
             self.assertEqual(
                 global_stats.stdout.splitlines()[0],
-                "All Problems progress (python): 1/85 (1.2%)",
+                "All Problems progress (python): 1/87 (1.1%)",
             )
             self.assertIn("combination-sum-iv", archived.stdout)
             self.assertIn("archived", archived.stdout)
@@ -656,7 +664,7 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(attempt_count, 3)
             self.assertIsNotNone(stale)
             self.assertEqual(stale[1], 377)
-            self.assertEqual(active_members, 122)
+            self.assertEqual(active_members, 139)
             self.assertEqual(go_language, (0,))
 
     def test_v1_migration_rejects_conflicting_global_problem_metadata_atomically(

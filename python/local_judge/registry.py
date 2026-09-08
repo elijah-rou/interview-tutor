@@ -15,6 +15,7 @@ PROBLEMS = (
     Problem("3sum", "problems/medium/3sum.py", "Solution", "threeSum"),
     Problem("accounts-merge", "problems/medium/accounts_merge.py", "Solution", "accountsMerge"),
     Problem("alien-dictionary", "problems/hard/alien_dictionary.py", "Solution", "alienOrder"),
+    Problem("backend-run-dashboard", "problems/medium/run_dashboard.py", "Dashboard", None),
     Problem(
         "best-time-to-buy-and-sell-stock",
         "problems/easy/best_time_to_buy_and_sell_stock.py",
@@ -32,6 +33,9 @@ PROBLEMS = (
         "problems/hard/binary_tree_maximum_path_sum.py",
         "Solution",
         "maxPathSum",
+    ),
+    Problem(
+        "bounded-async-job-runner", "problems/hard/bounded_async_job_runner.py", "Runner", None
     ),
     Problem("climbing-stairs", "problems/easy/climbing_stairs.py", "Solution", "climbStairs"),
     Problem("clone-graph", "problems/medium/clone_graph.py", "Solution", "cloneGraph"),

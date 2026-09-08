@@ -239,8 +239,15 @@ pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
         {
             return Err(format!("duplicate LeetCode id: {leetcode_id}"));
         }
-        validate_http_url("LeetCode", &problem.leetcode_url)?;
-        validate_http_url("NeetCode", &problem.neetcode_url)?;
+        // Original exercises have no external problem page, just like local custom problems.
+        for (label, url) in [
+            ("LeetCode", &problem.leetcode_url),
+            ("NeetCode", &problem.neetcode_url),
+        ] {
+            if !url.is_empty() {
+                validate_http_url(label, url)?;
+            }
+        }
         if !problem_slugs.insert(problem.slug.clone()) {
             return Err(format!("duplicate problem slug: {}", problem.slug));
         }
