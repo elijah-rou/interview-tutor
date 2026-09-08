@@ -170,6 +170,24 @@
       ]
     },
     {
+      "slug": "cheapest-available-items",
+      "title": "Buy the Cheapest Available Items",
+      "difficulty": "Medium",
+      "topic": "Inventory Matching",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** turn an underspecified marketplace story into a deterministic data model and an incremental implementation. This is a reconstruction of the reported prompt, not an exact transcription or a financial exchange order book.\n\n**60-minute core:** implement an in-memory inventory with:\n\n```text\nadd(listing_id, item, seller, unit_price_cents, quantity)\nbuy(item, requested_quantity, max_unit_price_cents) -> fills, unfilled_quantity\ncancel(listing_id) -> bool\n```\n\nListing IDs are unique for the process lifetime. Item/seller/ID are nonempty strings; prices are nonnegative integers; quantities are positive integers. Reject invalid input before mutation. Each listing has a fixed price and a monotonic insertion sequence. A buy consumes available listings at or below the price ceiling, cheapest first, then oldest first. Partial fills are allowed. A fill is `(listing_id, seller, quantity, unit_price_cents)`; return fills in execution order. Unknown cancellation returns false; exhausted listings cannot fill again. Assume sequential calls, one currency, and at most 10,000 listings. A straightforward correct scan/sort is acceptable; state its cost before choosing a more complex index.\n\nLocal practice contract: Implement `Inventory`. Invalid arguments and duplicate IDs raise `ValueError`; bool does not count as an integer. All IDs remain reserved after acceptance, even after cancellation or exhaustion. Cancelling an exhausted listing returns false. Exceeding the 10,000 lifetime listing limit raises `RuntimeError`. Extensions are optional follow-ups.\n\n## Example\n\n**Worked example:** add L1 apple/alice at 500 cents with quantity 2; L2 apple/bob at 400 with quantity 1; L3 apple/carol at 500 with quantity 3. `buy(apple, 4, 500)` yields `[(L2,bob,1,400), (L1,alice,2,500), (L3,carol,1,500)]`, unfilled 0. L3 retains 2. A later `buy(apple,3,450)` returns no fills and unfilled 3. Cancelling L3 returns true.\n\n**Acceptance cases:** missing item; no affordable listing; exact exhaustion; partial fill; equal prices; cancellation followed by a buy; duplicate ID; invalid quantity; no state change after invalid input. Explain whether integer overflow matters in the chosen language before adding total-cost arithmetic.\n\n**Extension:** add `all_or_none=True`. If affordable stock is insufficient, consume nothing. Discuss a concurrent caller arriving between availability checking and consumption; implementing concurrency is outside the base exercise.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/cheapest_available_items.py"
+        }
+      ]
+    },
+    {
       "slug": "climbing-stairs",
       "title": "Climbing Stairs",
       "difficulty": "Easy",
@@ -368,6 +386,42 @@
       ]
     },
     {
+      "slug": "deadlock-aware-lock-manager",
+      "title": "Deadlock-Aware Lock Manager",
+      "difficulty": "Hard",
+      "topic": "Thread Synchronization",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** reason about ownership, waiting, and the atomic decision to admit a blocking acquisition. This revisits an actual past prompt without treating the old attempt as a solution.\n\n**60-minute core:** implement `safe_lock(lock)` and `safe_unlock(lock)` in Python for a single manager and a bounded set of ordinary, non-reentrant thread locks. Every acquisition and release goes through this manager. A thread may own several locks but has at most one pending acquisition. `safe_lock` returns only after acquisition; it raises `DeadlockedAttempt` if the requested wait would close a cycle. Reacquiring a lock the caller owns raises that same exception. Releasing a lock owned by another thread is an error. Fairness, timeouts, process death, and mixing managers are outside the core. Use explicit synchronization rather than relying on the GIL.\n\nThe manager must actually provide mutual exclusion, not merely update a dictionary. Choose and explain one ownership-transfer protocol. It may coordinate logical ownership using a condition variable, provided the supplied locks are acquired and released consistently and no caller can bypass the manager. Do not hold the manager's metadata mutex while waiting for a lock owner to release.\n\nLocal practice contract: Implement `LockManager`. The supplied `DeadlockedAttempt` name aliases `RuntimeError`; invalid unlock raises `ValueError`. Use ordinary `threading.Lock` instances. Extensions are optional follow-ups.\n\n## Example\n\n**Worked scenario:** T1 holds A; T2 holds B. T1 asks for B and blocks. T2 asks for A and gets `DeadlockedAttempt`; T2 still owns B. T2's caller releases B in cleanup, allowing T1 to acquire B. The rejection does not silently release locks or roll back the caller's work.\n\n**Acceptance cases:** uncontended acquisition; several locks owned by one thread; contention without a cycle; two-thread and three-thread cycles; self-acquisition; invalid unlock; clean metadata after release. Use barriers/events to create ordering instead of assuming a sleep proves correctness. Test joins need bounded timeouts so a broken implementation does not hang the rehearsal.\n\n**Extension:** add an acquisition timeout. Describe precisely how timing out removes a wait edge and how a simultaneous release is resolved. Implement only after the cycle-checking core works.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/deadlock_aware_lock_manager.py"
+        }
+      ]
+    },
+    {
+      "slug": "debug-python-service",
+      "title": "Debug a Python Service with pdb",
+      "difficulty": "Medium",
+      "topic": "Debugging",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Debugging. Purpose:** build a causal explanation from a failing user path, then make the smallest verified repair. This is an original fixture, not a disclosed employer task. The snippet is intentionally defective; copy it into a temporary `service_debug.py`, never a production service.\n\n**60-minute core:** investigate why a request appears to disappear after an upstream failure. The intended API accepts requests in FIFO order. Every request must produce exactly one immutable result containing its own ID. A failed upstream call produces a failure result; later requests still complete. The exercise has no retry, cancellation, concurrency, or external network access.\n\n```python\nfrom collections import deque\n\n\ndef fake_upstream(request):\n    if request[\"id\"] == \"B\":\n        raise ValueError(\"upstream rejected B\")\n    return request[\"value\"] * 2\n\n\ndef drain(pending, results):\n    response = {}\n    while pending:\n        request = pending.popleft()\n        try:\n            response[\"id\"] = request[\"id\"]\n            response[\"value\"] = fake_upstream(request)\n            response[\"ok\"] = True\n            results.append(response)\n        except ValueError as error:\n            response[\"ok\"] = False\n            response[\"error\"] = str(error)\n            if pending:\n                pending.popleft()\n    return results\n\n\nif __name__ == \"__main__\":\n    requests = deque([\n        {\"id\": \"A\", \"value\": 2},\n        {\"id\": \"B\", \"value\": 3},\n        {\"id\": \"C\", \"value\": 4},\n    ])\n    print(drain(requests, []))\n```\n\nLocal practice contract: The intentionally defective fixture is already in `python/problems/medium/service_debug.py`. Run it directly, then use `python3 -m pdb python/problems/medium/service_debug.py`. Repair `drain`, preserving the fake upstream behavior. The judge compares fresh result dictionaries; records must never be mutated by later processing. Tests should fail before you repair the fixture. Extensions are optional follow-ups.\n\n## Example\n\n**Expected result contract:** A yields `{id: A, ok: true, value: 4}`; B yields `{id: B, ok: false, error: \"upstream rejected B\"}`; C yields `{id: C, ok: true, value: 8}`. Failure records have no value field; success records have no error field. The exact printed Python representation may use single quotes.\n\n**Investigation:** first run `python service_debug.py` and record the actual output. Then use `python -m pdb service_debug.py`; demonstrate `break`/`b`, `continue`/`c`, `next`/`n`, `step`/`s`, `where`/`w`, `p`, and `pp` where useful. Stop around dequeue, append, and the exception branch. Inspect queue contents, `id(response)`, and previously appended results before changing code. Name each independent defect and connect it to the symptom. Avoid evaluating destructive expressions such as `p pending.popleft()` in the debugger.\n\n**Acceptance cases:** the three-request scenario; two successes; failure first; failure last; empty input. Deliver a short causal account, a focused patch, and a regression check. No full framework or logging rewrite is needed.\n\n**Extension:** introduce a retryable exception with at most two total attempts per request. Preserve original FIFO processing and final-result order; terminal failures still produce one result. Explain why retrying an upstream side effect may require an idempotency contract.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/service_debug.py"
+        }
+      ]
+    },
+    {
       "slug": "decode-ways",
       "title": "Decode Ways",
       "difficulty": "Medium",
@@ -434,6 +488,19 @@
       ]
     },
     {
+      "slug": "durable-agent-execution",
+      "title": "Durable Agent Execution with External Tools",
+      "difficulty": "Hard",
+      "topic": "System Design",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**System design. Purpose:** connect runtime experience to Normal's agent-systems domain without claiming prior production agent ownership.\n\n**60-minute core:** design a single-region service that runs a fixed sequence of up to 20 steps per run. A step either calls a model, calls an external tool, or waits for human approval. Invented sizing assumptions: 10 new runs/second, up to 10,000 active runs, 24-hour maximum run duration, 1 MiB maximum persisted run state, 30-day history retention. A transactional database and at-least-once queue are available. Model and tool results can vary between attempts. Model calls may retry; a payment-like tool offers an idempotency key and a lookup API. Do not implement a planner, train a model, or invent consensus.\n\nDefine `start(client_request_id, workflow_version, input)`, `status(run_id)`, `approve(run_id, step_id, decision_id)`, and `cancel(run_id)`. Draw persisted run/step/attempt records and the transition that grants execution ownership. Explain which data must survive worker loss and how a new worker resumes. Cancellation stops future work; specify what it can promise about an already issued external call. Include a trace from user request to final outcome.\n\nLocal practice contract: This is a system-design rehearsal, not a coding task. Use the prompt to produce a request trace, failure trace, persisted data model, sizing estimate, and explicit limitations. There is no executable adapter or automated pass/fail grade. Extensions are optional follow-ups.\n\n## Example\n\n**Failure scenario:** worker W1 sends tool operation K; the provider completes it; W1 dies before storing the result. W2 receives the run again. It must recover K's result or reuse K safely, not issue a new operation identity. A duplicate approval arrives after step completion and must not advance the workflow twice.\n\n**Extension:** the tool provides neither idempotency nor lookup. Decide how the product exposes an uncertain outcome and when human reconciliation is necessary. “Exactly once” is not an acceptable unexplained answer.",
+      "test_revision": 1,
+      "adapters": []
+    },
+    {
       "slug": "encode-and-decode-strings",
       "title": "Encode and Decode Strings",
       "difficulty": "Medium",
@@ -498,6 +565,19 @@
           "solution_path": "rust/src/problems/find_minimum_in_rotated_sorted_array.rs"
         }
       ]
+    },
+    {
+      "slug": "gpu-inference-routing",
+      "title": "GPU Inference Routing and Capacity",
+      "difficulty": "Hard",
+      "topic": "System Design",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**System design. Purpose:** use serving, lifecycle, and capacity experience to reason about Fireworks-relevant tradeoffs without drifting into unsupported kernel expertise.\n\n**60-minute core:** design one-region routing for two model revisions and streaming inference. All numbers are exercise assumptions. Each replica uses two GPUs, takes 90 seconds to become ready, and sustains 100 requests/second for a measured reference workload. Normal load is 600 requests/second; one model can burst to 1,200 for five minutes. Total limit is 32 GPUs. Target headroom is 20%; accepted requests target time-to-first-token below one second. A replica is not routable until weights are loaded and a representative readiness probe passes. Define admission, bounded queues, routing metadata, streaming ownership, draining, and scaling signals. State when the SLO cannot be met rather than promising it under arbitrary bursts.\n\nLocal practice contract: This is a system-design rehearsal, not a coding task. Produce a request trace, failure trace, capacity estimate, and explicit limitations. There is no executable adapter or automated pass/fail grade. Extensions are optional follow-ups.\n\n## Example\n\n**Worked sizing:** reference-workload steady demand at 80% of measured replica capacity requires `ceil(600 / 80) = 8` replicas, or 16 GPUs. Burst demand requires 15 replicas, or 30 GPUs. Splitting those GPUs across models and revisions can leave the hot model short; a GPU count is not instantly usable model-specific capacity. At a sudden burst, waiting 90 seconds for capacity cannot meet a one-second TTFT target, so choose prewarmed capacity, overflow, or explicit rejection.\n\n**Failure scenario:** a gateway has an endpoint cached as ready while the replica begins draining. The replica must stop admitting new requests without abruptly terminating healthy streams; the gateway needs a bounded, safe response to a rejected new stream. After bytes have been sent to the client, transparently replaying the entire generation is not generally safe.\n\n**Extension:** prompts become 10× longer while request rate stays constant. Explain why requests/second alone becomes misleading, and how token rates, KV-cache pressure, queue time, and measured workload classes change sizing. No CUDA implementation is required.",
+      "test_revision": 1,
+      "adapters": []
     },
     {
       "slug": "graph-valid-tree",
@@ -1248,6 +1328,24 @@
       ]
     },
     {
+      "slug": "optimistic-transaction-store",
+      "title": "Optimistic Transaction Store",
+      "difficulty": "Hard",
+      "topic": "Transactions",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** explain the version and atomicity machinery behind safe optimistic updates. Adapted from the local Convex preparation drill.\n\n**60-minute core:** implement:\n\n```text\nstore.begin() -> transaction\ntransaction.read(key) -> integer | MISSING\ntransaction.write(key, integer)\ntransaction.commit() -> commit_version | CONFLICT\ntransaction.abort()\n```\n\nUse nonempty string keys and immutable integer values. Calls on a transaction are sequential; store commits may race. Reads return staged writes first. On first access to a key, including a blind write, record its current version. Repeated reads of a previously read key return its cached value. A missing key has an observable version. Commit validates every observed key and applies all staged writes atomically under one store synchronization boundary. Any mismatch produces `CONFLICT`, closes the transaction, and applies nothing. Successful write commits assign one shared increasing version to their writes. Read-only commits validate and return the current global version without advancing it. All operations on a closed transaction fail. Abort closes an active transaction; repeated abort fails. No deletes, ranges, external side effects, persistence, or historical snapshots.\n\nThis is a point-access OCC exercise. Transactions do not begin with a complete historical snapshot; a transaction that sees incompatible moments must fail validation. Do not describe uncommitted reads as a full database snapshot guarantee.\n\nLocal practice contract: Implement `Store` and `Transaction`. Use the supplied string constants `MISSING` and `CONFLICT`. The initial global version is 0. Invalid keys or values raise `ValueError`; bool is not an integer. Closed-transaction operations raise `RuntimeError`. Extensions are optional follow-ups.\n\n## Example\n\n**Worked scenario:** initial `x=10@v1`. A and B both read x=10. A writes x=11 and commits v2. B stages `y=20` and commits: conflict because its observed x version is stale; y remains missing. Separately, C and D both first access missing z and stage writes. After C commits, D must conflict even though z was absent when D observed it.\n\n**Acceptance cases:** read own write; stale read; blind-write race; competing missing-key insertions; multi-key atomic failure; read-only commit; closed state rejection. Use an actual absence marker rather than a possible user value.\n\n**Extension:** add deletion without allowing version history to reset to “never existed.” Explain a delete/reinsert sequence and tombstone/version retention. Range-query phantoms are a discussion-only follow-up.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/hard/optimistic_transaction_store.py"
+        }
+      ]
+    },
+    {
       "slug": "pacific-atlantic-water-flow",
       "title": "Pacific Atlantic Water Flow",
       "difficulty": "Medium",
@@ -1310,6 +1408,24 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/product_of_array_except_self.rs"
+        }
+      ]
+    },
+    {
+      "slug": "reactive-subscription-index",
+      "title": "Reactive Subscription Invalidation Index",
+      "difficulty": "Medium",
+      "topic": "Reactive State",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**Coding. Purpose:** maintain consistent forward/reverse indexes and define honest overload behavior. Adapted from the local Convex subscription drill; public product architecture motivates it, not an exact question report.\n\n**60-minute core:** implement:\n\n```text\nsubscribe(subscription_id, dependency_keys)\nunsubscribe(subscription_id) -> bool\ndependencies(subscription_id) -> set | NOT_FOUND\ninvalidate(changed_keys, max_results) -> sorted_subscription_ids | OVERLOAD\n```\n\nIDs and keys are nonempty strings. Maximum 1,000 subscriptions, 32 distinct dependencies per subscription, and 128 distinct changed keys per invalidation. Validate complete input before mutation. Re-subscribing replaces the dependency set; duplicates within inputs collapse. An empty dependency set is a valid subscription. Unknown unsubscribe returns false. `max_results` is an integer from 0 through 1,000. Return each affected subscription once in lexicographic order. An overflow returns only `OVERLOAD`, with no partial successful result. Invalidation is read-only and does not remove subscriptions. All calls are sequential; return copies to prevent caller mutation of internal state.\n\nLocal practice contract: Implement `SubscriptionIndex`. Return literal strings `NOT_FOUND` and `OVERLOAD`. Invalid inputs or resource limits raise `ValueError`; bool is not an integer. Key inputs are finite iterables of strings, not a bare string. Reject invalid replacement before changing the existing subscription. Extensions are optional follow-ups.\n\n## Example\n\n**Worked example:** subscribe s2 to `{a,b}` and s1 to `{b,c}`. Invalidating `{b,c}` with limit 2 returns `[s1,s2]`; limit 1 returns `OVERLOAD`. Replace s2 with `{d}`; invalidating `{a,b}` returns `[s1]`, and the reverse entry for a must disappear. Unsubscribe s1; invalidating b returns `[]`.\n\n**Acceptance cases:** replacement; shared keys; duplicate changed keys; empty dependencies; exact limit; one beyond limit; zero limit with/without matches; invalid replacement preserving the original; caller mutation of returned dependencies. State memory complexity in total dependency edges.\n\n**Extension:** one key affects a million subscriptions. Design a resumable invalidation work item with a clear coverage guarantee while subscriptions change. Implementing distributed fanout is outside the 60-minute core.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/reactive_subscription_index.py"
         }
       ]
     },
@@ -1422,6 +1538,19 @@
           "solution_path": "rust/src/problems/rotate_image.rs"
         }
       ]
+    },
+    {
+      "slug": "safe-deployment-rollout",
+      "title": "Reproducible Builds and Safe Deployment Rollout",
+      "difficulty": "Hard",
+      "topic": "System Design",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\n**System design. Purpose:** rehearse a second architecture lane involving developer tooling, asynchronous builds, immutable artifacts, and serving state. This is an original platform drill, not a claim that Fireworks uses this architecture.\n\n**60-minute core:** design `deploy(app_id, source_digest, config, request_id)` and `get_deployment(deployment_id)` for customer Python inference services. Assume 1,000 deployments/day, builds lasting up to 10 minutes, a maximum of 20 concurrent builds, an artifact registry, a transactional database, and a Kubernetes-like scheduler. Customers expect build logs, a terminal outcome, and the previous healthy version to keep serving if the new build fails. Code can be untrusted. Define build identity, queuing, isolation boundary, artifact identity, deployment state, readiness, traffic switch, and rollback. No multi-region rollout or custom package manager is required.\n\nLocal practice contract: This is a system-design rehearsal, not a coding task. Produce a deploy-to-traffic trace, failure trace, data model, sizing estimate, and explicit limitations. There is no executable adapter or automated pass/fail grade. Extensions are optional follow-ups.\n\n## Example\n\n**Worked scenario:** deploy D2 while D1 serves traffic. D2 builds artifact digest H2 but its startup probe fails. D1 continues serving; D2 reaches a failed state with its build/runtime diagnostic. A retry using the same request ID returns the original deployment rather than starting another build. A genuinely new request may retry with a new deployment ID. Logs must not expose build secrets.\n\n**Extension:** D3 is requested before D2 finishes, and D2 becomes healthy last. Specify whether last-requested-wins or serialized promotion applies. Show the version/check that prevents D2 from replacing the newer desired revision. Discuss cancellation of obsolete builds without losing their history.",
+      "test_revision": 1,
+      "adapters": []
     },
     {
       "slug": "same-tree",
@@ -1908,5 +2037,5 @@
       ]
     }
   ],
-  "catalog_revision": 7
+  "catalog_revision": 8
 }

@@ -4,6 +4,13 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
+from .runtime_additional_cases import (
+    test_cheapest_available_items,
+    test_deadlock_aware_lock_manager,
+    test_optimistic_transaction_store,
+    test_reactive_subscription_index,
+    test_service_debug,
+)
 from .runtime_cases import test_bounded_async_job_runner, test_run_dashboard
 
 from local_judge.structures import (
@@ -409,6 +416,11 @@ def test_word_search_ii(module: ModuleType) -> None:
 
 
 CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
+    "cheapest-available-items": test_cheapest_available_items,
+    "deadlock-aware-lock-manager": test_deadlock_aware_lock_manager,
+    "debug-python-service": test_service_debug,
+    "optimistic-transaction-store": test_optimistic_transaction_store,
+    "reactive-subscription-index": test_reactive_subscription_index,
     "backend-run-dashboard": test_run_dashboard,
     "bounded-async-job-runner": test_bounded_async_job_runner,
     "two-sum": test_two_sum,

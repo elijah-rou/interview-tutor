@@ -37,6 +37,9 @@ PROBLEMS = (
     Problem(
         "bounded-async-job-runner", "problems/hard/bounded_async_job_runner.py", "Runner", None
     ),
+    Problem(
+        "cheapest-available-items", "problems/medium/cheapest_available_items.py", "Inventory", None
+    ),
     Problem("climbing-stairs", "problems/easy/climbing_stairs.py", "Solution", "climbStairs"),
     Problem("clone-graph", "problems/medium/clone_graph.py", "Solution", "cloneGraph"),
     Problem("coin-change", "problems/medium/coin_change.py", "Solution", "coinChange"),
@@ -58,6 +61,13 @@ PROBLEMS = (
     ),
     Problem("counting-bits", "problems/easy/counting_bits.py", "Solution", "countBits"),
     Problem("course-schedule", "problems/medium/course_schedule.py", "Solution", "canFinish"),
+    Problem(
+        "deadlock-aware-lock-manager",
+        "problems/hard/deadlock_aware_lock_manager.py",
+        "LockManager",
+        None,
+    ),
+    Problem("debug-python-service", "problems/medium/service_debug.py", "", None),
     Problem("decode-ways", "problems/medium/decode_ways.py", "Solution", "numDecodings"),
     Problem(
         "design-add-and-search-words-data-structure",
@@ -207,6 +217,12 @@ PROBLEMS = (
     ),
     Problem("number-of-islands", "problems/medium/number_of_islands.py", "Solution", "numIslands"),
     Problem(
+        "optimistic-transaction-store",
+        "problems/hard/optimistic_transaction_store.py",
+        "Store",
+        None,
+    ),
+    Problem(
         "pacific-atlantic-water-flow",
         "problems/medium/pacific_atlantic_water_flow.py",
         "Solution",
@@ -223,6 +239,12 @@ PROBLEMS = (
         "problems/medium/product_of_array_except_self.py",
         "Solution",
         "productExceptSelf",
+    ),
+    Problem(
+        "reactive-subscription-index",
+        "problems/medium/reactive_subscription_index.py",
+        "SubscriptionIndex",
+        None,
     ),
     Problem(
         "remove-nth-node-from-end-of-list",

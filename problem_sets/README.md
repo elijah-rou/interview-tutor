@@ -1,6 +1,6 @@
 # Problem sets
 
-A problem set is metadata plus an ordered list of global problem slugs. It never copies titles, difficulty, tests, source paths, or completion. Seven sets ship against the 87-problem global catalog:
+A problem set is metadata plus an ordered list of global problem slugs. It never copies titles, difficulty, tests, source paths, or completion. Seven sets ship against the 95-problem global catalog:
 
 | ID | Name | Members |
 | --- | --- | ---: |
@@ -10,9 +10,9 @@ A problem set is metadata plus an ordered list of global problem slugs. It never
 | `core` | Core | 17 |
 | `depot` | Depot | 10 |
 | `jane-street` | Jane Street | 15 |
-| `runtime-practice` | Runtime Practice (Python only) | 2 |
+| `runtime-practice` | Runtime Practice (Python and system design) | 10 |
 
-Runtime Practice contains original drills 3 (bounded asynchronous job runner) and 10 (retry-safe run dashboard) from `resume/cross-company/interview-prep/interview-practice-ten-problems.md`. Set indexes are 1 and 2. Full prompts and local Python contracts are in the catalog; solution directions are deliberately omitted.
+Runtime Practice contains all ten drills from `resume/cross-company/interview-prep/interview-practice-ten-problems.md`, in the original order. Problems 1–6 and 10 have Python starters or a debugging fixture with public tests. Problems 7–9 are system-design prompts: read them with `./practice --set runtime-practice show 7` (or 8/9); they have no executable adapter or automated grade. Full prompts and local Python contracts are in the catalog; solution directions are deliberately omitted. Existing problems 3 and 10 retain their global identity and progress, but now use set indexes 3 and 10.
 
 No LeetCode round is publicly evidenced for Depot; this is the bounded preparation set. Blind 75 remains an exact 75-member set rather than an alias for the larger catalog. The [anti-metal notes](anti-metal.md), [Core notes](core.md), and [Jane Street notes](jane-street.md) preserve grouping and per-problem rationales outside the v2 JSON because that schema intentionally represents only ordered membership.
 
