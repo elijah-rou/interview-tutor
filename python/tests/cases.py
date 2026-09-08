@@ -4,6 +4,11 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
+from .convex_concurrency_cases import (
+    test_bounded_blocking_queue,
+    test_concurrent_account_transfers,
+    test_thread_safe_lru_cache,
+)
 from .runtime_additional_cases import (
     test_cheapest_available_items,
     test_deadlock_aware_lock_manager,
@@ -416,6 +421,9 @@ def test_word_search_ii(module: ModuleType) -> None:
 
 
 CUSTOM_TESTS: dict[str, Callable[[ModuleType], None]] = {
+    "thread-safe-lru-cache": test_thread_safe_lru_cache,
+    "bounded-blocking-queue": test_bounded_blocking_queue,
+    "concurrent-account-transfers": test_concurrent_account_transfers,
     "cheapest-available-items": test_cheapest_available_items,
     "deadlock-aware-lock-manager": test_deadlock_aware_lock_manager,
     "debug-python-service": test_service_debug,

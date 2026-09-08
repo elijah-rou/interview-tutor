@@ -52,6 +52,9 @@ EXPECTED_INTERVIEW_SETS = {
         "binary-tree-level-order-traversal",
         "kth-largest-element-in-a-stream",
         "coin-change",
+        "thread-safe-lru-cache",
+        "bounded-blocking-queue",
+        "concurrent-account-transfers",
     ],
     "anti-metal": [
         "time-based-key-value-store",
@@ -196,7 +199,7 @@ class GeneralizedCliTests(unittest.TestCase):
             [row[0] for row in rows],
             ["anti-metal", "blind75", "convex", "core", "depot", "jane-street", "runtime-practice"],
         )
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "10", "17", "10", "15", "10"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "13", "17", "10", "15", "10"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -254,6 +257,18 @@ class GeneralizedCliTests(unittest.TestCase):
             recorded_attempt,
             ("time-based-key-value-store", "convex", "fail", 1),
         )
+
+    def test_convex_concurrency_starters_dispatch_by_set_index(self) -> None:
+        for index, slug in enumerate(EXPECTED_INTERVIEW_SETS["convex"][10:], start=11):
+            with self.subTest(slug=slug):
+                shown = self.run_command(
+                    str(ROOT / "practice"), "--set", "convex", "show", str(index)
+                )
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertIn(f"Slug: {slug}", shown.stdout)
+                result = self.run_command(str(ROOT / "run"), "python", "convex", str(index))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"FAIL {slug}: starter is not implemented", result.stderr)
 
     def test_runtime_practice_starters_dispatch_by_set_index(self) -> None:
         for index, slug in enumerate(EXPECTED_INTERVIEW_SETS["runtime-practice"], start=1):
@@ -570,7 +585,7 @@ class GeneralizedCliTests(unittest.TestCase):
         )
         self.assertEqual(
             global_stats.stdout.splitlines()[0],
-            "All Problems progress (python): 1/95 (1.1%)",
+            "All Problems progress (python): 1/98 (1.0%)",
         )
 
     def test_root_rust_run_executes_the_registered_case_before_recording(self) -> None:

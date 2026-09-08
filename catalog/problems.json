@@ -170,6 +170,24 @@
       ]
     },
     {
+      "slug": "bounded-blocking-queue",
+      "title": "Bounded Blocking Queue",
+      "difficulty": "Medium",
+      "topic": "Condition Variables",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\nThese are original practice exercises targeting the recruiter’s explicit concurrency guidance, not reported Convex questions. Use Python threads and explicit synchronization rather than relying on the GIL. Core operations must be linearizable: each appears to take effect once between call and return. Fairness, process death, and cancellation are outside scope. Public tests cover representative schedules, not a proof of race freedom.\n\nImplement `BoundedQueue(capacity)` with `put(item)`, `get()`, and `close()` using a deque and a condition variable. Producers wait when full; consumers wait when empty. Closing rejects new puts, wakes all waiters, and lets consumers drain existing items before receiving a closed result.\n\nCapacity is an integer from 1 through 1,000; invalid capacity raises `ValueError`, including bool. `put(item)` returns True if accepted and False if close wins admission, including puts already waiting for capacity. `get()` returns the oldest accepted item, or the supplied `CLOSED` sentinel by identity when the queue is closed and empty. Items can be arbitrary objects, including None; submitting the reserved CLOSED sentinel raises `ValueError`, even after close. `close()` returns None and is idempotent. Accepted items are returned exactly once. FIFO follows enqueue order, not the order racing producer threads were started. No new items may be admitted after close takes effect.\n\n**Practice:** condition-variable loops, releasing the lock while waiting, backpressure, and shutdown. Explain why waking does not imply the predicate is true. Use events or observed wait entry in tests rather than a sleep as proof of blocking.\n\n**Follow-up:** add a timeout to `get()`. Define a result distinct from CLOSED, use a monotonic deadline, and decide how item arrival, close, and timeout compete. Timeouts are not part of core tests.\n\n## Example\n\nCapacity 1: put A, then a producer attempting B blocks. A consumer gets A, permitting B to be admitted. Close the queue; new puts return False, a get returns B, and later gets return CLOSED. Separately, closing an empty queue wakes all waiting consumers with CLOSED; closing a full queue wakes waiting producers with False without discarding the queued item.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/bounded_blocking_queue.py"
+        }
+      ]
+    },
+    {
       "slug": "cheapest-available-items",
       "title": "Buy the Cheapest Available Items",
       "difficulty": "Medium",
@@ -272,6 +290,24 @@
         {
           "language": "rust",
           "solution_path": "rust/src/problems/combination_sum.rs"
+        }
+      ]
+    },
+    {
+      "slug": "concurrent-account-transfers",
+      "title": "Concurrent Account Transfers",
+      "difficulty": "Medium",
+      "topic": "Atomic Updates",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\nThese are original practice exercises targeting the recruiter’s explicit concurrency guidance, not reported Convex questions. Use Python threads and explicit synchronization rather than relying on the GIL. Core operations must be linearizable: each appears to take effect once between call and return. Fairness, process death, and cancellation are outside scope. Public tests cover representative schedules, not a proof of race freedom.\n\nImplement `Accounts(balances)` and `transfer(source, destination, amount)` over integer account balances. Concurrent transfers must preserve the total balance and prevent overdrafts. Begin with one shared lock covering the complete check-and-update, and synchronize balance reads with the same boundary.\n\nThe constructor accepts a dictionary of 1–1,000 fixed accounts. IDs are nonempty strings and balances are nonnegative integers. Copy the input; callers must not retain access to internal mutable state. Amounts are positive integers. Invalid arguments, unknown accounts, and bool instead of int raise `ValueError` before mutation. No account creation or deletion occurs after construction.\n\n`transfer` returns False if the source lacks funds, changing nothing. Otherwise it debits source and credits destination atomically and returns True. A same-account transfer validates both input and sufficient funds, then returns True without changing the balance; insufficient funds still returns False. `snapshot() -> dict[str, int]` returns a consistent copy for observing and testing balances. Python integers do not overflow; one currency is assumed.\n\n**Practice:** atomic check-and-update, a concrete failing interleaving, and same-account transfers. Identify the invariant that spans both accounts and what a concurrent snapshot may observe.\n\n**Follow-up:** switch to per-account locks and prevent deadlock through consistent lock ordering. Acquire a self-transfer’s lock only once. Explain how a consistent multi-account snapshot is obtained. Per-account locking is not required by core tests.\n\n## Example\n\nA starts with 100; B and C start with 0. Two concurrent transfers each attempt to move 80 from A, one to B and one to C. Exactly one succeeds. A ends at 20, the total remains 100, and no balance is negative. Without an atomic check-and-update, both threads could observe 100 and proceed. A same-account transfer of 20 succeeds without changing A; a same-account transfer of 21 returns False.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/concurrent_account_transfers.py"
         }
       ]
     },
@@ -1773,6 +1809,24 @@
       ]
     },
     {
+      "slug": "thread-safe-lru-cache",
+      "title": "Thread-safe LRU Cache",
+      "difficulty": "Medium",
+      "topic": "Concurrent Data Structures",
+      "leetcode_id": null,
+      "premium": false,
+      "leetcode_url": "",
+      "neetcode_url": "",
+      "statement_markdown": "## Task\n\nThese are original practice exercises targeting the recruiter’s explicit concurrency guidance, not reported Convex questions. Use Python threads and explicit synchronization rather than relying on the GIL. Core operations must be linearizable: each appears to take effect once between call and return. Fairness, process death, and cancellation are outside scope. Public tests cover representative schedules, not a proof of race freedom.\n\nExtend the existing LRU with concurrent `get` and `put`. Work in the separate `thread_safe_lru_cache.py` starter, keeping the original `lru_cache.py` exercise intact. Implement `LRUCache(capacity)`, `get(key) -> value | -1`, and `put(key, value) -> None`. Preserve capacity and recency ordering. Start with one lock protecting each complete operation, including recency updates.\n\nCapacity is an integer from 1 through 1,000. Keys are integers; values are nonnegative integers, making -1 an unambiguous missing result. A successful get makes the key most recent; a miss leaves recency unchanged. Putting an existing key replaces its value and makes it most recent. A new key evicts the least-recent key if needed. Invalid arguments raise `ValueError` before mutation; bool does not count as an integer.\n\n**Practice:** explain why reads mutate recency, demonstrate a concrete failing interleaving without synchronization, and justify the lock boundary. Concurrent overlapping calls may linearize in either order; real-time non-overlapping order must be preserved.\n\n**Follow-up:** add `get_or_load(key, loader)` without holding the cache lock during slow loading. Discuss duplicate loads before attempting to prevent them. Decide how concurrent puts, loader failures, and capacity eviction interact with a completed load. This method is not part of core tests.\n\n## Example\n\nWith capacity 2, put `(1,10)` and `(2,20)`, then get 1. Putting `(3,30)` evicts 2, not 1. Getting 2 returns -1. Updating 1 makes it most recent again. Explain how two unsynchronized insertions could both observe a free slot and violate capacity.",
+      "test_revision": 1,
+      "adapters": [
+        {
+          "language": "python",
+          "solution_path": "python/problems/medium/thread_safe_lru_cache.py"
+        }
+      ]
+    },
+    {
       "slug": "time-based-key-value-store",
       "title": "Time Based Key-Value Store",
       "difficulty": "Medium",
@@ -2037,5 +2091,5 @@
       ]
     }
   ],
-  "catalog_revision": 8
+  "catalog_revision": 9
 }

@@ -13,6 +13,9 @@ MAX_STATEMENT_LENGTH = 1_000_000
 REGISTRY_TIMEOUT_SECONDS = 10
 
 PYTHON_ONLY_SLUGS = {
+    "thread-safe-lru-cache",
+    "bounded-blocking-queue",
+    "concurrent-account-transfers",
     "deadlock-aware-lock-manager",
     "cheapest-available-items",
     "bounded-async-job-runner",
@@ -74,6 +77,9 @@ EXPECTED_INTERVIEW_SETS = {
             "binary-tree-level-order-traversal",
             "kth-largest-element-in-a-stream",
             "coin-change",
+            "thread-safe-lru-cache",
+            "bounded-blocking-queue",
+            "concurrent-account-transfers",
         ],
     },
     "anti-metal": {
@@ -214,9 +220,9 @@ class CatalogContentTests(unittest.TestCase):
         self.assertEqual(len(set(statements)), len(statements))
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
-    def test_catalog_has_95_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 8)
-        self.assertEqual(len(self.problems), 95)
+    def test_catalog_has_98_problems_and_expected_new_canonical_metadata(self) -> None:
+        self.assertEqual(self.catalog["catalog_revision"], 9)
+        self.assertEqual(len(self.problems), 98)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
             with self.subTest(slug=slug):

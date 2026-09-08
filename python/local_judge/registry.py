@@ -38,12 +38,21 @@ PROBLEMS = (
         "bounded-async-job-runner", "problems/hard/bounded_async_job_runner.py", "Runner", None
     ),
     Problem(
+        "bounded-blocking-queue", "problems/medium/bounded_blocking_queue.py", "BoundedQueue", None
+    ),
+    Problem(
         "cheapest-available-items", "problems/medium/cheapest_available_items.py", "Inventory", None
     ),
     Problem("climbing-stairs", "problems/easy/climbing_stairs.py", "Solution", "climbStairs"),
     Problem("clone-graph", "problems/medium/clone_graph.py", "Solution", "cloneGraph"),
     Problem("coin-change", "problems/medium/coin_change.py", "Solution", "coinChange"),
     Problem("combination-sum", "problems/medium/combination_sum.py", "Solution", "combinationSum"),
+    Problem(
+        "concurrent-account-transfers",
+        "problems/medium/concurrent_account_transfers.py",
+        "Accounts",
+        None,
+    ),
     Problem(
         "construct-binary-tree-from-preorder-and-inorder-traversal",
         "problems/medium/construct_binary_tree_from_preorder_and_inorder_traversal.py",
@@ -293,6 +302,7 @@ PROBLEMS = (
         "isSubtree",
     ),
     Problem("sum-of-two-integers", "problems/medium/sum_of_two_integers.py", "Solution", "getSum"),
+    Problem("thread-safe-lru-cache", "problems/medium/thread_safe_lru_cache.py", "LRUCache", None),
     Problem(
         "time-based-key-value-store",
         "problems/medium/time_based_key_value_store.py",
