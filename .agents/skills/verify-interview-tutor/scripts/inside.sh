@@ -393,8 +393,8 @@ feature_race() {
 readonly TUI_SESSION=verify-tui
 
 tui_capture() {
-    tmux capture-pane -p -t "$TUI_SESSION" > "$FEATURE_DIR/$(printf '%02d' "$STEP_NO")-$1.screen.txt"
     STEP_NO=$((STEP_NO + 1))
+    tmux capture-pane -p -t "$TUI_SESSION" > "$FEATURE_DIR/$(printf '%02d' "$STEP_NO")-$1.screen.txt"
 }
 
 # tui_wait LABEL TEXT [SECONDS]: wait for TEXT on the visible screen, then
