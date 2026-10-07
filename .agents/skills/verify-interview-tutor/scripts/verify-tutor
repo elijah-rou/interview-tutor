@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Host CLI for verify-interview-tutor. Launches one labelled, network-less
+# Linux container per run, drives interview-tutor inside it through
+# inside.sh, copies evidence out, and removes only the container it started.
+# Works with macOS Bash 3.2 and Linux Bash 5.
+set -euo pipefail
+
+SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO=$(cd "$SKILL_DIR/../../.." && pwd)
+EVIDENCE_ROOT=$SKILL_DIR/evidence
+INSIDE=/src/.agents/skills/verify-interview-tutor/scripts/inside.sh
+LABEL=interview-tutor.verify.run
+FEATURES="catalog judge progress admin tui"
+GATES="race"
+READY_LINE='READY interview-tutor verifier'
+LAUNCH_TIMEOUT_SECONDS=600
+DRIVE_TIMEOUT=600s
+
+RUN_ID=
+EVIDENCE_DIR=
+CID=
+
+die() {
+    printf 'verify-tutor: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat << 'EOF'
+usage: verify-tutor COMMAND [ARGS]
+
+  image                 build or reuse the verification image (the only networked step)
+  launch                start a fresh container, build the product inside it, wait for READY
+  doctor RUN_ID         read-only health check of that run's container
+  drive RUN_ID FEATURE  drive one mapped feature: catalog judge progress admin tui
+                        or the repository's cancellation gate: race (about 3 minutes)
+  cleanup RUN_ID        copy evidence out, stop and remove that run's container, check leftovers
+  all                   launch, doctor, drive every mapped feature (not race), cleanup;
+                        exit 0 only if all passed
+
+Evidence lives in .agents/skills/verify-interview-tutor/evidence/RUN_ID/ (git-ignored).
+EOF
+}
+
+sha256_of() {
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$@"
+    else
+        shasum -a 256 "$@"
+    fi
+}
+
+image_tag() {
+    local digest
+    digest=$(cd "$REPO" && sha256_of "$SKILL_DIR/scripts/Dockerfile" cli/Cargo.toml cli/Cargo.lock \
+        rust/Cargo.toml rust/Cargo.lock | cut -d' ' -f1 | sha256_of | cut -c1-12)
+    printf 'interview-tutor-verify:%s\n' "$digest"
+}
+
+cmd_image() {
+    local tag
+    tag=$(image_tag)
+    if docker image inspect "$tag" > /dev/null 2>&1; then
+        printf 'image %s already present\n' "$tag"
+        return 0
+    fi
+    printf 'building image %s\n' "$tag"
+    (cd "$REPO" && tar -cf - cli/Cargo.toml cli/Cargo.lock rust/Cargo.toml rust/Cargo.lock \
+        -C "$SKILL_DIR/scripts" Dockerfile) | docker build --tag "$tag" -
+}
+
+load_run() {
+    [ $# -ge 1 ] || die 'missing RUN_ID'
+    RUN_ID=$1
+    case $RUN_ID in
+        it-[0-9]*) ;;
+        *) die "not a verify-tutor run id: $RUN_ID" ;;
+    esac
+    EVIDENCE_DIR=$EVIDENCE_ROOT/$RUN_ID
+    [ -s "$EVIDENCE_DIR/container.id" ] || die "no recorded container for $RUN_ID"
+    CID=$(cat "$EVIDENCE_DIR/container.id")
+}
+
+# The run label must match before this CLI touches a container.
+require_owned() {
+    local label
+    label=$(docker inspect -f "{{index .Config.Labels \"$LABEL\"}}" "$CID" 2> /dev/null) \
+        || die "container $CID for $RUN_ID is not present"
+    [ "$label" = "$RUN_ID" ] || die "container $CID is labelled '$label', not $RUN_ID; refusing to touch it"
+}
+
+cmd_launch() {
+    local tag status=0 waited=0
+    tag=$(image_tag)
+    RUN_ID="it-$(date +%Y%m%d-%H%M%S)-$$"
+    EVIDENCE_DIR=$EVIDENCE_ROOT/$RUN_ID
+    mkdir -p "$EVIDENCE_ROOT"
+    mkdir "$EVIDENCE_DIR"
+    cmd_image > "$EVIDENCE_DIR/image-build.log" 2>&1 || die "image build failed; see $EVIDENCE_DIR/image-build.log"
+    printf '%s\n' "$tag" > "$EVIDENCE_DIR/image.tag"
+    docker image inspect -f '{{.Id}}' "$tag" > "$EVIDENCE_DIR/image.id"
+    git -C "$REPO" rev-parse HEAD > "$EVIDENCE_DIR/revision.txt"
+    git -C "$REPO" status --porcelain -- . ':(exclude).agents' > "$EVIDENCE_DIR/product-status.txt"
+    (cd "$REPO" && sha256_of catalog/problems.json python/problems/easy/two_sum.py \
+        rust/src/problems/two_sum.rs practice run interview) > "$EVIDENCE_DIR/source.sha256"
+    docker run --detach --rm --init \
+        --name "verify-interview-tutor-$RUN_ID" \
+        --label "$LABEL=$RUN_ID" \
+        --cidfile "$EVIDENCE_DIR/container.id" \
+        --network none \
+        --mount "type=bind,src=$REPO,dst=/src,readonly" \
+        --env INTERVIEW_TUTOR_VERIFY_CONTAINER=1 \
+        --workdir /work \
+        "$tag" bash "$INSIDE" serve \
+        > "$EVIDENCE_DIR/launch.stdout" 2> "$EVIDENCE_DIR/launch.stderr" || status=$?
+    [ "$status" = 0 ] || die "docker run failed ($status); see $EVIDENCE_DIR/launch.stderr"
+    CID=$(cat "$EVIDENCE_DIR/container.id")
+    while :; do
+        docker logs "$CID" > "$EVIDENCE_DIR/readiness.stdout" 2> "$EVIDENCE_DIR/readiness.stderr" \
+            || die "container exited before $READY_LINE; see $EVIDENCE_DIR/readiness.stdout"
+        if grep -qxF "$READY_LINE" "$EVIDENCE_DIR/readiness.stdout"; then
+            break
+        fi
+        [ "$waited" -lt "$LAUNCH_TIMEOUT_SECONDS" ] || die "no '$READY_LINE' after ${LAUNCH_TIMEOUT_SECONDS}s; run cleanup $RUN_ID"
+        sleep 1
+        waited=$((waited + 1))
+    done
+    docker cp "$CID:/proof/launch/." "$EVIDENCE_DIR/launch" > /dev/null
+    printf 'RUN_ID=%s\nEVIDENCE_DIR=%s\nREADY after %ss in container %s\n' "$RUN_ID" "$EVIDENCE_DIR" "$waited" "$CID"
+}
+
+doctor_check() {
+    local description=$1 actual=$2 expected=$3
+    if [ "$actual" = "$expected" ]; then
+        printf 'ok   %s\n' "$description"
+    else
+        printf 'FAIL %s: got %s, expected %s\n' "$description" "$actual" "$expected"
+        DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1))
+    fi
+}
+
+cmd_doctor() {
+    load_run "$@"
+    require_owned
+    DOCTOR_PROBLEMS=0
+    {
+        printf 'run %s container %s\n' "$RUN_ID" "$CID"
+        doctor_check 'container running' "$(docker inspect -f '{{.State.Running}}' "$CID")" true
+        doctor_check 'network none' "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CID")" none
+        doctor_check 'no published ports' "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$CID")" 0
+        doctor_check 'only /src mounted, read-only' \
+            "$(docker inspect -f '{{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}' "$CID")" '/src:false '
+        doctor_check "image $(cat "$EVIDENCE_DIR/image.tag")" \
+            "$(docker inspect -f '{{.Image}}' "$CID")" "$(cat "$EVIDENCE_DIR/image.id")"
+        doctor_check 'checkout still at the launched revision' \
+            "$(git -C "$REPO" rev-parse HEAD)" "$(cat "$EVIDENCE_DIR/revision.txt")"
+        docker exec "$CID" bash "$INSIDE" doctor || DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1))
+    } > "$EVIDENCE_DIR/doctor.txt" 2>&1
+    cat "$EVIDENCE_DIR/doctor.txt"
+    [ "$DOCTOR_PROBLEMS" = 0 ] || die "doctor failed for $RUN_ID"
+}
+
+cmd_drive() {
+    load_run "$@"
+    local feature=${2:-} status=0 out
+    case " $FEATURES $GATES " in
+        *" $feature "*) ;;
+        *) die "unknown feature '$feature'; choose one of: $FEATURES $GATES" ;;
+    esac
+    require_owned
+    out=$EVIDENCE_DIR/$feature
+    [ ! -e "$out" ] || die "$out exists; drive each feature once per run"
+    mkdir "$out"
+    printf 'docker exec %s timeout --signal=TERM --kill-after=10s %s bash %s %s\n' \
+        "$CID" "$DRIVE_TIMEOUT" "$INSIDE" "$feature" > "$out/drive.command"
+    docker exec "$CID" timeout --signal=TERM --kill-after=10s "$DRIVE_TIMEOUT" bash "$INSIDE" "$feature" \
+        > "$out/drive.stdout" 2> "$out/drive.stderr" || status=$?
+    printf '%s\n' "$status" > "$out/drive.exit"
+    docker cp "$CID:/proof/$feature/." "$out/artifacts" > /dev/null 2>&1 \
+        || printf 'warning: no /proof/%s to copy\n' "$feature" >&2
+    grep -E '^(PASS|FAIL) ' "$out/drive.stdout" "$out/drive.stderr" | sed 's/^[^:]*://' | tail -n 3 || true
+    if [ "$status" = 0 ]; then
+        printf 'DRIVE PASS %s (%s checks) evidence %s\n' "$feature" "$(grep -c '^PASS ' "$out/artifacts/summary.txt")" "$out"
+    else
+        printf 'DRIVE FAIL %s exit %s evidence %s\n' "$feature" "$status" "$out"
+        return 1
+    fi
+}
+
+cmd_cleanup() {
+    load_run "$@"
+    local waited=0
+    if docker inspect "$CID" > /dev/null 2>&1; then
+        require_owned
+        docker cp "$CID:/proof/." "$EVIDENCE_DIR/final-proof" > /dev/null 2>&1 \
+            || printf 'warning: could not export /proof before cleanup\n' >&2
+        docker top "$CID" > "$EVIDENCE_DIR/processes-before-cleanup.txt" 2>&1 || true
+        docker logs "$CID" > "$EVIDENCE_DIR/container.log" 2>&1 || true
+        docker stop --time 10 "$CID" > "$EVIDENCE_DIR/cleanup.stdout"
+    else
+        printf 'container %s already gone\n' "$CID" > "$EVIDENCE_DIR/cleanup.stdout"
+    fi
+    while docker inspect "$CID" > /dev/null 2>&1; do
+        [ "$waited" -lt 30 ] || die "container $CID still present 30s after stop"
+        sleep 1
+        waited=$((waited + 1))
+    done
+    docker ps --all --quiet --no-trunc --filter "label=$LABEL=$RUN_ID" > "$EVIDENCE_DIR/remaining-run-containers.txt"
+    [ ! -s "$EVIDENCE_DIR/remaining-run-containers.txt" ] || die "containers labelled $RUN_ID remain"
+    find "$EVIDENCE_DIR" -type f -size +0c | LC_ALL=C sort > "$EVIDENCE_DIR/surviving-evidence.txt"
+    [ -s "$EVIDENCE_DIR/surviving-evidence.txt" ] || die "no evidence survived in $EVIDENCE_DIR"
+    printf 'CLEANUP PASS container %s removed; %s evidence files kept in %s\n' \
+        "$CID" "$(wc -l < "$EVIDENCE_DIR/surviving-evidence.txt" | tr -d ' ')" "$EVIDENCE_DIR"
+}
+
+cmd_all() {
+    local failed=""
+    cmd_launch
+    trap 'cmd_cleanup "$RUN_ID" || true' EXIT
+    cmd_doctor "$RUN_ID"
+    for feature in $FEATURES; do
+        cmd_drive "$RUN_ID" "$feature" || failed="$failed $feature"
+    done
+    trap - EXIT
+    cmd_cleanup "$RUN_ID"
+    if [ -n "$failed" ]; then
+        die "failed features:$failed (evidence in $EVIDENCE_DIR)"
+    fi
+    printf 'ALL PASS %s\n' "$RUN_ID"
+}
+
+case ${1:-} in
+    image) cmd_image ;;
+    launch) cmd_launch ;;
+    doctor) shift && cmd_doctor "$@" ;;
+    drive) shift && cmd_drive "$@" ;;
+    cleanup) shift && cmd_cleanup "$@" ;;
+    all) cmd_all ;;
+    -h | --help | help) usage ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
