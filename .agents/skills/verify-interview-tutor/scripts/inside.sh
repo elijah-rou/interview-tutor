@@ -240,7 +240,7 @@ feature_catalog() {
     begin_feature catalog "./practice sets list; ./practice --set ID list|show; ./practice problems|sets list|show"
     local db=$FEATURE_DIR/progress.db
     step sets-list 0 ./practice --db "$db" sets list
-    for set in anti-metal blind75 convex core depot jane-street runtime-practice; do expect_out "$set"; done
+    for set in automated-infrastructure blind75 distributed-database core serverless-ci quant-software runtime-practice; do expect_out "$set"; done
     step blind75-list 0 ./practice --db "$db" --set blind75 list
     expect_out two-sum
     expect_out best-time-to-buy-and-sell-stock
@@ -249,7 +249,7 @@ feature_catalog() {
     expect_out 'Problem set: blind75 #16'
     step show-by-index 0 ./practice --db "$db" --set blind75 show 16
     expect_out 'Slug: two-sum'
-    step convex-list 0 ./practice --db "$db" --set convex list
+    step distributed-database-list 0 ./practice --db "$db" --set distributed-database list
     step problems-show 0 ./practice --db "$db" problems show two-sum
     expect_out two-sum
     step problems-list 0 ./practice --db "$db" problems list
@@ -314,7 +314,7 @@ feature_progress() {
     step list-done-column 0 ./practice --db "$db" --set blind75 list
     grep -E '^16 .*yes .*two-sum' "$LAST.out" > /dev/null || fail 'two-sum row lacks the Python done marker'
     ok 'blind75 list marks two-sum done for python'
-    step stats-unrelated-set 0 ./practice --db "$db" --set convex stats --language python
+    step stats-unrelated-set 0 ./practice --db "$db" --set distributed-database stats --language python
     expect_out '0/13'
     expect_attempts "$db" 'two-sum python pass 0 -;'
     assert_pristine

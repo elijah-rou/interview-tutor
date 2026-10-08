@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "id": "jane-street",
-  "name": "Jane Street",
-  "description": "A fifteen-problem set for the Jane Street software-engineering screening plan.",
+  "id": "quant-software",
+  "name": "Quant Software",
+  "description": "A fifteen-problem set for quant software engineering interview preparation.",
   "members": [
     {
       "ordinal": 1,

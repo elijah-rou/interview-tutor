@@ -1,4 +1,4 @@
-# Jane Street interview set
+# Quant Software interview set
 
 This set follows the weekend screening plan. Use Python, narrate the design, state invariants and complexity, test the baseline, then accept extensions one at a time.
 

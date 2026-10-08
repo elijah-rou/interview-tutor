@@ -8,7 +8,7 @@ This directory is the maintained source for verifying what users of interview-tu
 - `.agents/skills/verify-interview-tutor/scripts/verify-tutor doctor RUN_ID` ends with `DOCTOR PASS`.
 - Inside the container, `/work` is a copy of the checkout. Its `python/problems/easy/two_sum.py` and `rust/src/problems/two_sum.rs` are the unimplemented starters, identical to `/src`.
 - Each feature uses its own fresh database, `DB=/proof/<feature>/progress.db`, passed as `--db "$DB"`. The repository's `.turso/progress.db` is never used.
-- The shipped catalog has 98 problems in seven sets: `anti-metal`, `blind75` (75), `convex` (13), `core`, `depot`, `jane-street`, and `runtime-practice`. `two-sum` is `blind75` #16 and belongs to no other set.
+- The shipped catalog has 98 problems in seven sets: `automated-infrastructure`, `blind75` (75), `distributed-database` (13), `core`, `serverless-ci`, `quant-software`, and `runtime-practice`. `two-sum` is `blind75` #16 and belongs to no other set.
 - Evidence goes to `.agents/skills/verify-interview-tutor/evidence/RUN_ID/<feature>/`, which cleanup never touches.
 
 ## Driving conventions

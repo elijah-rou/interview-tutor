@@ -30,7 +30,7 @@ Preconditions:
 - **Global stats.** Run `./practice --db "$DB" stats --global --language python`. Stdout has `All Problems progress (python): 1/98 (1.0%)`.
 - **Other language.** Run `./practice --db "$DB" --set blind75 stats --language rust`. Stdout has `Blind 75 progress (rust): 0/75 (0.0%)`.
 - **Done marker.** Run `./practice --db "$DB" --set blind75 list`. The row starting `16` has `yes` in the Python column for `two-sum`.
-- **Unrelated set.** Run `./practice --db "$DB" --set convex stats --language python`. Stdout has `0/13`.
+- **Unrelated set.** Run `./practice --db "$DB" --set distributed-database stats --language python`. Stdout has `0/13`.
 - **Recorded attempts.** `attempts` holds exactly one row: python pass 0.
 
 ## Gotchas

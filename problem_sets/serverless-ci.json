@@ -1,20 +1,20 @@
 {
   "schema_version": 2,
-  "id": "anti-metal",
-  "name": "anti-metal",
-  "description": "A focused ten-problem interview preparation set for anti-metal.",
+  "id": "serverless-ci",
+  "name": "Serverless CI",
+  "description": "A focused ten-problem interview preparation set for serverless CI.",
   "members": [
     {
       "ordinal": 1,
-      "problem_slug": "time-based-key-value-store"
-    },
-    {
-      "ordinal": 2,
       "problem_slug": "lru-cache"
     },
     {
-      "ordinal": 3,
+      "ordinal": 2,
       "problem_slug": "course-schedule"
+    },
+    {
+      "ordinal": 3,
+      "problem_slug": "meeting-rooms-ii"
     },
     {
       "ordinal": 4,
@@ -22,11 +22,11 @@
     },
     {
       "ordinal": 5,
-      "problem_slug": "top-k-frequent-elements"
+      "problem_slug": "time-based-key-value-store"
     },
     {
       "ordinal": 6,
-      "problem_slug": "longest-substring-without-repeating-characters"
+      "problem_slug": "top-k-frequent-elements"
     },
     {
       "ordinal": 7,
@@ -34,7 +34,7 @@
     },
     {
       "ordinal": 8,
-      "problem_slug": "binary-tree-level-order-traversal"
+      "problem_slug": "sliding-window-maximum"
     },
     {
       "ordinal": 9,

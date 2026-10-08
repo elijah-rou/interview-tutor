@@ -2,7 +2,7 @@
   "schema_version": 2,
   "id": "core",
   "name": "Core",
-  "description": "A 17-problem core interview preparation set shared across company-specific preparation.",
+  "description": "A 17-problem core interview preparation set shared across specialized interview preparation.",
   "members": [
     {
       "ordinal": 1,

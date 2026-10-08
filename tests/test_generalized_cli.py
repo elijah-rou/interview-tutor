@@ -41,7 +41,7 @@ EXPECTED_INTERVIEW_SETS = {
         "subarray-sum-equals-k",
         "subsets",
     ],
-    "convex": [
+    "distributed-database": [
         "longest-substring-without-repeating-characters",
         "merge-intervals",
         "top-k-frequent-elements",
@@ -56,7 +56,7 @@ EXPECTED_INTERVIEW_SETS = {
         "bounded-blocking-queue",
         "concurrent-account-transfers",
     ],
-    "anti-metal": [
+    "automated-infrastructure": [
         "time-based-key-value-store",
         "lru-cache",
         "course-schedule",
@@ -68,7 +68,7 @@ EXPECTED_INTERVIEW_SETS = {
         "kth-largest-element-in-a-stream",
         "coin-change",
     ],
-    "depot": [
+    "serverless-ci": [
         "lru-cache",
         "course-schedule",
         "meeting-rooms-ii",
@@ -80,7 +80,7 @@ EXPECTED_INTERVIEW_SETS = {
         "kth-largest-element-in-a-stream",
         "coin-change",
     ],
-    "jane-street": [
+    "quant-software": [
         "time-based-key-value-store",
         "insert-delete-getrandom-o1",
         "number-of-islands",
@@ -197,9 +197,17 @@ class GeneralizedCliTests(unittest.TestCase):
         rows = [line.split() for line in discovered.stdout.splitlines()[2:]]
         self.assertEqual(
             [row[0] for row in rows],
-            ["anti-metal", "blind75", "convex", "core", "depot", "jane-street", "runtime-practice"],
+            [
+                "automated-infrastructure",
+                "blind75",
+                "core",
+                "distributed-database",
+                "quant-software",
+                "runtime-practice",
+                "serverless-ci",
+            ],
         )
-        self.assertEqual([row[-1] for row in rows], ["10", "75", "13", "17", "10", "15", "10"])
+        self.assertEqual([row[-1] for row in rows], ["10", "75", "17", "13", "15", "10", "10"])
 
         for set_id, expected_slugs in EXPECTED_INTERVIEW_SETS.items():
             with self.subTest(set_id=set_id):
@@ -237,7 +245,7 @@ class GeneralizedCliTests(unittest.TestCase):
                     )
                     self.assertEqual(by_index.stdout, by_slug.stdout)
 
-        attempted = self.run_command(str(ROOT / "run"), "python", "convex", "4")
+        attempted = self.run_command(str(ROOT / "run"), "python", "distributed-database", "4")
         self.assertEqual(attempted.returncode, 1, attempted.stderr)
         self.assertIn(
             "FAIL time-based-key-value-store: starter is not implemented",
@@ -255,18 +263,22 @@ class GeneralizedCliTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(
             recorded_attempt,
-            ("time-based-key-value-store", "convex", "fail", 1),
+            ("time-based-key-value-store", "distributed-database", "fail", 1),
         )
 
-    def test_convex_concurrency_starters_dispatch_by_set_index(self) -> None:
-        for index, slug in enumerate(EXPECTED_INTERVIEW_SETS["convex"][10:], start=11):
+    def test_distributed_database_concurrency_starters_dispatch_by_set_index(self) -> None:
+        for index, slug in enumerate(
+            EXPECTED_INTERVIEW_SETS["distributed-database"][10:], start=11
+        ):
             with self.subTest(slug=slug):
                 shown = self.run_command(
-                    str(ROOT / "practice"), "--set", "convex", "show", str(index)
+                    str(ROOT / "practice"), "--set", "distributed-database", "show", str(index)
                 )
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertIn(f"Slug: {slug}", shown.stdout)
-                result = self.run_command(str(ROOT / "run"), "python", "convex", str(index))
+                result = self.run_command(
+                    str(ROOT / "run"), "python", "distributed-database", str(index)
+                )
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(f"FAIL {slug}: starter is not implemented", result.stderr)
 

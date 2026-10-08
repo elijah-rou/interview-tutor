@@ -1,4 +1,4 @@
-"""Convex concurrency drill: atomic transfers under one shared lock.
+"""Distributed database concurrency drill: atomic transfers under one shared lock.
 
 Account membership is fixed. Copy the initial balances and return snapshots.
 Per-account locking with a consistent order is an optional follow-up.

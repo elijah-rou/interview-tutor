@@ -1,6 +1,6 @@
 # Interview Tutor
 
-Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional backend-neutral interviewer with Pi as the default transport and Codex as an explicit compatibility option. The 98-problem global catalog ships the Blind 75, Convex, Core, anti-metal, Depot, Jane Street, and Runtime Practice sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
+Interview Tutor is a Linux-first, local algorithm practice catalog and judge. It combines a Rust catalog/progress CLI, a terminal problem browser and native solve editor, Python and Rust adapters, and an optional backend-neutral interviewer with Pi as the default transport and Codex as an explicit compatibility option. The 98-problem global catalog ships the Blind 75, Distributed Database, Core, Automated Infrastructure, Serverless CI, Quant Software, and Runtime Practice sets; problems, solutions, attempts, and completion have one global identity even when a problem belongs to several sets.
 
 ## Requirements and build
 
@@ -45,9 +45,9 @@ Browse a set, inspect progress, open a problem, then solve it in the TUI:
 
 ```console
 ./practice sets list
-./practice --set convex list
-./practice --set anti-metal show 1
-./practice --set depot list
+./practice --set distributed-database list
+./practice --set automated-infrastructure show 1
+./practice --set serverless-ci list
 ./interview --set runtime-practice --language python --no-codex
 ./practice --set blind75 show 16
 ./practice --set blind75 stats --language python
@@ -106,7 +106,7 @@ rust/                       Rust starters, adapters, and representative cases
 
 Starter APIs follow LeetCode where an official public template exists; otherwise they use the documented conventional local representation. Local tests are representative public contracts, not LeetCode's private hidden corpus. Starter solutions intentionally remain incomplete and can fail the full language suite.
 
-Shipped statement briefs remain in `catalog/problems.json`. They were independently written from checked-in interfaces, data structures, and public executable cases; executable cases are authoritative if a brief conflicts. [Catalog provenance](catalog/README.md), the [problem-set index](problem_sets/README.md), the [anti-metal selection rationales](problem_sets/anti-metal.md), and the [original Blind 75 local brief](problem_sets/blind75.md) remain checked in and visible.
+Shipped statement briefs remain in `catalog/problems.json`. They were independently written from checked-in interfaces, data structures, and public executable cases; executable cases are authoritative if a brief conflicts. [Catalog provenance](catalog/README.md), the [problem-set index](problem_sets/README.md), the [Automated Infrastructure selection rationales](problem_sets/automated-infrastructure.md), and the [original Blind 75 local brief](problem_sets/blind75.md) remain checked in and visible.
 
 See the [Python interview cheat sheet](docs/python-interview-cheat-sheet.html) for heaps, stacks, queues, graphs, linked lists, and `asyncio` patterns. See [architecture](docs/architecture.md), [testing](docs/testing.md), and [security](SECURITY.md) for implementation boundaries and verification gates.
 

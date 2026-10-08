@@ -1,4 +1,4 @@
-"""Convex concurrency drill: use a deque and a threading.Condition.
+"""Distributed database concurrency drill: use a deque and a threading.Condition.
 
 Closing stops admission, wakes waiters, and permits draining accepted items.
 The get(timeout) follow-up is not part of the core API.

@@ -1,4 +1,4 @@
-"""Convex concurrency drill: adapt lru_cache.py without changing that exercise.
+"""Distributed database concurrency drill: adapt lru_cache.py without changing that exercise.
 
 Protect each complete get/put operation with one lock, including recency updates.
 The get_or_load follow-up is discussion-only until the core passes.
