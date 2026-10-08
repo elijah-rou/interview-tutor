@@ -2,7 +2,7 @@
 
 The checked-in v2 problem-set schema represents ordered membership but not sections or per-member notes. The 17 members are grouped as follows:
 
-## Shared company core
+## Shared preparation core
 
 1. **Merge Intervals (56)**
 2. **Top K Frequent Elements (347)**
@@ -13,7 +13,7 @@ The checked-in v2 problem-set schema represents ordered membership but not secti
 7. **Kth Largest Element in a Stream (703)**
 8. **Coin Change (322)**
 
-## Additional company-set problems
+## Additional specialized-set problems
 
 9. **Longest Substring Without Repeating Characters (3)**
 10. **Binary Tree Level Order Traversal (102)**

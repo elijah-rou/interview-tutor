@@ -515,6 +515,117 @@ class ProjectCliTests(unittest.TestCase):
             self.assertEqual(custom_adapter, ("python/custom_updated.py", 1))
             self.assertEqual(revision, ("2",))
 
+    def test_generic_set_rename_preserves_identity_history_and_progress(self) -> None:
+        renames = {
+            "anti-metal": "automated-infrastructure",
+            "convex": "distributed-database",
+            "depot": "serverless-ci",
+            "jane-street": "quant-software",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            old_sets = {
+                slug: {**self.fixture_sets()["managed-set"], "id": slug, "name": slug}
+                for slug in renames
+            }
+            self.write_fixture_root(root, self.fixture_catalog(revision=8), old_sets)
+            initialized = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            for slug in renames:
+                recorded = self.run_fixture_command(
+                    root,
+                    database,
+                    "_record",
+                    "python",
+                    "managed-one",
+                    "pass",
+                    "1",
+                    "--problem-set",
+                    slug,
+                )
+                self.assertEqual(recorded.returncode, 0, recorded.stderr)
+            with sqlite3.connect(database) as connection:
+                old_ids = dict(connection.execute("SELECT slug, id FROM problem_sets"))
+                old_attempts = connection.execute("SELECT * FROM attempts ORDER BY id").fetchall()
+                old_members = connection.execute(
+                    "SELECT * FROM problem_set_members ORDER BY problem_set_id, ordinal"
+                ).fetchall()
+            new_sets = {
+                new: {**old_sets[old], "id": new, "name": new} for old, new in renames.items()
+            }
+            self.write_fixture_root(root, self.fixture_catalog(revision=9), new_sets)
+            for _ in range(2):
+                upgraded = self.run_fixture_command(root, database, "sets", "list")
+                self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+                with sqlite3.connect(database) as connection:
+                    new_ids = dict(connection.execute("SELECT slug, id FROM problem_sets"))
+                    attempts = connection.execute("SELECT * FROM attempts ORDER BY id").fetchall()
+                    members = connection.execute(
+                        "SELECT * FROM problem_set_members ORDER BY problem_set_id, ordinal"
+                    ).fetchall()
+                self.assertEqual(new_ids, {new: old_ids[old] for old, new in renames.items()})
+                self.assertEqual(attempts, old_attempts)
+                self.assertEqual(members, old_members)
+            stats = self.run_fixture_command(
+                root, database, "--set", "distributed-database", "stats", "--language", "python"
+            )
+            self.assertEqual(stats.returncode, 0, stats.stderr)
+            self.assertEqual(
+                stats.stdout.splitlines()[0],
+                "distributed-database progress (python): 1/2 (50.0%)",
+            )
+
+    def test_generic_set_rename_collision_rolls_back_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            old_set = {**self.fixture_sets()["managed-set"], "id": "convex"}
+            self.write_fixture_root(root, self.fixture_catalog(revision=8), {"convex": old_set})
+            initialized = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            created = self.run_fixture_command(
+                root, database, "sets", "create", "distributed-database", "--name", "Local Set"
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            with sqlite3.connect(database) as connection:
+                before = tuple(connection.iterdump())
+            new_set = {**old_set, "id": "distributed-database"}
+            self.write_fixture_root(
+                root, self.fixture_catalog(revision=9), {"distributed-database": new_set}
+            )
+            upgraded = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(upgraded.returncode, 2)
+            self.assertIn("target already exists: distributed-database", upgraded.stderr)
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(tuple(connection.iterdump()), before)
+
+    def test_generic_set_rename_leaves_local_old_slug_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            database = Path(directory) / "progress.db"
+            self.write_fixture_root(root, self.fixture_catalog(revision=8), self.fixture_sets())
+            created = self.run_fixture_command(
+                root, database, "sets", "create", "convex", "--name", "Local Set"
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            new_sets = self.fixture_sets()
+            new_sets["distributed-database"] = {
+                **new_sets["managed-set"],
+                "id": "distributed-database",
+            }
+            self.write_fixture_root(root, self.fixture_catalog(revision=9), new_sets)
+            upgraded = self.run_fixture_command(root, database, "sets", "list")
+            self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+            with sqlite3.connect(database) as connection:
+                sets = connection.execute(
+                    "SELECT slug, name, managed FROM problem_sets "
+                    "WHERE slug IN ('convex', 'distributed-database') ORDER BY slug"
+                ).fetchall()
+            self.assertEqual(
+                sets, [("convex", "Local Set", 0), ("distributed-database", "Managed Set", 1)]
+            )
+
     def test_language_registries_cover_the_seeded_global_catalog(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
         expected = {problem["slug"] for problem in catalog["problems"]}

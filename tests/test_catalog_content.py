@@ -61,8 +61,8 @@ EXPECTED_INTERVIEW_SETS = {
             "subsets",
         ],
     },
-    "convex": {
-        "name": "Convex",
+    "distributed-database": {
+        "name": "Distributed Database",
         "members": [
             "longest-substring-without-repeating-characters",
             "merge-intervals",
@@ -76,8 +76,8 @@ EXPECTED_INTERVIEW_SETS = {
             "coin-change",
         ],
     },
-    "anti-metal": {
-        "name": "anti-metal",
+    "automated-infrastructure": {
+        "name": "Automated Infrastructure",
         "members": [
             "time-based-key-value-store",
             "lru-cache",
@@ -91,8 +91,8 @@ EXPECTED_INTERVIEW_SETS = {
             "coin-change",
         ],
     },
-    "depot": {
-        "name": "Depot",
+    "serverless-ci": {
+        "name": "Serverless CI",
         "members": [
             "lru-cache",
             "course-schedule",
@@ -106,8 +106,8 @@ EXPECTED_INTERVIEW_SETS = {
             "coin-change",
         ],
     },
-    "jane-street": {
-        "name": "Jane Street",
+    "quant-software": {
+        "name": "Quant Software",
         "members": [
             "time-based-key-value-store",
             "insert-delete-getrandom-o1",
@@ -215,7 +215,7 @@ class CatalogContentTests(unittest.TestCase):
         self.assertTrue(all(len(statement) <= MAX_STATEMENT_LENGTH for statement in statements))
 
     def test_catalog_has_95_problems_and_expected_new_canonical_metadata(self) -> None:
-        self.assertEqual(self.catalog["catalog_revision"], 8)
+        self.assertEqual(self.catalog["catalog_revision"], 9)
         self.assertEqual(len(self.problems), 95)
         self.assertEqual([problem["slug"] for problem in self.problems], sorted(self.by_slug))
         for slug, expected in EXPECTED_NEW_PROBLEMS.items():
@@ -231,7 +231,15 @@ class CatalogContentTests(unittest.TestCase):
     def test_all_seven_shipped_sets_have_exact_ordered_catalog_members(self) -> None:
         self.assertEqual(
             set(self.problem_sets),
-            {"anti-metal", "blind75", "convex", "core", "depot", "jane-street", "runtime-practice"},
+            {
+                "automated-infrastructure",
+                "blind75",
+                "distributed-database",
+                "core",
+                "serverless-ci",
+                "quant-software",
+                "runtime-practice",
+            },
         )
 
         blind75_members = self.problem_sets["blind75"]["members"]

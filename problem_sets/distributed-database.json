@@ -1,32 +1,32 @@
 {
   "schema_version": 2,
-  "id": "depot",
-  "name": "Depot",
-  "description": "No LeetCode round is publicly evidenced. This is the bounded preparation set for Depot.",
+  "id": "distributed-database",
+  "name": "Distributed Database",
+  "description": "A focused ten-problem interview preparation set for distributed databases.",
   "members": [
     {
       "ordinal": 1,
-      "problem_slug": "lru-cache"
+      "problem_slug": "longest-substring-without-repeating-characters"
     },
     {
       "ordinal": 2,
-      "problem_slug": "course-schedule"
-    },
-    {
-      "ordinal": 3,
-      "problem_slug": "meeting-rooms-ii"
-    },
-    {
-      "ordinal": 4,
       "problem_slug": "merge-intervals"
     },
     {
-      "ordinal": 5,
+      "ordinal": 3,
+      "problem_slug": "top-k-frequent-elements"
+    },
+    {
+      "ordinal": 4,
       "problem_slug": "time-based-key-value-store"
     },
     {
+      "ordinal": 5,
+      "problem_slug": "lru-cache"
+    },
+    {
       "ordinal": 6,
-      "problem_slug": "top-k-frequent-elements"
+      "problem_slug": "course-schedule"
     },
     {
       "ordinal": 7,
@@ -34,7 +34,7 @@
     },
     {
       "ordinal": 8,
-      "problem_slug": "sliding-window-maximum"
+      "problem_slug": "binary-tree-level-order-traversal"
     },
     {
       "ordinal": 9,

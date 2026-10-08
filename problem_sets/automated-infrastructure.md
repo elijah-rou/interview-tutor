@@ -1,6 +1,6 @@
-# anti-metal interview set
+# Automated Infrastructure interview set
 
-The checked-in v2 problem-set schema represents ordered membership but not per-member notes. These are the selection rationales for the shipped `anti-metal` set:
+The checked-in v2 problem-set schema represents ordered membership but not per-member notes. These are the selection rationales for the shipped `automated-infrastructure` set:
 
 1. **Time Based Key-Value Store (981):** Temporal state and point-in-time reads.
 2. **LRU Cache (146):** Stateful API design and data-structure invariants.

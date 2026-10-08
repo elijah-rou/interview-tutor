@@ -771,6 +771,7 @@ fn sync_seed_catalog(connection: &Connection, catalog: &SeedCatalog) -> Result<(
             .iter()
             .map(|problem_set| problem_set.id.as_str())
             .collect();
+        rename_managed_problem_sets(connection, &current_set_ids)?;
         let retired_set_ids = {
             let mut statement = connection
                 .prepare("SELECT id, slug FROM problem_sets WHERE managed = 1 ORDER BY id")
@@ -809,6 +810,53 @@ fn sync_seed_catalog(connection: &Connection, catalog: &SeedCatalog) -> Result<(
             .map_err(sql_error)?;
         Ok(())
     })
+}
+
+fn rename_managed_problem_sets(
+    connection: &Connection,
+    current_set_ids: &HashSet<&str>,
+) -> Result<(), String> {
+    // Keep integer identities so past attempts retain their invoked-set reference.
+    for (old_slug, new_slug) in [
+        ("anti-metal", "automated-infrastructure"),
+        ("convex", "distributed-database"),
+        ("depot", "serverless-ci"),
+        ("jane-street", "quant-software"),
+    ] {
+        if !current_set_ids.contains(new_slug) || current_set_ids.contains(old_slug) {
+            continue;
+        }
+        let old_id: Option<i64> = connection
+            .query_row(
+                "SELECT id FROM problem_sets WHERE slug = ? AND managed = 1",
+                params![old_slug],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some(old_id) = old_id else {
+            continue;
+        };
+        let target_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM problem_sets WHERE slug = ?)",
+                params![new_slug],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if target_exists {
+            return Err(format!(
+                "cannot rename shipped problem set {old_slug}: target already exists: {new_slug}"
+            ));
+        }
+        connection
+            .execute(
+                "UPDATE problem_sets SET slug = ? WHERE id = ? AND managed = 1",
+                params![new_slug, old_id],
+            )
+            .map_err(sql_error)?;
+    }
+    Ok(())
 }
 
 fn sync_problem(
