@@ -1,6 +1,6 @@
 # Attempt test output plan
 
-Status: shape proposed, awaiting review. Nothing below is built.
+Status: shape approved 2026-10-12; building.
 
 ## Request
 
@@ -183,14 +183,12 @@ Rejected from B: per-recording random idempotency keys and immutable `recorded_r
 - Output columns on `attempts` with no cases: smallest change, but it cannot represent "each test case" and would need a second migration.
 - Keeping `_record` with a "no output" marker: a permanent second writer that contradicts "every attempt keeps its output".
 
-## Open decisions
+## Approved decisions (2026-10-12)
 
-For the user to settle before build. Recommended defaults are in brackets.
-
-1. Judge protocol and process-per-case now [yes], versus storing only per-attempt stdout/stderr with no case structure.
-2. Stored cap per stream per case [8 KiB, whole attempt within 256 KiB], versus 32 KiB with per-case loading in the TUI.
-3. Delete hidden `practice _record` [yes].
-4. Database file mode [unchanged, documented], versus creating it 0600 now that it holds program output.
+1. Build the judge protocol and process-per-case execution now.
+2. Store at most 8 KiB per stream per case, so a whole attempt stays within 256 KiB.
+3. Delete hidden `practice _record`.
+4. Leave the database file mode unchanged and document that output is now persisted.
 
 ## First implementation step
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -32,44 +33,82 @@ def print_problems() -> None:
         print(problem.slug)
 
 
-def run(problem: Problem) -> None:
-    module = load_problem(problem)
+def cases(problem: Problem) -> dict[str, Callable[[ModuleType], None]]:
+    """Named cases in execution order. Each existing scenario is one case until it is split."""
     custom = CUSTOM_TESTS.get(problem.slug)
     if custom is not None:
-        custom(module)
-        return
+        return {"scenario-1": custom}
     case = SIMPLE_CASES.get(problem.slug)
     if case is None or problem.method_name is None:
         raise RuntimeError(f"test registry is incomplete for {problem.slug}")
-    test_simple(module, problem.method_name, case)
+    method_name = problem.method_name
+    return {"example-1": lambda module: test_simple(module, method_name, case)}
 
 
-def main(argv: list[str] | None = None) -> int:
-    arguments = sys.argv[1:] if argv is None else argv
-    if arguments == ["--list"]:
-        print_problems()
-        return 0
-    if len(arguments) != 1 or arguments[0].startswith("-"):
-        print("usage: ./run <slug>\n       ./run --list", file=sys.stderr)
+def run_case(problem: Problem, name: str) -> int:
+    case = cases(problem).get(name)
+    if case is None:
+        print(f"unknown case for {problem.slug}: {name!r}", file=sys.stderr)
         return 2
-    slug = arguments[0]
+    try:
+        case(load_problem(problem))
+    except NotImplementedError:
+        print(f"FAIL {problem.slug}: starter is not implemented", file=sys.stderr)
+        return 1
+    except Exception as error:
+        traceback.print_exc()
+        print(f"FAIL {problem.slug}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def lookup(slug: str) -> Problem | None:
     problem = BY_SLUG.get(slug)
     if problem is None:
         print(f"unknown problem: {slug!r}", file=sys.stderr)
         print("use ./run --list to see valid slugs", file=sys.stderr)
-        return 2
-    try:
-        run(problem)
-    except NotImplementedError:
-        print(f"FAIL {slug}: starter is not implemented", file=sys.stderr)
-        return 1
-    except Exception as error:
-        print(f"FAIL {slug}: {error}", file=sys.stderr)
-        if "--traceback" in arguments:
-            traceback.print_exc()
-        return 1
-    print(f"PASS {slug}")
-    return 0
+    return problem
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    match arguments:
+        case ["--list"]:
+            print_problems()
+            return 0
+        case ["--cases", slug]:
+            # Lists names from the registry only; the solution is not imported.
+            problem = lookup(slug)
+            if problem is None:
+                return 2
+            for name in cases(problem):
+                print(name)
+            return 0
+        case ["--case", slug, name]:
+            problem = lookup(slug)
+            if problem is None:
+                return 2
+            status = run_case(problem, name)
+            if status == 0:
+                print(f"PASS {slug}")
+            return status
+        case [slug] if not slug.startswith("-"):
+            problem = lookup(slug)
+            if problem is None:
+                return 2
+            status = 0
+            for name in cases(problem):
+                status = max(status, run_case(problem, name))
+            if status == 0:
+                print(f"PASS {slug}")
+            return status
+        case _:
+            print(
+                "usage: ./run <slug>\n       ./run --list\n"
+                "       ./run --cases <slug>\n       ./run --case <slug> <case>",
+                file=sys.stderr,
+            )
+            return 2
 
 
 assert set(SIMPLE_CASES) | set(CUSTOM_TESTS) == set(BY_SLUG)

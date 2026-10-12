@@ -1,7 +1,7 @@
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand};
-use database::{AttemptOutcome, Difficulty, NewProblem, Problem, ProblemUpdate, ProgressScope};
-use practice_cli::{config, database, runner, signals};
+use database::{Difficulty, NewProblem, Problem, ProblemUpdate, ProgressScope};
+use practice_cli::{attempt, config, database, runner, signals};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,12 +13,6 @@ use std::str::FromStr;
 fn difficulty_parser() -> impl TypedValueParser<Value = Difficulty> {
     PossibleValuesParser::new(["Easy", "Medium", "Hard"])
         .map(|value| Difficulty::from_str(&value).expect("possible difficulty values parse"))
-}
-
-fn attempt_outcome_parser() -> impl TypedValueParser<Value = AttemptOutcome> {
-    PossibleValuesParser::new(["pass", "fail", "error", "cancelled"]).map(|value| {
-        AttemptOutcome::from_str(&value).expect("possible attempt outcome values parse")
-    })
 }
 
 #[derive(Parser)]
@@ -66,8 +60,11 @@ enum TopCommand {
         #[command(subcommand)]
         command: SetsCommand,
     },
-    #[command(name = "_record", hide = true)]
-    Record(RecordArgs),
+    #[command(about = "show recorded attempts and their test output")]
+    Attempts {
+        #[command(subcommand)]
+        command: AttemptsCommand,
+    },
 }
 
 #[derive(Args)]
@@ -93,17 +90,42 @@ struct RunArgs {
     selectors: Vec<String>,
 }
 
+#[derive(Subcommand)]
+enum AttemptsCommand {
+    #[command(about = "list a problem's attempts, newest first")]
+    List(AttemptsListArgs),
+    #[command(about = "show one attempt's per-case results and output")]
+    Show(AttemptsShowArgs),
+}
+
 #[derive(Args)]
-struct RecordArgs {
-    language: String,
+struct AttemptsListArgs {
+    #[arg(help = "global problem slug, or a 1-based index in --set")]
     problem: String,
-    #[arg(value_parser = attempt_outcome_parser())]
-    result: AttemptOutcome,
-    duration_ms: i64,
-    #[arg(long = "problem-set")]
-    invoked_set: Option<String>,
     #[arg(long)]
-    exit_code: Option<i32>,
+    language: Option<String>,
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    limit: u16,
+    #[arg(
+        long,
+        value_name = "ID",
+        help = "list attempts older than this attempt id"
+    )]
+    before: Option<i64>,
+}
+
+#[derive(Args)]
+struct AttemptsShowArgs {
+    id: i64,
+    #[arg(long, help = "case name or 1-based case number")]
+    case: Option<String>,
+    #[arg(
+        long,
+        value_parser = ["stdout", "stderr"],
+        requires = "case",
+        help = "print only this stream's stored text"
+    )]
+    stream: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -455,19 +477,15 @@ fn run_one(
     let signal_handlers = signals::ScopedSignalHandlers::register()?;
     let signal_state = signal_handlers.state();
     let cancellation = runner::CancellationToken::with_signal_state(signal_state.clone());
-    let execution = runner::execute(
+    let mut report = runner::execute(
         &plan,
         &context.database_path,
         &runner::ExecutionLimits::default(),
         &cancellation,
         None,
-    );
-    let mut result = execution?;
-    if cancellation.is_cancelled() {
-        result.termination = runner::Termination::Cancelled;
-    }
+    )?;
 
-    let attempt_id = runner::record_execution(&context.connection, &plan, &result)?;
+    let attempt_id = runner::record_execution(&context.connection, &plan, &report)?;
     let blocked_signals = signals::BlockedExecutionSignals::block()?;
     let pending_exit_code = blocked_signals.pending_exit_code()?;
     let signal_exit_code = signal_state.exit_code().or(pending_exit_code);
@@ -475,10 +493,10 @@ fn run_one(
     let run_result = if signal_cancelled {
         let exit_code = signal_exit_code.unwrap_or(130);
         database::finalize_attempt_cancelled(&context.connection, attempt_id, exit_code)?;
-        result.termination = runner::Termination::Cancelled;
+        report.mark_cancelled();
         RunOneResult::Interrupted(exit_code)
     } else {
-        RunOneResult::Completed(result.status_code())
+        RunOneResult::Completed(report.status_code())
     };
     // A signal observed through this check belongs to this attempt. Once this cutoff completes,
     // later signals belong to the restored caller disposition and cannot rewrite a published run.
@@ -490,7 +508,7 @@ fn run_one(
     mask_restore?;
 
     io::stderr()
-        .write_all(result.display_output.as_bytes())
+        .write_all(attempt::render_report(&report).as_bytes())
         .map_err(|error| format!("cannot write runner output: {error}"))?;
     Ok(run_result)
 }
@@ -698,7 +716,6 @@ fn register_adapter(
     let runner_path = context.root.join(enabled_language.runner_path);
     let discovery_limits = runner::ExecutionLimits {
         wall_timeout: std::time::Duration::from_secs(5),
-        display_output_bytes: 64 * 1024,
         ..runner::ExecutionLimits::default()
     };
     let adapters = runner::discover_adapters(
@@ -859,16 +876,122 @@ fn dispatch(cli: Cli) -> Result<i32, String> {
         }
         TopCommand::Problems { command } => command_problems(&context, command),
         TopCommand::Sets { command } => command_sets(&context, command),
-        TopCommand::Record(args) => {
-            database::record_attempt(
+        TopCommand::Attempts { command } => command_attempts(&context, command),
+    }
+}
+
+fn command_attempts(context: &Context, command: &AttemptsCommand) -> Result<i32, String> {
+    match command {
+        AttemptsCommand::List(args) => {
+            let problem = if args.problem.bytes().all(|byte| byte.is_ascii_digit()) {
+                database::resolve_problem(
+                    &context.connection,
+                    &args.problem,
+                    Some(&context.problem_set),
+                )?
+            } else {
+                database::resolve_problem(&context.connection, &args.problem, None)?
+            }
+            .problem;
+            let cursor = args.before.map_or(
+                database::AttemptCursor::Newest,
+                database::AttemptCursor::Before,
+            );
+            let page = database::list_attempts(
                 &context.connection,
-                &args.problem,
-                &args.language,
-                args.result,
-                args.duration_ms,
-                args.exit_code,
-                args.invoked_set.as_deref(),
+                &problem.slug,
+                args.language.as_deref(),
+                cursor,
+                usize::from(args.limit),
             )?;
+            if page.rows.is_empty() {
+                println!("No attempts recorded for {}.", problem.slug);
+                return Ok(0);
+            }
+            let rows = page
+                .rows
+                .iter()
+                .map(|row| {
+                    vec![
+                        row.id.to_string(),
+                        row.run_at.clone(),
+                        row.language.clone(),
+                        row.result.to_string(),
+                        row.cases.map_or("-".to_string(), |(passed, total)| {
+                            format!("{passed}/{total}")
+                        }),
+                        row.duration_ms.to_string(),
+                        if row.current_revision {
+                            "current".to_string()
+                        } else {
+                            format!("{} (outdated)", row.test_revision)
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            print_table(
+                &[
+                    "ID", "Run at", "Language", "Result", "Cases", "ms", "Revision",
+                ]
+                .map(str::to_string),
+                &rows,
+            )?;
+            if page.has_older
+                && let Some(oldest) = page.rows.last()
+            {
+                println!("(older: --before {})", oldest.id);
+            }
+            Ok(0)
+        }
+        AttemptsCommand::Show(args) => {
+            let record = database::get_attempt(&context.connection, args.id)?;
+            let Some(selector) = args.case.as_deref() else {
+                print!("{}", attempt::render_record(&record));
+                return Ok(0);
+            };
+            let attempt::RecordedOutput::Captured(output) = &record.output else {
+                return Err(format!(
+                    "attempt {} predates output capture and has no cases",
+                    record.id
+                ));
+            };
+            let cases = output.cases();
+            let case = match selector.parse::<usize>() {
+                Ok(number) if (1..=cases.len()).contains(&number) => &cases[number - 1],
+                Ok(number) => {
+                    return Err(format!(
+                        "attempt {} has {} cases; no case {number}",
+                        record.id,
+                        cases.len()
+                    ));
+                }
+                Err(_) => cases
+                    .iter()
+                    .find(|case| case.name.as_str() == selector)
+                    .ok_or_else(|| format!("attempt {} has no case {selector}", record.id))?,
+            };
+            let attempt::CaseRun::Ran(step) = &case.run else {
+                return Err(format!(
+                    "case {} did not run in attempt {}",
+                    case.name.as_str(),
+                    record.id
+                ));
+            };
+            match args.stream.as_deref() {
+                Some("stdout") => print!("{}", step.stdout.render()),
+                Some("stderr") => print!("{}", step.stderr.render()),
+                Some(other) => unreachable!("clap restricts --stream values, got {other}"),
+                None => {
+                    println!(
+                        "case {} · {} · {} ms",
+                        case.name.as_str(),
+                        case.run.outcome(),
+                        step.duration_ms
+                    );
+                    println!("stdout:\n{}", step.stdout.render());
+                    println!("stderr:\n{}", step.stderr.render());
+                }
+            }
             Ok(0)
         }
     }

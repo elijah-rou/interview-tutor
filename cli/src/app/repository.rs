@@ -200,7 +200,8 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{self, AttemptOutcome};
+    use crate::attempt::{AttemptReport, Termination};
+    use crate::database;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -244,20 +245,16 @@ mod tests {
             &connection,
             &members[0].problem.slug,
             "python",
-            AttemptOutcome::Pass,
-            1,
-            Some(0),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(0), ""),
         )
         .unwrap();
         database::record_attempt(
             &connection,
             &members[1].problem.slug,
             "python",
-            AttemptOutcome::Pass,
-            1,
-            Some(0),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(0), ""),
         )
         .unwrap();
         connection
@@ -270,10 +267,8 @@ mod tests {
             &connection,
             &members[2].problem.slug,
             "python",
-            AttemptOutcome::Fail,
-            1,
-            Some(1),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(1), ""),
         )
         .unwrap();
 

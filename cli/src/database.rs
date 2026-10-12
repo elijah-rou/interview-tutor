@@ -1,3 +1,7 @@
+use crate::attempt::{
+    AttemptRecord, AttemptReport, AttemptSummary, CapturedText, CaseEntry, CaseName, CaseRun,
+    NotRunReason, RecordedOutput, StepRun, Termination, TestOutput,
+};
 use crate::catalog::{
     ProblemSeed, ProblemSetSeed, SeedCatalog, validate_http_url, validate_identifier,
 };
@@ -16,7 +20,9 @@ pub const MAX_TOPIC_LENGTH: usize = 100;
 pub const MAX_DESCRIPTION_LENGTH: usize = 2_000;
 pub const MAX_STATEMENT_LENGTH: usize = 1_000_000;
 pub const MAX_DATABASE_QUERY_ROWS: usize = 100_000;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+/// Most attempts one history page may return.
+pub const MAX_ATTEMPT_PAGE_ROWS: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RowLimit(usize);
@@ -112,6 +118,36 @@ CREATE TABLE IF NOT EXISTS attempts (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS attempts_problem_language_revision
     ON attempts(problem_id, language_id, test_revision, result, run_at);
+CREATE INDEX IF NOT EXISTS attempts_problem_language_id
+    ON attempts(problem_id, language_id, id);
+-- Ordinal 0 is the setup step that listed the cases; ordinals 1.. are cases in run order.
+-- Every attempt recorded at schema v3 or later has at least the setup row.
+CREATE TABLE IF NOT EXISTS attempt_steps (
+    attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 15),
+    case_name TEXT CHECK (case_name IS NULL OR length(CAST(case_name AS BLOB)) BETWEEN 1 AND 64),
+    termination TEXT NOT NULL CHECK (termination IN (
+        'exited', 'signalled', 'timed_out', 'cancelled', 'not_run_cancelled', 'not_run_deadline'
+    )),
+    status INTEGER,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    stdout_omitted_bytes INTEGER NOT NULL CHECK (stdout_omitted_bytes >= 0),
+    stderr_omitted_bytes INTEGER NOT NULL CHECK (stderr_omitted_bytes >= 0),
+    stdout_head TEXT NOT NULL,
+    stdout_tail TEXT NOT NULL,
+    stderr_head TEXT NOT NULL,
+    stderr_tail TEXT NOT NULL,
+    PRIMARY KEY (attempt_id, ordinal),
+    UNIQUE (attempt_id, case_name),
+    CHECK ((ordinal = 0) = (case_name IS NULL)),
+    CHECK ((termination IN ('exited', 'signalled')) = (status IS NOT NULL)),
+    CHECK ((termination IN ('not_run_cancelled', 'not_run_deadline')) = (duration_ms IS NULL)),
+    CHECK (ordinal > 0 OR termination NOT IN ('not_run_cancelled', 'not_run_deadline')),
+    CHECK (stdout_omitted_bytes > 0 OR stdout_tail = ''),
+    CHECK (stderr_omitted_bytes > 0 OR stderr_tail = ''),
+    CHECK (length(CAST(stdout_head AS BLOB)) + length(CAST(stdout_tail AS BLOB)) <= 8192),
+    CHECK (length(CAST(stderr_head AS BLOB)) + length(CAST(stderr_tail AS BLOB)) <= 8192)
+) STRICT;
 "#;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -479,6 +515,9 @@ fn migrate_if_needed(
             connection.execute_batch(SCHEMA_SQL).map_err(sql_error)
         });
     }
+    if schema_version == 2 {
+        return migrate_v2(connection);
+    }
     let mut statement = connection
         .prepare("PRAGMA table_info(problems)")
         .map_err(sql_error)?;
@@ -710,6 +749,30 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
             )
             .map_err(sql_error)?;
         connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(sql_error)
+    })
+}
+
+/// v3 only adds `attempt_steps`; every v2 attempt is kept and reads as predating capture.
+fn migrate_v2(connection: &Connection) -> Result<(), String> {
+    transaction(connection, || {
+        let attempts_before: i64 = connection
+            .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
+        let attempts_after: i64 = connection
+            .query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        let steps: i64 = connection
+            .query_row("SELECT COUNT(*) FROM attempt_steps", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        if attempts_before != attempts_after || steps != 0 {
+            return Err(format!(
+                "v2 attempt migration mismatch: {attempts_after} attempts (expected {attempts_before}), {steps} steps (expected 0)"
+            ));
+        }
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(sql_error)
@@ -1764,18 +1827,14 @@ pub fn progress_summary_bounded(
     })
 }
 
+/// Records one execution and every step it ran in a single transaction.
 pub fn record_attempt(
     connection: &Connection,
     problem_slug: &str,
     language_slug: &str,
-    result: AttemptOutcome,
-    duration_ms: i64,
-    exit_code: Option<i32>,
     set_slug: Option<&str>,
+    report: &AttemptReport,
 ) -> Result<i64, String> {
-    if duration_ms < 0 {
-        return Err("duration must not be negative".to_string());
-    }
     let problem = resolve_problem(connection, problem_slug, None)?.problem;
     let language_id: Option<i64> = connection
         .query_row(
@@ -1794,26 +1853,416 @@ pub fn record_attempt(
     } else {
         None
     };
-    connection
-        .execute(
-            "INSERT INTO attempts( \
-                problem_id, language_id, invoked_set_id, result, test_revision, \
-                duration_ms, exit_code, run_at \
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
-            params![
-                problem.id,
-                language_id,
-                set_id,
-                result,
-                problem.test_revision,
-                duration_ms,
-                exit_code
-            ],
+    transaction(connection, || {
+        connection
+            .execute(
+                "INSERT INTO attempts( \
+                    problem_id, language_id, invoked_set_id, result, test_revision, \
+                    duration_ms, exit_code, run_at \
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+                params![
+                    problem.id,
+                    language_id,
+                    set_id,
+                    report.outcome(),
+                    problem.test_revision,
+                    report.duration_ms,
+                    report.exit_code()
+                ],
+            )
+            .map_err(sql_error)?;
+        let attempt_id = connection.last_insert_rowid();
+        assert!(attempt_id > 0);
+        let mut insert = connection
+            .prepare(
+                "INSERT INTO attempt_steps( \
+                    attempt_id, ordinal, case_name, termination, status, duration_ms, \
+                    stdout_omitted_bytes, stderr_omitted_bytes, \
+                    stdout_head, stdout_tail, stderr_head, stderr_tail \
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .map_err(sql_error)?;
+        let output = &report.output;
+        let steps = std::iter::once((None, StepRow::from_ran(output.setup()))).chain(
+            output
+                .cases()
+                .iter()
+                .map(|case| (Some(case.name.as_str()), StepRow::from_case(&case.run))),
+        );
+        for (ordinal, (case_name, row)) in steps.enumerate() {
+            let ordinal = i64::try_from(ordinal).expect("bounded case ordinal fits i64");
+            insert
+                .execute(params![
+                    attempt_id,
+                    ordinal,
+                    case_name,
+                    row.termination,
+                    row.status,
+                    row.duration_ms,
+                    row.stdout.omitted_bytes,
+                    row.stderr.omitted_bytes,
+                    row.stdout.head,
+                    row.stdout.tail,
+                    row.stderr.head,
+                    row.stderr.tail
+                ])
+                .map_err(sql_error)?;
+        }
+        Ok(attempt_id)
+    })
+}
+
+/// Storage codec for one `attempt_steps` row. Private: callers see `attempt` domain types.
+struct StepRow<'a> {
+    termination: &'static str,
+    status: Option<i32>,
+    duration_ms: Option<i64>,
+    stdout: TextColumns<'a>,
+    stderr: TextColumns<'a>,
+}
+
+struct TextColumns<'a> {
+    head: &'a str,
+    tail: &'a str,
+    omitted_bytes: i64,
+}
+
+impl<'a> TextColumns<'a> {
+    const EMPTY: Self = Self {
+        head: "",
+        tail: "",
+        omitted_bytes: 0,
+    };
+
+    fn from_captured(text: &'a CapturedText) -> Self {
+        match text {
+            CapturedText::Complete(text) => Self {
+                head: text,
+                tail: "",
+                omitted_bytes: 0,
+            },
+            CapturedText::Truncated {
+                head,
+                omitted_bytes,
+                tail,
+            } => Self {
+                head,
+                tail,
+                omitted_bytes: i64::try_from(omitted_bytes.get()).unwrap_or(i64::MAX),
+            },
+        }
+    }
+}
+
+impl<'a> StepRow<'a> {
+    fn from_ran(step: &'a StepRun) -> Self {
+        let (termination, status) = match step.termination {
+            Termination::Exited(code) => ("exited", Some(code)),
+            Termination::Signalled(signal) => ("signalled", Some(signal)),
+            Termination::TimedOut => ("timed_out", None),
+            Termination::Cancelled => ("cancelled", None),
+        };
+        Self {
+            termination,
+            status,
+            duration_ms: Some(step.duration_ms),
+            stdout: TextColumns::from_captured(&step.stdout),
+            stderr: TextColumns::from_captured(&step.stderr),
+        }
+    }
+
+    fn from_case(run: &'a CaseRun) -> Self {
+        let termination = match run {
+            CaseRun::Ran(step) => return Self::from_ran(step),
+            CaseRun::NotRun(NotRunReason::Cancelled) => "not_run_cancelled",
+            CaseRun::NotRun(NotRunReason::DeadlineExceeded) => "not_run_deadline",
+        };
+        Self {
+            termination,
+            status: None,
+            duration_ms: None,
+            stdout: TextColumns::EMPTY,
+            stderr: TextColumns::EMPTY,
+        }
+    }
+}
+
+fn decode_text(head: String, omitted_bytes: i64, tail: String) -> Result<CapturedText, String> {
+    if omitted_bytes == 0 {
+        if !tail.is_empty() {
+            return Err("stored complete output has a tail".to_string());
+        }
+        return CapturedText::complete(head);
+    }
+    let omitted_bytes = u64::try_from(omitted_bytes)
+        .map_err(|_| "stored omitted byte count is negative".to_string())?;
+    CapturedText::truncated(head, omitted_bytes, tail)
+}
+
+fn decode_case_run(
+    termination: &str,
+    status: Option<i32>,
+    duration_ms: Option<i64>,
+    stdout: CapturedText,
+    stderr: CapturedText,
+) -> Result<CaseRun, String> {
+    let termination = match (termination, status) {
+        ("exited", Some(code)) => Termination::Exited(code),
+        ("signalled", Some(signal)) => Termination::Signalled(signal),
+        ("timed_out", None) => Termination::TimedOut,
+        ("cancelled", None) => Termination::Cancelled,
+        ("not_run_cancelled", None) => return Ok(CaseRun::NotRun(NotRunReason::Cancelled)),
+        ("not_run_deadline", None) => return Ok(CaseRun::NotRun(NotRunReason::DeadlineExceeded)),
+        (termination, status) => {
+            return Err(format!(
+                "unknown stored step termination: {termination} ({status:?})"
+            ));
+        }
+    };
+    let duration_ms =
+        duration_ms.ok_or_else(|| "stored step that ran has no duration".to_string())?;
+    Ok(CaseRun::Ran(StepRun {
+        termination,
+        duration_ms,
+        stdout,
+        stderr,
+    }))
+}
+
+fn recorded_output(connection: &Connection, attempt_id: i64) -> Result<RecordedOutput, String> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT ordinal, case_name, termination, status, duration_ms, \
+                    stdout_omitted_bytes, stderr_omitted_bytes, \
+                    stdout_head, stdout_tail, stderr_head, stderr_tail \
+             FROM attempt_steps WHERE attempt_id = ? ORDER BY ordinal",
         )
         .map_err(sql_error)?;
-    let attempt_id = connection.last_insert_rowid();
-    assert!(attempt_id > 0);
-    Ok(attempt_id)
+    let rows = statement
+        .query_map(params![attempt_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i32>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    if rows.is_empty() {
+        return Ok(RecordedOutput::PredatesCapture);
+    }
+    let mut setup = None;
+    let mut cases = Vec::with_capacity(rows.len() - 1);
+    for (index, row) in rows.into_iter().enumerate() {
+        let (ordinal, name, termination, status, duration_ms, stdout_omitted, stderr_omitted) =
+            (row.0, row.1, row.2, row.3, row.4, row.5, row.6);
+        if usize::try_from(ordinal).ok() != Some(index) {
+            return Err(format!(
+                "attempt {attempt_id} has non-contiguous step ordinal {ordinal}"
+            ));
+        }
+        let stdout = decode_text(row.7, stdout_omitted, row.8)?;
+        let stderr = decode_text(row.9, stderr_omitted, row.10)?;
+        let run = decode_case_run(&termination, status, duration_ms, stdout, stderr)?;
+        match (ordinal, name, run) {
+            (0, None, CaseRun::Ran(step)) => setup = Some(step),
+            (1.., Some(name), run) => cases.push(CaseEntry {
+                name: CaseName::parse(&name)?,
+                run,
+            }),
+            _ => {
+                return Err(format!(
+                    "attempt {attempt_id} has an invalid step {ordinal}"
+                ));
+            }
+        }
+    }
+    let setup = setup.ok_or_else(|| format!("attempt {attempt_id} has no setup step"))?;
+    TestOutput::new(setup, cases)
+        .map(RecordedOutput::Captured)
+        .map_err(|error| format!("attempt {attempt_id} output is invalid: {error}"))
+}
+
+pub fn get_attempt(connection: &Connection, attempt_id: i64) -> Result<AttemptRecord, String> {
+    let record = connection
+        .query_row(
+            "SELECT a.id, a.run_at, p.slug, l.slug, s.slug, a.result, a.duration_ms, \
+                    a.test_revision, a.test_revision = p.test_revision \
+             FROM attempts AS a \
+             JOIN problems AS p ON p.id = a.problem_id \
+             JOIN languages AS l ON l.id = a.language_id \
+             LEFT JOIN problem_sets AS s ON s.id = a.invoked_set_id \
+             WHERE a.id = ?",
+            params![attempt_id],
+            |row| {
+                Ok(AttemptRecord {
+                    id: row.get(0)?,
+                    run_at: row.get(1)?,
+                    problem_slug: row.get(2)?,
+                    language: row.get(3)?,
+                    invoked_set: row.get(4)?,
+                    result: row.get(5)?,
+                    duration_ms: row.get(6)?,
+                    test_revision: row.get(7)?,
+                    current_revision: row.get(8)?,
+                    output: RecordedOutput::PredatesCapture,
+                })
+            },
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let mut record = record.ok_or_else(|| format!("unknown attempt: {attempt_id}"))?;
+    record.output = recorded_output(connection, attempt_id)?;
+    Ok(record)
+}
+
+/// Where a history page starts. Pages are newest first and keyed by attempt id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptCursor {
+    Newest,
+    /// Attempts older than this id.
+    Before(i64),
+    /// Attempts newer than this id.
+    After(i64),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptPage {
+    /// Newest first.
+    pub rows: Vec<AttemptSummary>,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
+pub fn list_attempts(
+    connection: &Connection,
+    problem_slug: &str,
+    language_slug: Option<&str>,
+    cursor: AttemptCursor,
+    limit: usize,
+) -> Result<AttemptPage, String> {
+    if !(1..=MAX_ATTEMPT_PAGE_ROWS).contains(&limit) {
+        return Err(format!(
+            "attempt page size must be between 1 and {MAX_ATTEMPT_PAGE_ROWS}"
+        ));
+    }
+    let problem = resolve_problem(connection, problem_slug, None)?.problem;
+    let language_id = match language_slug {
+        Some(slug) => Some(
+            connection
+                .query_row(
+                    "SELECT id FROM languages WHERE slug = ?",
+                    params![slug],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+                .ok_or_else(|| format!("unknown language: {slug}"))?,
+        ),
+        None => None,
+    };
+    let (comparison, order, bound) = match cursor {
+        AttemptCursor::Newest => ("1", "DESC", 0),
+        AttemptCursor::Before(id) => ("a.id < ?3", "DESC", id),
+        AttemptCursor::After(id) => ("a.id > ?3", "ASC", id),
+    };
+    let sql = format!(
+        "SELECT a.id, a.run_at, l.slug, a.result, a.duration_ms, a.test_revision, \
+                a.test_revision = p.test_revision \
+         FROM attempts AS a \
+         JOIN problems AS p ON p.id = a.problem_id \
+         JOIN languages AS l ON l.id = a.language_id \
+         WHERE a.problem_id = ?1 AND (?2 IS NULL OR a.language_id = ?2) AND {comparison} \
+         ORDER BY a.id {order} LIMIT ?4"
+    );
+    let fetch = i64::try_from(limit).expect("bounded page size fits i64");
+    let mut statement = connection.prepare(&sql).map_err(sql_error)?;
+    let mut rows = statement
+        .query_map(params![problem.id, language_id, bound, fetch], |row| {
+            Ok(AttemptSummary {
+                id: row.get(0)?,
+                run_at: row.get(1)?,
+                language: row.get(2)?,
+                result: row.get(3)?,
+                duration_ms: row.get(4)?,
+                test_revision: row.get(5)?,
+                current_revision: row.get(6)?,
+                cases: None,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    rows.truncate(limit);
+    if matches!(cursor, AttemptCursor::After(_)) {
+        rows.reverse();
+    }
+    for row in &mut rows {
+        row.cases = case_tally(connection, row.id)?;
+    }
+    let exists = |comparison: &str, id: i64| -> Result<bool, String> {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM attempts AS a WHERE a.problem_id = ?1 \
+                     AND (?2 IS NULL OR a.language_id = ?2) AND a.id {comparison} ?3)"
+                ),
+                params![problem.id, language_id, id],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)
+    };
+    let (has_older, has_newer) = match (rows.first(), rows.last()) {
+        (Some(newest), Some(oldest)) => (exists("<", oldest.id)?, exists(">", newest.id)?),
+        _ => (false, false),
+    };
+    Ok(AttemptPage {
+        rows,
+        has_older,
+        has_newer,
+    })
+}
+
+/// Passed and total cases from step metadata only; stream text is never read here.
+fn case_tally(connection: &Connection, attempt_id: i64) -> Result<Option<(usize, usize)>, String> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT ordinal, termination, status FROM attempt_steps \
+             WHERE attempt_id = ? ORDER BY ordinal",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![attempt_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i32>>(2)?,
+            ))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut passed = 0;
+    for (_, termination, status) in rows.iter().filter(|(ordinal, _, _)| *ordinal > 0) {
+        let empty = || CapturedText::Complete(String::new());
+        let run = decode_case_run(termination, *status, Some(0), empty(), empty())?;
+        if run.outcome() == AttemptOutcome::Pass {
+            passed += 1;
+        }
+    }
+    Ok(Some((passed, rows.len() - 1)))
 }
 
 pub fn finalize_attempt_cancelled(

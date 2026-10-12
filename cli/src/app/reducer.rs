@@ -917,11 +917,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 match result {
                     Ok(result) => {
                         solve.bounded_output(format!(
-                            "{:?} ({} ms){}\n{}",
-                            result.termination,
-                            result.duration_ms,
-                            if solve.stale { " · STALE" } else { "" },
-                            result.display_output
+                            "{}{}",
+                            if solve.stale { "STALE\n" } else { "" },
+                            crate::attempt::render_report(&result)
                         ));
                         state.status = if solve.stale {
                             "Run complete · stale"
@@ -1629,8 +1627,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "output",
                 )),
             ),
@@ -2111,8 +2109,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     output,
                 )),
             ),
@@ -2179,8 +2177,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2295,8 +2293,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "ignored",
                 )),
             ),
@@ -2309,8 +2307,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2367,8 +2365,8 @@ mod tests {
             revision + 1,
             RunIntent::Test,
             Some("wrong".into()),
-            Ok(crate::runner::ExecutionResult::test_result(
-                crate::runner::Termination::Exited(0),
+            Ok(crate::attempt::AttemptReport::test_report(
+                crate::attempt::Termination::Exited(0),
                 "wrong",
             )),
         );
@@ -2382,8 +2380,8 @@ mod tests {
             revision,
             RunIntent::Submit,
             Some("wrong".into()),
-            Ok(crate::runner::ExecutionResult::test_result(
-                crate::runner::Termination::Exited(0),
+            Ok(crate::attempt::AttemptReport::test_report(
+                crate::attempt::Termination::Exited(0),
                 "wrong",
             )),
         );
@@ -2466,8 +2464,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2512,8 +2510,8 @@ mod tests {
                 first_revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2732,8 +2730,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(submitted_source.clone()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),

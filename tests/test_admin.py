@@ -9,6 +9,29 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def insert_attempt(
+    database: Path, problem: str, language: str, result: str, problem_set: str | None = None
+) -> None:
+    """Seeds an attempt row directly; recording itself is covered by `practice run` tests."""
+    with sqlite3.connect(database) as connection:
+        inserted = connection.execute(
+            """
+            INSERT INTO attempts(
+                problem_id, language_id, invoked_set_id, result, test_revision, duration_ms, run_at
+            )
+            SELECT p.id, l.id, (SELECT id FROM problem_sets WHERE slug = ?), ?, p.test_revision,
+                   1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            FROM problems AS p, languages AS l
+            WHERE p.slug = ? AND l.slug = ?
+            """,
+            (problem_set, result, problem, language),
+        ).rowcount
+    if inserted != 1:
+        raise AssertionError(f"could not seed attempt for {problem} ({language})")
+
+
 CATALOG = ROOT / "catalog" / "problems.json"
 BLIND75 = ROOT / "problem_sets" / "blind75.json"
 
@@ -152,7 +175,7 @@ class ProjectCliTests(unittest.TestCase):
         )
 
     def test_out_of_range_database_versions_are_rejected_without_mutation(self) -> None:
-        for unsupported_version in (-1, 3):
+        for unsupported_version in (-1, 4):
             with self.subTest(user_version=unsupported_version):
                 with tempfile.TemporaryDirectory() as directory:
                     database = Path(directory) / "progress.db"
@@ -393,27 +416,11 @@ class ProjectCliTests(unittest.TestCase):
                 ),
                 ("sets", "create", "custom-set", "--name", "Custom Set"),
                 ("sets", "add", "custom-set", "custom-problem"),
-                (
-                    "_record",
-                    "python",
-                    "custom-problem",
-                    "pass",
-                    "1",
-                    "--problem-set",
-                    "custom-set",
-                ),
-                (
-                    "_record",
-                    "python",
-                    "managed-retired",
-                    "fail",
-                    "2",
-                    "--problem-set",
-                    "managed-retired-set",
-                ),
             ):
                 result = self.run_fixture_command(root, database, *arguments)
                 self.assertEqual(result.returncode, 0, result.stderr)
+            insert_attempt(database, "custom-problem", "python", "pass", "custom-set")
+            insert_attempt(database, "managed-retired", "python", "fail", "managed-retired-set")
 
             upgraded_catalog = self.fixture_catalog(revision=2)
             upgraded_catalog["problems"] = [upgraded_catalog["problems"][0]]  # type: ignore[index]
@@ -533,18 +540,7 @@ class ProjectCliTests(unittest.TestCase):
             initialized = self.run_fixture_command(root, database, "sets", "list")
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             for slug in renames:
-                recorded = self.run_fixture_command(
-                    root,
-                    database,
-                    "_record",
-                    "python",
-                    "managed-one",
-                    "pass",
-                    "1",
-                    "--problem-set",
-                    slug,
-                )
-                self.assertEqual(recorded.returncode, 0, recorded.stderr)
+                insert_attempt(database, "managed-one", "python", "pass", slug)
             with sqlite3.connect(database) as connection:
                 old_ids = dict(connection.execute("SELECT slug, id FROM problem_sets"))
                 old_attempts = connection.execute("SELECT * FROM attempts ORDER BY id").fetchall()
@@ -769,6 +765,7 @@ class ProjectCliTests(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 attempt_count = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+                step_count = connection.execute("SELECT COUNT(*) FROM attempt_steps").fetchone()[0]
                 stale = connection.execute(
                     "SELECT id, leetcode_id FROM problems WHERE slug = 'combination-sum-iv'"
                 ).fetchone()
@@ -778,8 +775,9 @@ class ProjectCliTests(unittest.TestCase):
                 go_language = connection.execute(
                     "SELECT enabled FROM languages WHERE slug = 'go'"
                 ).fetchone()
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
             self.assertEqual(attempt_count, 3)
+            self.assertEqual(step_count, 0)
             self.assertIsNotNone(stale)
             self.assertEqual(stale[1], 377)
             self.assertEqual(active_members, 150)
@@ -886,17 +884,11 @@ class ProjectCliTests(unittest.TestCase):
     def test_progress_is_derived_from_a_current_passing_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             environment = os.environ.copy()
-            environment["PRACTICE_DB_PATH"] = str(Path(directory) / "progress.db")
-            record = self.run_command(
-                str(ROOT / "practice"),
-                "_record",
-                "python",
-                "two-sum",
-                "pass",
-                "7",
-                env=environment,
-            )
-            self.assertEqual(record.returncode, 0, record.stderr)
+            database = Path(directory) / "progress.db"
+            environment["PRACTICE_DB_PATH"] = str(database)
+            initialized = self.run_command(str(ROOT / "practice"), "db", env=environment)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            insert_attempt(database, "two-sum", "python", "pass")
             stats = self.run_command(
                 str(ROOT / "practice"), "stats", "--language", "python", env=environment
             )

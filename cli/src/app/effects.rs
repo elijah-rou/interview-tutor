@@ -1,6 +1,7 @@
 use super::model::{AppData, OperationId};
+use crate::attempt::AttemptReport;
 use crate::editor::EditorCommand;
-use crate::runner::{ExecutionPlan, ExecutionResult};
+use crate::runner::ExecutionPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LoadScope {
@@ -150,7 +151,7 @@ pub enum Event {
         u64,
         RunIntent,
         Option<String>,
-        Result<ExecutionResult, String>,
+        Result<AttemptReport, String>,
     ),
     DraftSaved(OperationId, u64, String, Result<(), String>),
     RunnerLeftSolve(Result<(), String>),

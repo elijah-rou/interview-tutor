@@ -9,6 +9,28 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def insert_attempt(
+    database: Path, problem: str, language: str, result: str, problem_set: str | None = None
+) -> None:
+    """Seeds an attempt row directly; recording itself is covered by `practice run` tests."""
+    with sqlite3.connect(database) as connection:
+        inserted = connection.execute(
+            """
+            INSERT INTO attempts(
+                problem_id, language_id, invoked_set_id, result, test_revision, duration_ms, run_at
+            )
+            SELECT p.id, l.id, (SELECT id FROM problem_sets WHERE slug = ?), ?, p.test_revision,
+                   1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            FROM problems AS p, languages AS l
+            WHERE p.slug = ? AND l.slug = ?
+            """,
+            (problem_set, result, problem, language),
+        ).rowcount
+    if inserted != 1:
+        raise AssertionError(f"could not seed attempt for {problem} ({language})")
+
+
 EXPECTED_INTERVIEW_SETS = {
     "runtime-practice": [
         "deadlock-aware-lock-manager",
@@ -559,17 +581,7 @@ class GeneralizedCliTests(unittest.TestCase):
             ).returncode,
             0,
         )
-        recorded = self.run_command(
-            str(ROOT / "practice"),
-            "_record",
-            "python",
-            "two-sum",
-            "pass",
-            "5",
-            "--problem-set",
-            "favorites",
-        )
-        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        insert_attempt(self.database, "two-sum", "python", "pass", "favorites")
         blind_stats = self.run_command(
             str(ROOT / "practice"), "--set", "blind75", "stats", "--language", "python"
         )
@@ -654,7 +666,61 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertIn("FAIL two-sum", result.stderr)
         with sqlite3.connect(self.database) as connection:
             attempt_count = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+            steps = connection.execute(
+                """
+                SELECT ordinal, case_name, termination, status, stdout_head, stderr_head
+                FROM attempt_steps ORDER BY ordinal
+                """
+            ).fetchall()
         self.assertEqual(attempt_count, 1)
+        self.assertEqual(steps[0][:4], (0, None, "exited", 0))
+        self.assertEqual(steps[0][4], "scenario-1\n")
+        self.assertEqual(steps[1][:4], (1, "scenario-1", "exited", 1))
+        self.assertIn("FAIL two-sum: starter is not implemented", steps[1][5])
+        self.assertEqual(len(steps), 2)
+
+        shown = self.run_command(str(ROOT / "practice"), "attempts", "show", "1")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("case 1/1 scenario-1 · fail · exit 1", shown.stdout)
+        self.assertIn("FAIL two-sum: starter is not implemented", shown.stdout)
+        stream = self.run_command(
+            str(ROOT / "practice"),
+            "attempts",
+            "show",
+            "1",
+            "--case",
+            "scenario-1",
+            "--stream",
+            "stderr",
+        )
+        self.assertEqual(stream.returncode, 0, stream.stderr)
+        self.assertEqual(stream.stdout, steps[1][5])
+        listed = self.run_command(
+            str(ROOT / "practice"), "attempts", "list", "two-sum", "--language", "python"
+        )
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertRegex(listed.stdout, r"\n1 +\S+ +python +fail +0/1 +\d+ +current *\n")
+
+    def test_judge_protocol_modes_list_and_run_one_case_without_recording(self) -> None:
+        for language in ("python", "rust"):
+            listed = self.run_command(str(ROOT / language / "run"), "--cases", "two-sum")
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            expected = "scenario-1\n"
+            self.assertEqual(listed.stdout, expected)
+            case = self.run_command(
+                str(ROOT / language / "run"),
+                "--problem",
+                "two-sum",
+                "--case",
+                expected.strip(),
+            )
+            self.assertNotEqual(case.returncode, 0)
+            unknown = self.run_command(
+                str(ROOT / language / "run"), "--problem", "two-sum", "--case", "missing"
+            )
+            self.assertEqual(unknown.returncode, 2, unknown.stderr)
+            self.assertIn("unknown case", unknown.stderr)
+        self.assertFalse(self.database.exists())
 
     def test_cli_is_a_self_hosted_rust_executable(self) -> None:
         version = self.run_command(str(ROOT / "practice"), "--version")

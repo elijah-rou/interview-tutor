@@ -1,8 +1,41 @@
 #!/bin/sh
 set -eu
+# Implements the judge protocol: `--cases MODE` lists cases, `--problem MODE --case NAME` runs one.
 mode="${1:-}"
+if [ "$mode" = "--cases" ]; then
+  case "${2:-}" in
+    multi) printf 'first\nsecond\nthird\n' ;;
+    multi-timeout) printf 'slow\nnever\n' ;;
+    setup-fail) printf 'compile error\n' >&2; exit 101 ;;
+    bad-case-name) printf 'Not_Valid\n' ;;
+    duplicate-cases) printf 'same\nsame\n' ;;
+    no-cases) ;;
+    *) printf 'main\n' ;;
+  esac
+  exit 0
+fi
 if [ "$mode" = "--problem" ]; then
+  if [ "${3:-}" != "--case" ] || [ -z "${4:-}" ]; then
+    printf 'usage: --problem MODE --case NAME\n' >&2
+    exit 2
+  fi
+  case_name="$4"
   mode="${2:-}"
+  case "$mode" in
+    multi)
+      case "$case_name" in
+        first) printf 'first-out\n'; exit 0 ;;
+        second) printf 'second-err\n' >&2; exit 1 ;;
+        third) printf 'third-out\n'; exit 0 ;;
+      esac
+      ;;
+    multi-timeout)
+      case "$case_name" in
+        slow) sleep 30 ;;
+        never) printf 'never ran\n'; exit 0 ;;
+      esac
+      ;;
+  esac
 fi
 case "$mode" in
   tagged)
@@ -11,6 +44,10 @@ case "$mode" in
     ;;
   unsafe)
     printf '\033[31mred\033[0m\000safe\tline\n'
+    ;;
+  multibyte-large)
+    index=0
+    while [ "$index" -lt 4000 ]; do printf '\342\202\254'; index=$((index + 1)); done
     ;;
   large)
     printf 'PREFIX:'
