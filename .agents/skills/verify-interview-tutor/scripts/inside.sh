@@ -373,7 +373,7 @@ feature_admin() {
 
 # ---------------------------------------------------------------- race
 
-# The repository's own deterministic cancellation gate. The Makefile expects
+# The repository's own cancellation gate. The Makefile expects
 # binaries under cli/target, so this drive builds there instead of the shared
 # target directory.
 feature_race() {

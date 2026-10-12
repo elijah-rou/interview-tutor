@@ -77,7 +77,7 @@ To run one user command by hand in the same container (for example, while you di
 docker exec -w /work CONTAINER_ID ./practice --db /tmp/manual.db sets list
 ```
 
-The repository's deterministic cancellation gate is the `race` drive. It runs `make test-race`: 20 PTY cases (runner cancellation and fake-Codex interrupts) and then 10 fail-fast iterations of the two Rust race tests. It takes about 3 minutes and builds into `/work/cli/target`:
+The repository's cancellation gate is the `race` drive. It runs `make test-race`: 20 PTY cases (runner cancellation and fake-Codex interrupts) and then 10 fail-fast iterations of the two Rust race tests. It takes about 3 minutes and builds into `/work/cli/target`:
 
 ```sh
 .agents/skills/verify-interview-tutor/scripts/verify-tutor drive RUN_ID race
@@ -130,6 +130,7 @@ agentic feature-map-lint .agents/skills/verify-interview-tutor/features
 
 ## Systems notes
 
-- Runs are deterministic: the network is `none`, the crates are locked, the toolchain is pinned, each feature gets a fresh database, the inputs are fixed, the solution files are restored, and the terminal is a fixed 120x40 `xterm-256color`. The product has no seeded randomness; durations and timestamps in output and attempt rows vary and are never asserted.
+- Inputs are deterministic: the network is `none`, the crates are locked, the toolchain is pinned, each feature gets a fresh database, the inputs are fixed, the solution files are restored, and the terminal is a fixed 120x40 `xterm-256color`. The product has no seeded randomness; durations and timestamps in output and attempt rows vary and are never asserted.
+- The PTY matrix (`cli/tests/pty_matrix.py`) is not deterministic in this image, and its results do not carry over to CI. This covers `make test-pty` and the PTY cases of the `race` drive. The image runs on the host's architecture (aarch64 on Apple Silicon) with Ubuntu's packaged Neovim, while CI runs x86_64 with the Neovim release pinned in `.github/workflows/ci.yml`. The matrix stops at its first failing case, and that case changes from run to run. Before attributing a matrix failure here to a change, run the unchanged tree in the same container and compare only the cases both runs reached. CI's `Test serial PTY matrix` and `Test cancellation races` steps decide whether it passes. Report failures seen only here to the user as possible product races under the concurrency-model note below, not as a slow VM.
 - Changes to the runner, signals, cancellation, or the TUI worker threads need the `race` drive as well as the features. The core data structures (database schema, catalog identity, attempt recording) and the concurrency model (runner process groups, cancellation, worker channels) stay with the user: show them the evidence and get their decision before changing either.
 - Use `maintain-verification` when commands, keys, screen text, or catalog contents change.

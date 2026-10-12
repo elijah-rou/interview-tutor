@@ -1,0 +1,38 @@
+[
+  {
+    "kind": "repo",
+    "text": "In the verify-interview-tutor image, the PTY matrix (`make test-pty` and the `race` drive's PTY cases) fails non-deterministically and differs from CI, so compare its results only against an unchanged-tree baseline in the same container, treat CI's PTY steps as the authority, and report image-only failures to the user as possible product races.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": false
+  },
+  {
+    "kind": "global",
+    "text": "Write a pull request's testing notes after its adversarial review returns, recording that the review ran, the reviewer model, and any findings left open, enforced by a hook on `gh pr create` and `gh pr edit` that refuses a body without that record.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": true
+  },
+  {
+    "kind": "repo",
+    "text": "`cli/tests/*.py` sits outside the Makefile ruff gate and its files are formatted at mixed widths, so pick one width, reformat the directory, and then enforce it by adding `cli/tests` to the gate, with a nested `cli/tests/ruff.toml` that sets `extend` to the root config only if the chosen width differs from the root's.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": true
+  },
+  {
+    "kind": "repo",
+    "text": "The verify-interview-tutor image should run the Neovim release CI pins, enforced by pinning it in `scripts/Dockerfile` and a `verify-tutor doctor` check against `.github/workflows/ci.yml`, with the skill's Neovim notes updated when the pin lands.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": true
+  }
+]
