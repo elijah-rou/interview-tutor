@@ -1,7 +1,7 @@
 [
   {
     "kind": "repo",
-    "text": "In the verify-interview-tutor image, the PTY matrix (`make test-pty` and the `race` drive's PTY cases) fails non-deterministically and differs from CI, so compare its results only against an unchanged-tree baseline in the same container, treat CI's PTY steps as the authority, and report image-only failures to the user as possible product races.",
+    "text": "The PTY matrix fails non-deterministically in the verify-interview-tutor image (`make test-pty` and the `race` drive's PTY cases), and `make test-pty` has also failed intermittently in CI, so judge a failure only against an unchanged-tree baseline in the same container, report how many runs were made and where each stopped, and report failures the baseline also shows to the user as possible product or harness races rather than noise.",
     "evidence": {
       "session": "99631039-753a-44a9-9b39-8a4560f27b97",
       "date": "2026-10-12"
