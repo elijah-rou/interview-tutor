@@ -272,9 +272,9 @@ else:
 
     def finalize_case(self) -> None:
         invalid_requests = [
-            session.screen.invalid_cursor_request
+            session.screen.cursor_violation
             for session in self.case_sessions
-            if session.screen.invalid_cursor_request is not None
+            if session.screen.cursor_violation is not None
         ]
         self.case_sessions.clear()
         self.cleanup.finalize_case()

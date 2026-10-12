@@ -171,6 +171,91 @@ def cursor_request_self_test() -> None:
     assert valid.invalid_cursor_request is None
 
 
+RESIZE_TRANSIENT_CHILD = r"""
+import os, signal
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGWINCH})
+tty = os.open("/dev/tty", os.O_RDWR)
+
+def size():
+    current = os.get_terminal_size(tty)
+    return current.columns, current.lines
+
+def corner(columns, rows):
+    os.write(1, f"\x1b[{rows};{columns}H#".encode())
+
+sized = size()
+os.write(1, b"\x1b[2J")
+corner(*sized)
+os.write(1, f"\x1b[1;1Hdrawn-{sized[0]}x{sized[1]}".encode())
+while sized != (40, 10):
+    signal.sigwait({signal.SIGWINCH})
+    current = size()
+    if current == sized:
+        continue
+    # Finish the frame sized before the resize, like a draw straddling it.
+    corner(*sized)
+    sized = current
+    os.write(1, b"\x1b[2J")
+    corner(*sized)
+    os.write(1, f"\x1b[1;1Hdrawn-{sized[0]}x{sized[1]}".encode())
+"""
+
+
+def resize_transient_self_test() -> None:
+    """A frame sized before a resize and written after it is not a violation."""
+    command = [sys.executable, "-c", RESIZE_TRANSIENT_CHILD]
+    with PtySession(command, os.environ.copy(), 80, 24) as session:
+        session.wait_history(b"drawn-80x24")
+        session.resize(60, 20)
+        session.wait_history(b"drawn-60x20")
+        assert session.screen.invalid_cursor_request is None, (
+            session.screen.invalid_cursor_request
+        )
+        session.resize(40, 10)
+        session.wait_history(b"drawn-40x10")
+        session.wait_exit(0)
+        requests = list(session.screen.cursor_requests)
+        assert CursorRequest("24;80", "H", 79, 23, 60, 20) in requests, requests
+        assert CursorRequest("20;60", "H", 59, 19, 40, 10) in requests, requests
+        assert session.screen.cursor_violation is None, session.screen.cursor_violation
+
+
+def resize_transient_screen_self_test() -> None:
+    """Stale-size requests count unless the next full clear supersedes them."""
+    stale = CursorRequest("24;80", "H", 79, 23, 60, 20)
+    unrepainted = Screen(80, 24)
+    unrepainted.resize(60, 20)
+    unrepainted.feed(b"\x1b[24;80H\x1b[J\x1b[1J\x1b[3J")
+    assert unrepainted.invalid_cursor_request is None
+    assert unrepainted.size_before_resize == (80, 24)
+    assert unrepainted.cursor_violation == stale
+
+    repainted = Screen(80, 24)
+    repainted.resize(60, 20)
+    repainted.feed(b"\x1b[24;80H\x1b[2J")
+    assert repainted.cursor_violation is None
+    repainted.feed(b"\x1b[24;80H")
+    assert repainted.invalid_cursor_request == stale
+
+    outside_both = Screen(80, 24)
+    outside_both.resize(60, 20)
+    outside_both.feed(b"\x1b[25;1H")
+    assert outside_both.invalid_cursor_request == CursorRequest(
+        "25;1", "H", 0, 24, 60, 20
+    )
+
+    unchanged = Screen(80, 24)
+    unchanged.resize(80, 24)
+    assert unchanged.size_before_resize is None
+    unchanged.resize(60, 20)
+    try:
+        unchanged.resize(40, 10)
+    except AssertionError as error:
+        assert "previous resize" in str(error), error
+    else:
+        raise AssertionError("a second outstanding resize was accepted")
+
+
 def make_fail_fast_self_test(repository_root: Path, temporary: Path) -> None:
     trace = temporary / "race-trace"
     hook = temporary / "race-hook.sh"
@@ -211,10 +296,13 @@ def main() -> int:
         controlling_terminal_self_test()
         output_before_exit_self_test()
         cursor_request_self_test()
+        resize_transient_self_test()
+        resize_transient_screen_self_test()
         make_fail_fast_self_test(repository_root, temporary)
     print(
         "PTY_HARNESS_SELF_TEST_PASS timeout_cleanup=1 injected_failure_cleanup=1 "
         "controlling_terminal=73x19 output_before_exit_waiters=3 cursor_sequences=10 "
+        "resize_transients=2 resize_transient_screen_cases=4 "
         "make_fail_fast_iterations=2/5"
     )
     return 0
