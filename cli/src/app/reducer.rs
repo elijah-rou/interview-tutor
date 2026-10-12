@@ -823,7 +823,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                             format!("{} for a new hint", state.leader_step("Space h"))
                         }
                         InterviewerMode::Interviewer if state.interviewer.composer_focused => {
-                            "send the question again with Enter".to_string()
+                            "retype the question and press Enter".to_string()
                         }
                         InterviewerMode::Interviewer => {
                             "press i outside the Editor to ask again".to_string()
