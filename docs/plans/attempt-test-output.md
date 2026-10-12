@@ -1,6 +1,6 @@
 # Attempt test output plan
 
-Status: shape approved 2026-10-12; building.
+Status: shape approved and built 2026-10-12. Deviations from the sketch are listed at the end.
 
 ## Request
 
@@ -193,3 +193,14 @@ Rejected from B: per-recording random idempotency keys and immutable `recorded_r
 ## First implementation step
 
 A thin CLI-only slice: `attempt.rs` types with invariant and fold tests; `execute_step`/`execute_attempt` against an extended `runner_fixture.sh` implementing `--cases`; schema v3 with a v2 fixture migration test; `record_attempt`; and `practice attempts show`. It is verified by `./practice run python two-sum` in the verify-interview-tutor container recording an attempt whose stdout, stderr, and result `practice attempts show` prints.
+
+## Built, and deviations from the sketch
+
+- `Termination` moved into `attempt.rs`. `AttemptOutcome` stayed in `database.rs` because it owns the persisted string codec; `attempt.rs` imports it.
+- `ExecutionPlan` does not freeze the problem id and `test_revision` at planning. That race predates this change and is unchanged.
+- `runner::record_execution` remains as the one call that maps a plan onto `database::record_attempt`.
+- `practice attempts list` requires a problem; there is no all-problems listing.
+- The TUI never consumed live runner events, so there is nothing to keep streaming; the Output pane renders the finished report.
+- Python prints its `FAIL slug: reason` line before the traceback, so the reason is the first line of a failing case's stderr.
+- Measured cost: each step's process-group cleanup waits the full TERM grace (250 ms) after a clean exit, because the exited child stays unreaped until the group is gone. A one-case attempt now takes about 680 ms instead of about 330 ms. Changing that cleanup is a separate decision.
+

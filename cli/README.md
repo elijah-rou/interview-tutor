@@ -19,7 +19,7 @@ cargo test --manifest-path cli/Cargo.toml --locked -- --test-threads=1
 
 ## Commands and configuration
 
-`practice` owns catalog validation, SQLite v2 migration/reconciliation and CRUD, selectors, progress, adapter discovery, process execution, and attempt recording. Common commands are:
+`practice` owns catalog validation, SQLite v3 migration/reconciliation and CRUD, selectors, progress, adapter discovery, process execution, and attempt recording with per-case output. Common commands are:
 
 ```console
 ./practice sets list
@@ -27,6 +27,9 @@ cargo test --manifest-path cli/Cargo.toml --locked -- --test-threads=1
 ./practice --set blind75 show two-sum
 ./practice --set blind75 stats --language python
 ./practice run python blind75 1
+./practice attempts list two-sum --language python
+./practice attempts show 42
+./practice attempts show 42 --case scenario-1 --stream stderr
 ./practice db
 ```
 
@@ -43,7 +46,8 @@ The host accepts at most 1 MiB and 100,000 logical lines. An oversized native op
 ## Components
 
 - `catalog.rs`: checked-in catalog parsing and invariant validation.
-- `database.rs`: SQLite schema, migrations, managed seed reconciliation, CRUD, attempts, and progress.
+- `attempt.rs`: per-case attempt evidence, the outcome fold, and the one renderer used by `practice run`, `practice attempts show`, and the TUI.
+- `database.rs`: SQLite schema, migrations, managed seed reconciliation, CRUD, attempts and their steps, history pages, and progress.
 - `source.rs` and `editor.rs`: anchored atomic I/O and bounded Unicode-grapheme editing/highlighting.
 - `runner.rs` and `signals.rs`: shell-free execution, process groups, bounded output/events, cancellation, and signal finalization.
 - `app/` and `tui/`: pure effects/reducer state plus the terminal runtime and worker channels.
@@ -51,4 +55,4 @@ The host accepts at most 1 MiB and 100,000 logical lines. An oversized native op
 - `pi/`: pinned Pi 0.84.4 RPC transport with fresh per-turn processes and strict JSONL validation.
 - `codex/`: exact-version Codex app-server compatibility transport.
 
-`runner::execute` is synchronous so the CLI can call it directly and the TUI can place it on one worker thread. Defaults are one direct child, a 30-second wall timeout, 250-ms TERM grace, 256-KiB rendered output, 8-KiB reads, and 64 queued events. Event delivery is nonblocking; the bounded final `ExecutionResult` is authoritative. The TUI reuses the same execution plan and recording APIs rather than parsing CLI output. See [architecture](../docs/architecture.md) and [testing](../docs/testing.md).
+`runner::execute` is synchronous so the CLI can call it directly and the TUI can place it on one worker thread. It runs the adapter's `--cases` setup step and then one direct child per case. Defaults are a 30-second wall timeout shared by all steps, 250-ms TERM grace, 8 KiB retained per stream per step, 8-KiB reads, and 64 queued events. Event delivery is nonblocking; the bounded final `AttemptReport` is authoritative. The TUI reuses the same execution plan and recording APIs rather than parsing CLI output. See [architecture](../docs/architecture.md) and [testing](../docs/testing.md).
