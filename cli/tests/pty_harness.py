@@ -421,40 +421,14 @@ class PtySession:
         return received
 
     def wait_screen(self, marker: str, timeout: float | None = None) -> None:
-        deadline = (
-            min(self.deadline, time.monotonic() + timeout) if timeout else self.deadline
+        self.wait_predicate(
+            f"screen marker {marker!r}", lambda: marker in self.screen.text(), timeout
         )
-        while marker not in self.screen.text():
-            if time.monotonic() >= deadline:
-                raise AssertionError(
-                    f"timed out waiting for screen marker {marker!r}; {self._failure_tail()}"
-                )
-            self.drain(POLL_SECONDS)
-            status = self.process.poll()
-            if status is not None:
-                self.drain()
-                raise AssertionError(
-                    f"process exited with {status} before screen marker {marker!r}; "
-                    f"{self._failure_tail()}"
-                )
 
     def wait_history(self, marker: bytes, timeout: float | None = None) -> None:
-        deadline = (
-            min(self.deadline, time.monotonic() + timeout) if timeout else self.deadline
+        self.wait_predicate(
+            f"output marker {marker!r}", lambda: marker in self.output, timeout
         )
-        while marker not in self.output:
-            if time.monotonic() >= deadline:
-                raise AssertionError(
-                    f"timed out waiting for output marker {marker!r}; {self._failure_tail()}"
-                )
-            self.drain(POLL_SECONDS)
-            status = self.process.poll()
-            if status is not None:
-                self.drain()
-                raise AssertionError(
-                    f"process exited with {status} before output marker {marker!r}; "
-                    f"{self._failure_tail()}"
-                )
 
     def wait_predicate(
         self,
@@ -473,7 +447,10 @@ class PtySession:
             self.drain(POLL_SECONDS)
             status = self.process.poll()
             if status is not None:
+                # The output that satisfies the wait often arrives just before exit.
                 self.drain()
+                if predicate():
+                    return
                 raise AssertionError(
                     f"process exited with {status} while waiting for {description}; "
                     f"{self._failure_tail()}"

@@ -27,7 +27,7 @@ The complete `make check` target has a 900-second hard deadline with a 10-second
 
 ### `make test-harness`
 
-Exercises the Python PTY harness itself: an injected hard timeout with child cleanup, cleanup-registry behavior after an injected failure, ten cursor-control boundary sequences, and Make's race-loop fail-fast behavior. This target does not build the binaries.
+Exercises the Python PTY harness itself: an injected hard timeout with child cleanup, cleanup-registry behavior after an injected failure, the child's controlling terminal and size, waits whose marker arrives in the same drain that observes the child's exit, ten cursor-control boundary sequences, and Make's race-loop fail-fast behavior. This target does not build the binaries.
 
 ### `make test-pty`
 
