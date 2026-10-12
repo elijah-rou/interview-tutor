@@ -10,8 +10,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from typing import Callable
 
+import pty_harness
 from pty_harness import (
     CleanupRegistry,
     CursorRequest,
@@ -256,6 +258,25 @@ def resize_transient_screen_self_test() -> None:
         raise AssertionError("a second outstanding resize was accepted")
 
 
+def settle_deadline_self_test() -> None:
+    """settle never polls with a negative wait when its end passes mid-iteration."""
+    with PtySession(
+        [sys.executable, "-c", "import time; time.sleep(5)"], os.environ.copy(), 80, 24
+    ) as session:
+        start = time.monotonic()
+        debounce = 0.075
+        # The loop check sees 1 ms left; the next clock read is 1 ms past the end.
+        readings = iter([start, start + debounce - 0.001, start + debounce + 0.001])
+        clock = SimpleNamespace(monotonic=lambda: next(readings, start + 1.0))
+        real_time = pty_harness.time
+        pty_harness.time = clock
+        try:
+            session.settle(debounce)
+        finally:
+            pty_harness.time = real_time
+        assert next(readings, None) is None, "settle stopped before its end"
+
+
 def make_fail_fast_self_test(repository_root: Path, temporary: Path) -> None:
     trace = temporary / "race-trace"
     hook = temporary / "race-hook.sh"
@@ -298,11 +319,12 @@ def main() -> int:
         cursor_request_self_test()
         resize_transient_self_test()
         resize_transient_screen_self_test()
+        settle_deadline_self_test()
         make_fail_fast_self_test(repository_root, temporary)
     print(
         "PTY_HARNESS_SELF_TEST_PASS timeout_cleanup=1 injected_failure_cleanup=1 "
         "controlling_terminal=73x19 output_before_exit_waiters=3 cursor_sequences=10 "
-        "resize_transients=2 resize_transient_screen_cases=4 "
+        "resize_transients=2 resize_transient_screen_cases=4 settle_deadline=1 "
         "make_fail_fast_iterations=2/5"
     )
     return 0

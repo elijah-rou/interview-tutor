@@ -508,8 +508,8 @@ class PtySession:
     def settle(self, debounce: float = 0.075) -> None:
         assert 0 < debounce <= 0.1
         end = min(self.deadline, time.monotonic() + debounce)
-        while time.monotonic() < end:
-            self.drain(min(POLL_SECONDS, end - time.monotonic()))
+        while (remaining := end - time.monotonic()) > 0:
+            self.drain(min(POLL_SECONDS, remaining))
 
     def wait_exit(self, expected_status: int, timeout: float | None = None) -> float:
         deadline = (
