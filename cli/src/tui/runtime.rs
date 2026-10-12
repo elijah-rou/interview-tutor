@@ -26,11 +26,25 @@ const MAX_PENDING_NEOVIM_BARRIERS: usize = 16;
 const NEOVIM_SOURCE_BARRIER_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNNER_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Next step for failures that end the TUI after the terminal is ready.
+const RESTART_STEP: &str = "restart ./interview";
+/// Next step for failures to take over the terminal.
+const TERMINAL_STEP: &str = "run ./interview in an interactive terminal";
+/// Next step once the runner worker thread is gone; drafts still save on the main thread.
+const RUNNER_STOPPED_STEP: &str = "save with Space-b, then restart ./interview";
+
+fn run_retry_step(intent: crate::app::RunIntent) -> &'static str {
+    match intent {
+        crate::app::RunIntent::Test => "retry Space-t",
+        crate::app::RunIntent::Submit => "retry Space-s",
+    }
+}
 
 struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> Result<Self, String> {
-        enable_raw_mode().map_err(|e| format!("cannot enable terminal raw mode: {e}"))?;
+        enable_raw_mode()
+            .map_err(|e| format!("cannot enable terminal raw mode: {e}; {TERMINAL_STEP}"))?;
         if let Err(e) = execute!(
             io::stdout(),
             EnterAlternateScreen,
@@ -47,7 +61,9 @@ impl TerminalGuard {
                 Show,
                 LeaveAlternateScreen
             );
-            return Err(format!("cannot enter terminal screen: {e}"));
+            return Err(format!(
+                "cannot enter terminal screen: {e}; {TERMINAL_STEP}"
+            ));
         }
         Ok(Self)
     }
@@ -953,7 +969,13 @@ impl RunnerWorker {
                                     Ok(())
                                 };
                                 match save_result {
-                                    Err(error) => (None, Err(error)),
+                                    Err(error) => (
+                                        None,
+                                        Err(format!(
+                                            "Source was not saved: {error}; {}",
+                                            run_retry_step(intent)
+                                        )),
+                                    ),
                                     Ok(()) => (
                                         Some(source_for_save),
                                         (|| {
@@ -984,8 +1006,15 @@ impl RunnerWorker {
                                     ),
                                 }
                             }));
-                        let (saved, result) = outcome
-                            .unwrap_or_else(|_| (None, Err("runner worker panicked".into())));
+                        let (saved, result) = outcome.unwrap_or_else(|_| {
+                            (
+                                None,
+                                Err(format!(
+                                    "runner worker panicked; {}",
+                                    run_retry_step(intent)
+                                )),
+                            )
+                        });
                         if result.is_err() {
                             cancellation.finish();
                         }
@@ -1021,7 +1050,10 @@ impl RunnerWorker {
         write_source: bool,
     ) -> Result<(), String> {
         if self.active.is_some() {
-            return Err("runner worker still owns an active Solve operation".into());
+            return Err(format!(
+                "runner worker still owns an active Solve operation; {} after it finishes",
+                run_retry_step(intent)
+            ));
         }
         let cancellation = RunCancellation::with_signal_state(self.signal_state.clone());
         self.sender
@@ -1034,7 +1066,7 @@ impl RunnerWorker {
                 write_source,
                 cancellation: cancellation.clone(),
             })
-            .map_err(|_| "runner worker stopped".to_string())?;
+            .map_err(|_| format!("runner worker stopped; {RUNNER_STOPPED_STEP}"))?;
         self.active = Some((operation, revision, intent, cancellation));
         Ok(())
     }
@@ -1098,7 +1130,7 @@ impl RunnerWorker {
                             revision,
                             intent,
                             None,
-                            Err("runner worker disconnected".into()),
+                            Err(format!("runner worker disconnected; {RUNNER_STOPPED_STEP}")),
                         ));
                     }
                     if let Some(join) = self.join.take() {
@@ -1233,12 +1265,18 @@ fn apply_effects(
                         set_slug.as_deref(),
                         &language_slug,
                     )?;
-                    let editor = source::load(root, &plan.solution_path)?;
+                    let editor = source::load(root, &plan.solution_path).map_err(|error| {
+                        let path = plan
+                            .solution_path
+                            .strip_prefix(root)
+                            .unwrap_or(&plan.solution_path);
+                        format!("{error}; fix {}, then press Enter", path.display())
+                    })?;
                     let detail = state
                         .data
                         .detail
                         .as_ref()
-                        .ok_or("problem detail unavailable")?;
+                        .ok_or("problem detail unavailable; press r to reload")?;
                     Ok(Box::new(SolveSession {
                         generation: crate::neovim::SessionGeneration(operation.0),
                         problem_id: detail.id,
@@ -1287,6 +1325,9 @@ fn apply_effects(
                     grid_size.0,
                     grid_size.1,
                 ) {
+                    // The worker is full or gone, so a fresh session cannot start either. The
+                    // just-opened source is clean, so Ctrl-Q quits at once.
+                    let error = format!("{error}; press Ctrl-Q, then restart ./interview");
                     effects.extend(reduce(state, Event::NeovimStarted(Err(error))));
                 }
             }
@@ -1388,7 +1429,7 @@ fn apply_effects(
                     interviewer_worker.finalize_turn(operation, revision, mode, guidance, accepted)
                 {
                     state.interviewer.status = crate::app::model::InterviewerStatus::ProtocolError;
-                    state.error = Some(error);
+                    state.error = Some(format!("{error}; {}", state.interviewer_reconnect_step()));
                 }
             }
             Effect::CancelInterviewer { operation } => {
@@ -1405,7 +1446,7 @@ fn apply_effects(
             }
             Effect::StopNeovim { generation } => {
                 if let Err(error) = neovim_worker.stop_session_for_generation(generation) {
-                    state.error = Some(error);
+                    state.error = Some(format!("{error}; press q, then restart ./interview"));
                 }
             }
         }
@@ -1430,6 +1471,19 @@ fn apply_neovim_cursor_shape(state: &AppState) -> Result<(), String> {
     };
     execute!(io::stdout(), style)
         .map_err(|error| format!("cannot set Neovim cursor shape: {error}"))
+}
+
+/// Neovim worker leaves describe what failed; this boundary adds the recovery the user has.
+/// Warnings already carry their step because their recovery depends on the rejected edit.
+fn neovim_start_failure(state: &AppState, error: crate::neovim::StartError) -> String {
+    match error {
+        crate::neovim::StartError::Executable(message) => {
+            format!("{message}; rerun ./interview with --neovim PATH for Neovim >=0.9,<2.0")
+        }
+        crate::neovim::StartError::Session(message) => {
+            format!("{message}; {}", state.neovim_restart_step())
+        }
+    }
 }
 
 fn action_requires_neovim_barrier(state: &AppState, action: &crate::app::Action) -> bool {
@@ -1653,7 +1707,10 @@ pub fn run(
     neovim_executable: PathBuf,
 ) -> Result<u8, String> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err("interview requires an interactive terminal".into());
+        return Err(
+            "interview requires an interactive terminal; run ./interview without pipes or redirects"
+                .into(),
+        );
     }
     let signal_handlers = ScopedSignalHandlers::register()?;
     let signal_state = signal_handlers.state();
@@ -1687,175 +1744,77 @@ pub fn run(
             return Err("injected TUI startup error".into());
         }
         let backend = CrosstermBackend::new(io::stdout());
-        let mut terminal =
-            Terminal::new(backend).map_err(|e| format!("cannot initialize terminal: {e}"))?;
+        let mut terminal = Terminal::new(backend)
+            .map_err(|e| format!("cannot initialize terminal: {e}; {TERMINAL_STEP}"))?;
         terminal
             .clear()
-            .map_err(|e| format!("cannot clear terminal: {e}"))?;
-        let mut needs_draw = true;
-        let mut next_neovim_barrier_id = 1_u64;
-        let mut pending_neovim_barriers = std::collections::VecDeque::<PendingNeovimBarrier>::new();
-        let mut last_neovim_grid_size = None;
-        while !state.quit {
-            if let Some(signal) = signal_state.received() {
-                let (runner_worker, interviewer_worker, _) = workers.parts();
-                runner_worker.interrupt_active(128 + signal);
-                interviewer_worker.reset();
-                state.quit = true;
-                continue;
-            }
-            let events = {
-                let (runner_worker, interviewer_worker, _) = workers.parts();
-                runner_worker
-                    .poll()
-                    .into_iter()
-                    .chain(interviewer_worker.poll())
-                    .collect::<Vec<_>>()
-            };
-            for event in events {
-                let save_acknowledgement = matching_save_acknowledgement(&state, &event);
-                apply_event(&mut state, &repository, &root, &mut workers, event);
-                if let Some((changedtick, source)) = save_acknowledgement {
-                    workers
-                        .neovim
-                        .as_ref()
-                        .expect("runtime Neovim worker exists")
-                        .acknowledge_saved(changedtick, source)?;
+            .map_err(|e| format!("cannot clear terminal: {e}; {TERMINAL_STEP}"))?;
+        // Every error past terminal setup ends the TUI; the user's recovery is a fresh start.
+        let mut event_loop = || -> Result<(), String> {
+            let mut needs_draw = true;
+            let mut next_neovim_barrier_id = 1_u64;
+            let mut pending_neovim_barriers =
+                std::collections::VecDeque::<PendingNeovimBarrier>::new();
+            let mut last_neovim_grid_size = None;
+            while !state.quit {
+                if let Some(signal) = signal_state.received() {
+                    let (runner_worker, interviewer_worker, _) = workers.parts();
+                    runner_worker.interrupt_active(128 + signal);
+                    interviewer_worker.reset();
+                    state.quit = true;
+                    continue;
                 }
-                needs_draw = true;
-            }
-            let neovim_poll = workers
-                .neovim
-                .as_ref()
-                .expect("runtime Neovim worker exists")
-                .poll();
-            if let Some(view) = neovim_poll.grid {
-                apply_event(
-                    &mut state,
-                    &repository,
-                    &root,
-                    &mut workers,
-                    Event::NeovimView(view),
-                );
-                needs_draw = true;
-            }
-            for ordered_event in order_neovim_poll_events(neovim_poll.events) {
-                match ordered_event {
-                    OrderedNeovimPollEvent::Tutor {
-                        generation,
-                        document,
-                        action,
-                    } => {
-                        if !accepts_neovim_generation(&state, generation) {
-                            continue;
-                        }
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimDocument(document),
-                        );
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::Command(action),
-                        );
-                    }
-                    OrderedNeovimPollEvent::MappedBack {
-                        generation,
-                        document,
-                    } => {
-                        if !accepts_neovim_generation(&state, generation) {
-                            continue;
-                        }
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimDocument(document),
-                        );
-                        let deadline = state
-                            .solve
-                            .as_ref()
-                            .is_some_and(|solve| {
-                                solve.editor_status == crate::app::model::EditorRuntimeStatus::Ready
-                            })
-                            .then(|| Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT);
-                        let neovim_worker = workers
+                let events = {
+                    let (runner_worker, interviewer_worker, _) = workers.parts();
+                    runner_worker
+                        .poll()
+                        .into_iter()
+                        .chain(interviewer_worker.poll())
+                        .collect::<Vec<_>>()
+                };
+                for event in events {
+                    let save_acknowledgement = matching_save_acknowledgement(&state, &event);
+                    apply_event(&mut state, &repository, &root, &mut workers, event);
+                    if let Some((changedtick, source)) = save_acknowledgement {
+                        workers
                             .neovim
                             .as_ref()
-                            .expect("runtime Neovim worker exists");
-                        queue_neovim_barrier(
-                            &mut pending_neovim_barriers,
-                            &mut next_neovim_barrier_id,
-                            generation,
-                            crate::app::Action::Back,
-                            deadline,
-                            |generation, id| neovim_worker.barrier_for_generation(generation, id),
-                        )?;
+                            .expect("runtime Neovim worker exists")
+                            .acknowledge_saved(changedtick, source)?;
                     }
-                    OrderedNeovimPollEvent::Worker(worker_event) => match worker_event {
-                        crate::neovim::WorkerEvent::Started(started) => {
-                            if started.is_ok() {
-                                let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
-                                for pending in &mut pending_neovim_barriers {
-                                    if pending.deadline.is_none() {
-                                        pending.deadline = Some(deadline);
-                                    }
-                                }
-                            } else {
-                                pending_neovim_barriers.clear();
-                            }
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::NeovimStarted(started),
-                            );
-                        }
-                        crate::neovim::WorkerEvent::Document(document) => apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimDocument(document),
-                        ),
-                        crate::neovim::WorkerEvent::Warning(error) => apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::NeovimWarning(error),
-                        ),
-                        crate::neovim::WorkerEvent::Failed(error) => {
-                            pending_neovim_barriers.clear();
-                            apply_event(
-                                &mut state,
-                                &repository,
-                                &root,
-                                &mut workers,
-                                Event::NeovimFailed(error),
-                            );
-                        }
-                        crate::neovim::WorkerEvent::Source(
-                            crate::neovim::SourceEvent::Barrier(barrier),
-                        ) => {
-                            if !accepts_neovim_generation(&state, barrier.generation) {
+                    needs_draw = true;
+                }
+                let neovim_poll = workers
+                    .neovim
+                    .as_ref()
+                    .expect("runtime Neovim worker exists")
+                    .poll();
+                if let Some(view) = neovim_poll.grid {
+                    apply_event(
+                        &mut state,
+                        &repository,
+                        &root,
+                        &mut workers,
+                        Event::NeovimView(view),
+                    );
+                    needs_draw = true;
+                }
+                for ordered_event in order_neovim_poll_events(neovim_poll.events) {
+                    match ordered_event {
+                        OrderedNeovimPollEvent::Tutor {
+                            generation,
+                            document,
+                            action,
+                        } => {
+                            if !accepts_neovim_generation(&state, generation) {
                                 continue;
                             }
-                            let action =
-                                complete_neovim_barrier(&mut pending_neovim_barriers, &barrier)?;
                             apply_event(
                                 &mut state,
                                 &repository,
                                 &root,
                                 &mut workers,
-                                Event::NeovimDocument(barrier.document),
+                                Event::NeovimDocument(document),
                             );
                             apply_event(
                                 &mut state,
@@ -1865,73 +1824,20 @@ pub fn run(
                                 Event::Command(action),
                             );
                         }
-                        crate::neovim::WorkerEvent::Source(crate::neovim::SourceEvent::Action(
-                            _,
-                        )) => unreachable!("Tutor actions are ordered before runtime dispatch"),
-                    },
-                }
-                needs_draw = true;
-            }
-            let current_neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
-            pending_neovim_barriers
-                .retain(|pending| current_neovim_generation == Some(pending.generation));
-            if pending_neovim_barriers
-                .front()
-                .and_then(|pending| pending.deadline)
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                return Err("Neovim source barrier timed out".into());
-            }
-            let terminal_size = terminal
-                .size()
-                .map_err(|error| format!("cannot read terminal size: {error}"))?;
-            if let Some(max_scroll) =
-                render::interview_scroll_max(&state, terminal_size.width, terminal_size.height)
-            {
-                state.interviewer.clamp_scroll(max_scroll);
-            }
-            let expected_grid_size =
-                render::neovim_grid_size(&state, terminal_size.width, terminal_size.height);
-            if expected_grid_size != last_neovim_grid_size {
-                if let Some((width, height)) = expected_grid_size {
-                    workers
-                        .neovim
-                        .as_ref()
-                        .expect("runtime Neovim worker exists")
-                        .resize(width, height)?;
-                }
-                last_neovim_grid_size = expected_grid_size;
-            }
-            if needs_draw {
-                terminal
-                    .draw(|frame| render::render(frame, &state))
-                    .map_err(|e| format!("cannot draw terminal: {e}"))?;
-                apply_neovim_cursor_shape(&state)?;
-                needs_draw = false;
-            }
-            if !event::poll(Duration::from_millis(50))
-                .map_err(|e| format!("cannot poll terminal: {e}"))?
-            {
-                continue;
-            }
-            match event::read().map_err(|e| format!("cannot read terminal: {e}"))? {
-                TerminalEvent::Key(key) => {
-                    if input::routes_to_neovim(key, &state) {
-                        if let Some(encoded) = crate::neovim::key::encode_key(key)? {
-                            workers
-                                .neovim
-                                .as_ref()
-                                .expect("runtime Neovim worker exists")
-                                .input(encoded)?;
-                        }
-                        needs_draw = true;
-                    } else if let Some(action) = input::action_for_key(key, &mut state) {
-                        if action_requires_neovim_barrier(&state, &action) {
-                            let generation = state
-                                .solve
-                                .as_ref()
-                                .expect("Solve action has a Neovim generation")
-                                .generation;
+                        OrderedNeovimPollEvent::MappedBack {
+                            generation,
+                            document,
+                        } => {
+                            if !accepts_neovim_generation(&state, generation) {
+                                continue;
+                            }
+                            apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(document),
+                            );
                             let deadline = state
                                 .solve
                                 .as_ref()
@@ -1948,13 +1854,231 @@ pub fn run(
                                 &mut pending_neovim_barriers,
                                 &mut next_neovim_barrier_id,
                                 generation,
-                                action,
+                                crate::app::Action::Back,
                                 deadline,
                                 |generation, id| {
                                     neovim_worker.barrier_for_generation(generation, id)
                                 },
                             )?;
-                        } else {
+                        }
+                        OrderedNeovimPollEvent::Worker(worker_event) => match worker_event {
+                            crate::neovim::WorkerEvent::Started(started) => {
+                                if started.is_ok() {
+                                    let deadline = Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT;
+                                    for pending in &mut pending_neovim_barriers {
+                                        if pending.deadline.is_none() {
+                                            pending.deadline = Some(deadline);
+                                        }
+                                    }
+                                } else {
+                                    pending_neovim_barriers.clear();
+                                }
+                                let started =
+                                    started.map_err(|error| neovim_start_failure(&state, error));
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimStarted(started),
+                                );
+                            }
+                            crate::neovim::WorkerEvent::Document(document) => apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimDocument(document),
+                            ),
+                            crate::neovim::WorkerEvent::Warning(error) => apply_event(
+                                &mut state,
+                                &repository,
+                                &root,
+                                &mut workers,
+                                Event::NeovimWarning(error),
+                            ),
+                            crate::neovim::WorkerEvent::Failed(error) => {
+                                pending_neovim_barriers.clear();
+                                let error = format!("{error}; {}", state.neovim_restart_step());
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimFailed(error),
+                                );
+                            }
+                            crate::neovim::WorkerEvent::Source(
+                                crate::neovim::SourceEvent::Barrier(barrier),
+                            ) => {
+                                if !accepts_neovim_generation(&state, barrier.generation) {
+                                    continue;
+                                }
+                                let action = complete_neovim_barrier(
+                                    &mut pending_neovim_barriers,
+                                    &barrier,
+                                )?;
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::NeovimDocument(barrier.document),
+                                );
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::Command(action),
+                                );
+                            }
+                            crate::neovim::WorkerEvent::Source(
+                                crate::neovim::SourceEvent::Action(_),
+                            ) => unreachable!("Tutor actions are ordered before runtime dispatch"),
+                        },
+                    }
+                    needs_draw = true;
+                }
+                let current_neovim_generation = state.solve.as_ref().map(|solve| solve.generation);
+                pending_neovim_barriers
+                    .retain(|pending| current_neovim_generation == Some(pending.generation));
+                if pending_neovim_barriers
+                    .front()
+                    .and_then(|pending| pending.deadline)
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    return Err("Neovim source barrier timed out".into());
+                }
+                let terminal_size = terminal
+                    .size()
+                    .map_err(|error| format!("cannot read terminal size: {error}"))?;
+                if let Some(max_scroll) =
+                    render::interview_scroll_max(&state, terminal_size.width, terminal_size.height)
+                {
+                    state.interviewer.clamp_scroll(max_scroll);
+                }
+                let expected_grid_size =
+                    render::neovim_grid_size(&state, terminal_size.width, terminal_size.height);
+                if expected_grid_size != last_neovim_grid_size {
+                    if let Some((width, height)) = expected_grid_size {
+                        workers
+                            .neovim
+                            .as_ref()
+                            .expect("runtime Neovim worker exists")
+                            .resize(width, height)?;
+                    }
+                    last_neovim_grid_size = expected_grid_size;
+                }
+                if needs_draw {
+                    terminal
+                        .draw(|frame| render::render(frame, &state))
+                        .map_err(|e| format!("cannot draw terminal: {e}"))?;
+                    apply_neovim_cursor_shape(&state)?;
+                    needs_draw = false;
+                }
+                if !event::poll(Duration::from_millis(50))
+                    .map_err(|e| format!("cannot poll terminal: {e}"))?
+                {
+                    continue;
+                }
+                match event::read().map_err(|e| format!("cannot read terminal: {e}"))? {
+                    TerminalEvent::Key(key) => {
+                        if input::routes_to_neovim(key, &state) {
+                            if let Some(encoded) = crate::neovim::key::encode_key(key)? {
+                                workers
+                                    .neovim
+                                    .as_ref()
+                                    .expect("runtime Neovim worker exists")
+                                    .input(encoded)?;
+                            }
+                            needs_draw = true;
+                        } else if let Some(action) = input::action_for_key(key, &mut state) {
+                            if action_requires_neovim_barrier(&state, &action) {
+                                let generation = state
+                                    .solve
+                                    .as_ref()
+                                    .expect("Solve action has a Neovim generation")
+                                    .generation;
+                                let deadline = state
+                                    .solve
+                                    .as_ref()
+                                    .is_some_and(|solve| {
+                                        solve.editor_status
+                                            == crate::app::model::EditorRuntimeStatus::Ready
+                                    })
+                                    .then(|| Instant::now() + NEOVIM_SOURCE_BARRIER_TIMEOUT);
+                                let neovim_worker = workers
+                                    .neovim
+                                    .as_ref()
+                                    .expect("runtime Neovim worker exists");
+                                queue_neovim_barrier(
+                                    &mut pending_neovim_barriers,
+                                    &mut next_neovim_barrier_id,
+                                    generation,
+                                    action,
+                                    deadline,
+                                    |generation, id| {
+                                        neovim_worker.barrier_for_generation(generation, id)
+                                    },
+                                )?;
+                            } else {
+                                apply_event(
+                                    &mut state,
+                                    &repository,
+                                    &root,
+                                    &mut workers,
+                                    Event::Command(action),
+                                );
+                            }
+                            needs_draw = true;
+                        }
+                    }
+                    TerminalEvent::Resize(width, height) => {
+                        if let Some((grid_width, grid_height)) =
+                            render::neovim_grid_size(&state, width, height)
+                        {
+                            workers
+                                .neovim
+                                .as_ref()
+                                .expect("runtime Neovim worker exists")
+                                .resize(grid_width, grid_height)?;
+                            last_neovim_grid_size = Some((grid_width, grid_height));
+                        }
+                        needs_draw = true;
+                    }
+                    TerminalEvent::Paste(text) => {
+                        if state.screen == crate::app::Screen::Solve
+                            && state
+                                .solve
+                                .as_ref()
+                                .is_some_and(|solve| solve.pane == SolvePane::Editor)
+                        {
+                            let paste = workers
+                                .neovim
+                                .as_ref()
+                                .expect("runtime Neovim worker exists")
+                                .paste(text);
+                            match paste {
+                                Ok(()) => needs_draw = true,
+                                Err(error) => {
+                                    apply_event(
+                                        &mut state,
+                                        &repository,
+                                        &root,
+                                        &mut workers,
+                                        Event::NeovimWarning(error),
+                                    );
+                                    needs_draw = true;
+                                }
+                            }
+                        }
+                    }
+                    TerminalEvent::Mouse(mouse) => {
+                        let size = terminal
+                            .size()
+                            .map_err(|error| format!("cannot read terminal size: {error}"))?;
+                        if let Some(action) = accessory_mouse_scroll_action(&state, mouse.kind) {
                             apply_event(
                                 &mut state,
                                 &repository,
@@ -1962,108 +2086,54 @@ pub fn run(
                                 &mut workers,
                                 Event::Command(action),
                             );
-                        }
-                        needs_draw = true;
-                    }
-                }
-                TerminalEvent::Resize(width, height) => {
-                    if let Some((grid_width, grid_height)) =
-                        render::neovim_grid_size(&state, width, height)
-                    {
-                        workers
-                            .neovim
-                            .as_ref()
-                            .expect("runtime Neovim worker exists")
-                            .resize(grid_width, grid_height)?;
-                        last_neovim_grid_size = Some((grid_width, grid_height));
-                    }
-                    needs_draw = true;
-                }
-                TerminalEvent::Paste(text) => {
-                    if state.screen == crate::app::Screen::Solve
-                        && state
-                            .solve
-                            .as_ref()
-                            .is_some_and(|solve| solve.pane == SolvePane::Editor)
-                    {
-                        let paste = workers
-                            .neovim
-                            .as_ref()
-                            .expect("runtime Neovim worker exists")
-                            .paste(text);
-                        match paste {
-                            Ok(()) => needs_draw = true,
-                            Err(error) => {
-                                apply_event(
-                                    &mut state,
-                                    &repository,
-                                    &root,
-                                    &mut workers,
-                                    Event::NeovimWarning(error),
-                                );
-                                needs_draw = true;
+                            needs_draw = true;
+                        } else if routes_mouse_to_neovim(&state)
+                            && let Some(area) =
+                                render::neovim_grid_area(&state, size.width, size.height)
+                            && mouse.column >= area.x
+                            && mouse.column < area.right()
+                            && mouse.row >= area.y
+                            && mouse.row < area.bottom()
+                            && let Some((button, action)) = neovim_mouse_kind(mouse.kind)
+                        {
+                            let mut modifiers = String::new();
+                            if mouse
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::SHIFT)
+                            {
+                                modifiers.push('S');
                             }
+                            if mouse
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL)
+                            {
+                                modifiers.push('C');
+                            }
+                            if mouse
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::ALT)
+                            {
+                                modifiers.push('A');
+                            }
+                            workers
+                                .neovim
+                                .as_ref()
+                                .expect("runtime Neovim worker exists")
+                                .mouse(
+                                    button.into(),
+                                    action.into(),
+                                    modifiers,
+                                    mouse.row - area.y,
+                                    mouse.column - area.x,
+                                )?;
                         }
                     }
+                    TerminalEvent::FocusGained | TerminalEvent::FocusLost => {}
                 }
-                TerminalEvent::Mouse(mouse) => {
-                    let size = terminal
-                        .size()
-                        .map_err(|error| format!("cannot read terminal size: {error}"))?;
-                    if let Some(action) = accessory_mouse_scroll_action(&state, mouse.kind) {
-                        apply_event(
-                            &mut state,
-                            &repository,
-                            &root,
-                            &mut workers,
-                            Event::Command(action),
-                        );
-                        needs_draw = true;
-                    } else if routes_mouse_to_neovim(&state)
-                        && let Some(area) =
-                            render::neovim_grid_area(&state, size.width, size.height)
-                        && mouse.column >= area.x
-                        && mouse.column < area.right()
-                        && mouse.row >= area.y
-                        && mouse.row < area.bottom()
-                        && let Some((button, action)) = neovim_mouse_kind(mouse.kind)
-                    {
-                        let mut modifiers = String::new();
-                        if mouse
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::SHIFT)
-                        {
-                            modifiers.push('S');
-                        }
-                        if mouse
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                        {
-                            modifiers.push('C');
-                        }
-                        if mouse
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::ALT)
-                        {
-                            modifiers.push('A');
-                        }
-                        workers
-                            .neovim
-                            .as_ref()
-                            .expect("runtime Neovim worker exists")
-                            .mouse(
-                                button.into(),
-                                action.into(),
-                                modifiers,
-                                mouse.row - area.y,
-                                mouse.column - area.x,
-                            )?;
-                    }
-                }
-                TerminalEvent::FocusGained | TerminalEvent::FocusLost => {}
             }
-        }
-        Ok(())
+            Ok(())
+        };
+        event_loop().map_err(|error| format!("{error}; {RESTART_STEP}"))
     }));
     workers.shutdown();
     let exit_code = signal_state
@@ -2074,7 +2144,9 @@ pub fn run(
     match result {
         Ok(Ok(())) => Ok(exit_code),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err("TUI runtime panicked; terminal state was restored".into()),
+        Err(_) => Err(format!(
+            "TUI runtime panicked (terminal state was restored); {RESTART_STEP}"
+        )),
     }
 }
 
@@ -2844,7 +2916,7 @@ mod tests {
         };
         let mut worker = RunnerWorker::start_with_services(save_failure);
         assert!(
-            matches!(run_once(&mut worker, 1, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "save failed")
+            matches!(run_once(&mut worker, 1, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "Source was not saved: save failed; retry Space-t")
         );
         worker.shutdown();
 
@@ -2922,7 +2994,10 @@ mod tests {
         assert!(effects.is_empty());
         assert!(state.solve.as_ref().unwrap().running.is_none());
         assert_eq!(state.status, "Run failed");
-        assert_eq!(state.error.as_deref(), Some("runner worker panicked"));
+        assert_eq!(
+            state.error.as_deref(),
+            Some("runner worker panicked; retry Space-t")
+        );
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2955,7 +3030,7 @@ mod tests {
         worker.sender.send(WorkerCommand::Shutdown).unwrap();
         assert!(worker.events.recv_timeout(Duration::from_secs(2)).is_err());
         assert!(
-            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected")
+            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected; save with Space-b, then restart ./interview")
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());
@@ -3356,5 +3431,24 @@ mod tests {
             .unwrap();
         worker.shutdown();
         assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn neovim_start_failures_name_the_recovery_for_their_cause() {
+        let state = AppState::new(Vec::new(), 0);
+        assert_eq!(
+            neovim_start_failure(
+                &state,
+                crate::neovim::StartError::Executable("Neovim 0.8.0 is unsupported".into())
+            ),
+            "Neovim 0.8.0 is unsupported; rerun ./interview with --neovim PATH for Neovim >=0.9,<2.0"
+        );
+        assert_eq!(
+            neovim_start_failure(
+                &state,
+                crate::neovim::StartError::Session("Neovim API metadata is not an array".into())
+            ),
+            "Neovim API metadata is not an array; press Space b, then Enter twice to restart Neovim"
+        );
     }
 }
