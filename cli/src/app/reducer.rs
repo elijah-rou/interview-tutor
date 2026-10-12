@@ -819,8 +819,15 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                         InterviewerStatus::Ready
                     };
                     let step = match mode {
-                        InterviewerMode::Hint(_) => "press Space h for a new hint",
-                        InterviewerMode::Interviewer => "press i outside the Editor to ask again",
+                        InterviewerMode::Hint(_) => {
+                            format!("{} for a new hint", state.leader_step("Space h"))
+                        }
+                        InterviewerMode::Interviewer if state.interviewer.composer_focused => {
+                            "send the question again with Enter".to_string()
+                        }
+                        InterviewerMode::Interviewer => {
+                            "press i outside the Editor to ask again".to_string()
+                        }
                         InterviewerMode::SubmissionReview => {
                             unreachable!("submission review keeps its recorded revision")
                         }
@@ -1999,6 +2006,21 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::StopNeovim { .. }))
         );
+    }
+
+    #[test]
+    fn leader_steps_first_leave_text_input() {
+        let mut state = solve_state();
+        assert_eq!(state.leader_step("Space h"), "press Space h");
+        state.solve.as_mut().unwrap().editor.update_neovim_mode("i");
+        assert_eq!(state.leader_step("Space h"), "press Esc, then Space h");
+        state.solve.as_mut().unwrap().editor_status = EditorRuntimeStatus::Failed;
+        assert_eq!(state.leader_step("Space h"), "press Tab, then Space h");
+        state.solve.as_mut().unwrap().pane = SolvePane::Output;
+        assert_eq!(state.leader_step("Space h"), "press Space h");
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.composer_focused = true;
+        assert_eq!(state.leader_step("Space h"), "press Esc, then Space h");
     }
 
     #[test]

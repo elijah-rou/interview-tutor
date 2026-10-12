@@ -515,6 +515,27 @@ impl AppState {
         }
     }
 
+    /// `press <keys>`, preceded by the key that makes the host Space leader reachable from the
+    /// current focus: Neovim and the composer receive Space as text outside Editor Normal mode.
+    pub fn leader_step(&self, keys: &str) -> String {
+        let prefix = match self.solve.as_ref() {
+            Some(solve) if solve.pane == SolvePane::Editor && solve.editor.mode != Mode::Normal => {
+                if solve.editor_status == EditorRuntimeStatus::Failed {
+                    "Tab, then "
+                } else {
+                    "Esc, then "
+                }
+            }
+            Some(solve)
+                if solve.pane == SolvePane::Interview && self.interviewer.composer_focused =>
+            {
+                "Esc, then "
+            }
+            _ => "",
+        };
+        format!("press {prefix}{keys}")
+    }
+
     /// Keys that reconnect a disconnected Interviewer: `i` outside the Editor focuses the
     /// Interview composer and reconnects, unless the composer already has focus.
     pub fn interviewer_reconnect_step(&self) -> &'static str {

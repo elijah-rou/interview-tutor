@@ -31,12 +31,12 @@ const RESTART_STEP: &str = "restart ./interview";
 /// Next step for failures to take over the terminal.
 const TERMINAL_STEP: &str = "run ./interview in an interactive terminal";
 /// Next step once the runner worker thread is gone; drafts still save on the main thread.
-const RUNNER_STOPPED_STEP: &str = "save with Space-b, then restart ./interview";
+const RUNNER_STOPPED_STEP: &str = "press Esc, then Space b to save, then restart ./interview";
 
 fn run_retry_step(intent: crate::app::RunIntent) -> &'static str {
     match intent {
-        crate::app::RunIntent::Test => "retry Space-t",
-        crate::app::RunIntent::Submit => "retry Space-s",
+        crate::app::RunIntent::Test => "retry with F5",
+        crate::app::RunIntent::Submit => "retry with F9",
     }
 }
 
@@ -2916,7 +2916,7 @@ mod tests {
         };
         let mut worker = RunnerWorker::start_with_services(save_failure);
         assert!(
-            matches!(run_once(&mut worker, 1, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "Source was not saved: save failed; retry Space-t")
+            matches!(run_once(&mut worker, 1, RunIntent::Test), Event::RunFinished(_, _, _, None, Err(error)) if error == "Source was not saved: save failed; retry with F5")
         );
         worker.shutdown();
 
@@ -2996,7 +2996,7 @@ mod tests {
         assert_eq!(state.status, "Run failed");
         assert_eq!(
             state.error.as_deref(),
-            Some("runner worker panicked; retry Space-t")
+            Some("runner worker panicked; retry with F5")
         );
 
         let backend = TestBackend::new(80, 24);
@@ -3030,7 +3030,7 @@ mod tests {
         worker.sender.send(WorkerCommand::Shutdown).unwrap();
         assert!(worker.events.recv_timeout(Duration::from_secs(2)).is_err());
         assert!(
-            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected; save with Space-b, then restart ./interview")
+            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected; press Esc, then Space b to save, then restart ./interview")
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());

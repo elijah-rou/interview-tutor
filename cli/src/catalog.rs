@@ -1,4 +1,3 @@
-use crate::config::ROOT_STEP;
 use crate::database::{
     Difficulty, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
 };
@@ -324,7 +323,10 @@ fn validate_problem_set(
 /// Loads the checked-in catalog. Every validation error names the file the user must fix.
 pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
     let catalog_path = root.join("catalog/problems.json");
-    let raw: RawCatalog = read_json(&catalog_path, ROOT_STEP)?;
+    let raw: RawCatalog = read_json(
+        &catalog_path,
+        "restore it with `git checkout -- catalog/problems.json` or fix its permissions",
+    )?;
     let problem_slugs = validate_problems(root, &raw)
         .map_err(|error| format!("{error}; fix {}", catalog_path.display()))?;
 
@@ -333,7 +335,7 @@ pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
         fs::read_dir(&sets_directory)
             .map_err(|error| {
                 format!(
-                    "cannot read {}: {error}; {ROOT_STEP}",
+                    "cannot read {}: {error}; restore it with `git checkout -- problem_sets` or fix its permissions",
                     sets_directory.display()
                 )
             })?

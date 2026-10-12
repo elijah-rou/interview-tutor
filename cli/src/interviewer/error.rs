@@ -13,7 +13,8 @@ pub enum ErrorKind {
 
 pub const RECONNECT_STEP: &str = "press i in the Interview pane to reconnect";
 pub const RESTART_STEP: &str = "restart ./interview to reconnect";
-pub const CLEAR_SESSION_STEP: &str = "press Space r, then i, in the Interview pane";
+pub const CLEAR_SESSION_STEP: &str =
+    "press Esc to close the composer, then Space r, then i, in the Interview pane";
 pub const SHORTEN_PROMPT_STEP: &str = "shorten the source or clear the transcript with Space r";
 const PI_AUTHENTICATION_STEP: &str =
     "set up a model and credentials in `pi`, then restart ./interview";
