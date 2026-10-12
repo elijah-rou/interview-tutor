@@ -18,6 +18,11 @@ pub use process::resolve_executable;
 const COMMAND_CAPACITY: usize = 64;
 const EVENT_CAPACITY: usize = COMMAND_CAPACITY + 16;
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+// User-facing steps spell these bounds as "1 MiB" and "100,000 lines".
+const _: () = assert!(
+    crate::editor::MAX_DOCUMENT_BYTES == 1024 * 1024
+        && crate::editor::MAX_DOCUMENT_LINES == 100_000
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionGeneration(pub u64);
@@ -67,9 +72,48 @@ pub enum SourceEvent {
     Barrier(BarrierUpdate),
 }
 
+/// Why a Solve session's Neovim did not start. The recoveries differ: a rejected executable
+/// fails the same way on every session, while a session failure may succeed on a fresh start.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StartError {
+    /// The executable, its version, or its API is unusable.
+    Executable(String),
+    /// Neovim failed after its executable was accepted.
+    Session(String),
+}
+
+impl StartError {
+    fn map_message(self, map: impl FnOnce(String) -> String) -> Self {
+        match self {
+            Self::Executable(message) => Self::Executable(map(message)),
+            Self::Session(message) => Self::Session(map(message)),
+        }
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Executable(message) | Self::Session(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self::Session(message)
+    }
+}
+
+impl From<&str> for StartError {
+    fn from(message: &str) -> Self {
+        Self::Session(message.to_string())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum WorkerEvent {
-    Started(Result<(), String>),
+    Started(Result<(), StartError>),
     Document(DocumentUpdate),
     Source(SourceEvent),
     Warning(String),
@@ -212,14 +256,18 @@ impl Worker {
         self.send(Command::Input(encoded))
     }
 
+    /// Errors are shown to the user unchanged as a rejected edit, so each carries its next step.
     pub fn paste(&self, text: String) -> Result<(), String> {
         if text.len() > crate::editor::MAX_DOCUMENT_BYTES {
-            return Err("paste exceeds editor document byte bound".into());
+            return Err("paste exceeds editor document byte bound; paste at most 1 MiB".into());
         }
         if text.bytes().filter(|byte| *byte == b'\n').count() >= crate::editor::MAX_DOCUMENT_LINES {
-            return Err("paste exceeds editor document line bound".into());
+            return Err(
+                "paste exceeds editor document line bound; paste fewer than 100,000 lines".into(),
+            );
         }
         self.send(Command::Paste(text))
+            .map_err(|error| format!("{error}; paste again"))
     }
 
     pub fn mouse(
@@ -408,7 +456,7 @@ fn controller(
                             push_session_event(
                                 &shared,
                                 generation,
-                                WorkerEvent::Started(Err(error)),
+                                WorkerEvent::Started(Err(StartError::Session(error))),
                             );
                         }
                     },
@@ -525,7 +573,7 @@ fn controller(
     }
 }
 
-fn spawn(executable: &Path, config: &SessionConfig) -> Result<RpcProcess, String> {
+fn spawn(executable: &Path, config: &SessionConfig) -> Result<RpcProcess, StartError> {
     RpcProcess::start_with_cancellation(
         executable,
         &config.source,
@@ -634,7 +682,7 @@ fn recover_overflow(
         shared,
         generation,
         WorkerEvent::Warning(format!(
-            "{error}; Neovim restarted from the last valid source"
+            "{error}, so Neovim restarted from the last valid source; keep the solution within 1 MiB and 100,000 lines"
         )),
     );
     Ok(update)
@@ -966,6 +1014,20 @@ mod tests {
     }
 
     #[test]
+    fn rejected_pastes_name_their_bound() {
+        let worker = Worker::start(PathBuf::from("/nonexistent/nvim"));
+        assert_eq!(
+            worker.paste("x".repeat(crate::editor::MAX_DOCUMENT_BYTES + 1)),
+            Err("paste exceeds editor document byte bound; paste at most 1 MiB".into())
+        );
+        assert_eq!(
+            worker.paste("\n".repeat(crate::editor::MAX_DOCUMENT_LINES)),
+            Err("paste exceeds editor document line bound; paste fewer than 100,000 lines".into())
+        );
+        worker.shutdown();
+    }
+
+    #[test]
     fn stale_session_events_are_discarded_and_grid_requests_are_clamped() {
         let shared = Arc::new(Mutex::new(WorkerShared::default()));
         shared.lock().unwrap().generation = Some(SessionGeneration(2));
@@ -1073,10 +1135,11 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            warning
-                .as_deref()
-                .is_some_and(|message| message.contains("restarted from the last valid source")),
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "document exceeds host source byte bound, so Neovim restarted from the last valid source; keep the solution within 1 MiB and 100,000 lines"
+            ),
             "overflow recovery warning was not published"
         );
         assert_eq!(restored.as_deref(), Some(source.as_str()));

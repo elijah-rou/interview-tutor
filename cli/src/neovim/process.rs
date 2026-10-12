@@ -1,3 +1,4 @@
+use super::StartError;
 use super::grid::{GridSnapshot, GridState};
 use super::msgpack::{self, Value, array, map};
 use std::collections::VecDeque;
@@ -189,6 +190,7 @@ impl RpcProcess {
             height,
             Arc::new(AtomicBool::new(false)),
         )
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn start_with_cancellation(
@@ -199,13 +201,14 @@ impl RpcProcess {
         width: u16,
         height: u16,
         external_cancellation: Arc<AtomicBool>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, StartError> {
         if external_cancellation.load(Ordering::Acquire) {
             return Err("Neovim startup was cancelled".into());
         }
-        let canonical = fs::canonicalize(executable)
-            .map_err(|error| format!("cannot resolve Neovim executable: {error}"))?;
-        let executable = ValidatedExecutable::open(&canonical)?;
+        let canonical = fs::canonicalize(executable).map_err(|error| {
+            StartError::Executable(format!("cannot resolve Neovim executable: {error}"))
+        })?;
+        let executable = ValidatedExecutable::open(&canonical).map_err(StartError::Executable)?;
         validate_version(&executable, &external_cancellation)?;
         let temp_dir = create_temp_dir()?;
         let mut command = executable.command();
@@ -223,10 +226,9 @@ impl RpcProcess {
             Ok(child) => child,
             Err(error) => {
                 let cleanup = remove_temp_tree(&temp_dir);
-                return Err(with_cleanup_error(
-                    format!("cannot start Neovim: {error}"),
-                    cleanup,
-                ));
+                return Err(
+                    with_cleanup_error(format!("cannot start Neovim: {error}"), cleanup).into(),
+                );
             }
         };
         let process_group = i32::try_from(child.id()).expect("Linux process IDs fit i32");
@@ -259,7 +261,7 @@ impl RpcProcess {
                     Instant::now() + SHUTDOWN_TIMEOUT,
                 );
                 let cleanup = process_cleanup.and_then(|_| remove_temp_tree(&temp_dir));
-                return Err(with_cleanup_error(error, cleanup));
+                return Err(with_cleanup_error(error, cleanup).into());
             }
         };
 
@@ -285,7 +287,7 @@ impl RpcProcess {
                     Instant::now() + SHUTDOWN_TIMEOUT,
                 );
                 let cleanup = process_cleanup.and_then(|_| remove_temp_tree(&temp_dir));
-                return Err(with_cleanup_error(error, cleanup));
+                return Err(with_cleanup_error(error, cleanup).into());
             }
         };
         let stderr = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_STDERR_BYTES)));
@@ -316,7 +318,7 @@ impl RpcProcess {
                 } else {
                     Err(cleanup_errors.join("; "))
                 };
-                return Err(with_cleanup_error(error, cleanup));
+                return Err(with_cleanup_error(error, cleanup).into());
             }
         };
         let mut process = Self {
@@ -336,7 +338,7 @@ impl RpcProcess {
         };
         if let Err(error) = process.initialize(source, synthetic_name, language, width, height) {
             let cleanup = process.shutdown();
-            return Err(with_cleanup_error(error, cleanup));
+            return Err(error.map_message(|error| with_cleanup_error(error, cleanup)));
         }
         Ok(process)
     }
@@ -358,7 +360,7 @@ impl RpcProcess {
         language: &str,
         width: u16,
         height: u16,
-    ) -> Result<(), String> {
+    ) -> Result<(), StartError> {
         let api = self.call_with_timeout("nvim_get_api_info", Vec::new(), STARTUP_TIMEOUT)?;
         let api = api
             .as_array()
@@ -367,7 +369,8 @@ impl RpcProcess {
             .first()
             .and_then(Value::as_u64)
             .ok_or("Neovim API omitted channel id")?;
-        validate_api(api.get(1).ok_or("Neovim API omitted metadata")?)?;
+        validate_api(api.get(1).ok_or("Neovim API omitted metadata")?)
+            .map_err(StartError::Executable)?;
         self.call(
             "nvim_set_client_info",
             vec![
@@ -1444,20 +1447,26 @@ fn validate_api(metadata: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs before the TUI starts; its errors print to stderr, so each ends with a shell-level step.
 pub fn resolve_executable(requested: Option<&Path>) -> Result<PathBuf, String> {
+    const SELECT_STEP: &str = "pass --neovim PATH or set INTERVIEW_TUTOR_NEOVIM_EXECUTABLE";
     let candidate = match requested {
-        Some(path) => find_executable(path)?,
+        Some(path) => find_executable(path),
         None => match std::env::var_os("INTERVIEW_TUTOR_NEOVIM_EXECUTABLE") {
             Some(value) if value.is_empty() => {
-                return Err("INTERVIEW_TUTOR_NEOVIM_EXECUTABLE must not be empty".into());
+                return Err(
+                    "INTERVIEW_TUTOR_NEOVIM_EXECUTABLE must not be empty; unset it or pass --neovim PATH"
+                        .into(),
+                );
             }
-            Some(value) => find_executable(Path::new(&value))?,
-            None => find_executable(Path::new("nvim"))?,
+            Some(value) => find_executable(Path::new(&value)),
+            None => find_executable(Path::new("nvim")),
         },
-    };
+    }
+    .map_err(|error| format!("{error}; install Neovim >=0.9,<2.0 or pass --neovim PATH"))?;
     let canonical = fs::canonicalize(&candidate)
-        .map_err(|error| format!("cannot resolve Neovim executable: {error}"))?;
-    ValidatedExecutable::open(&canonical)?;
+        .map_err(|error| format!("cannot resolve Neovim executable: {error}; {SELECT_STEP}"))?;
+    ValidatedExecutable::open(&canonical).map_err(|error| format!("{error}; {SELECT_STEP}"))?;
     Ok(canonical)
 }
 
@@ -1526,10 +1535,10 @@ impl ValidatedExecutable {
 fn validate_version(
     executable: &ValidatedExecutable,
     cancellation: &Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), StartError> {
     const MAX_VERSION_BYTES: u64 = 64 * 1024;
     let temp_dir = create_temp_dir()?;
-    let result = (|| {
+    let result = (|| -> Result<(), StartError> {
         let stdout_path = temp_dir.join("stdout");
         let stderr_path = temp_dir.join("stderr");
         let stdout = create_probe_file(&stdout_path)?;
@@ -1547,10 +1556,10 @@ fn validate_version(
             Some(executable.raw_fd()),
         );
         let mut child = command.spawn().map_err(|error| {
-            format!(
+            StartError::Executable(format!(
                 "cannot probe Neovim version through validated descriptor {}: {error}",
                 executable.display_path.display()
-            )
+            ))
         })?;
         let process_group = i32::try_from(child.id()).expect("Linux process IDs fit i32");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1564,7 +1573,8 @@ fn validate_version(
                 return Err(with_cleanup_error(
                     "Neovim version probe was cancelled".into(),
                     cleanup,
-                ));
+                )
+                .into());
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1576,7 +1586,7 @@ fn validate_version(
                         cleanup_error = Some(error);
                     }
                     if let Some(error) = cleanup_error {
-                        return Err(error);
+                        return Err(error.into());
                     }
                     break status;
                 }
@@ -1592,7 +1602,8 @@ fn validate_version(
                     return Err(with_cleanup_error(
                         "Neovim version probe timed out".into(),
                         cleanup,
-                    ));
+                    )
+                    .into());
                 }
                 Err(error) => {
                     let cleanup = terminate_process_group(
@@ -1603,12 +1614,13 @@ fn validate_version(
                     return Err(with_cleanup_error(
                         format!("cannot inspect Neovim version probe: {error}"),
                         cleanup,
-                    ));
+                    )
+                    .into());
                 }
             }
         };
         if !status.success() {
-            return Err("Neovim version probe failed".into());
+            return Err(StartError::Executable("Neovim version probe failed".into()));
         }
         let stdout_size = fs::metadata(&stdout_path)
             .map_err(|error| format!("cannot inspect Neovim version stdout: {error}"))?
@@ -1617,37 +1629,41 @@ fn validate_version(
             .map_err(|error| format!("cannot inspect Neovim version stderr: {error}"))?
             .len();
         if stdout_size.saturating_add(stderr_size) > MAX_VERSION_BYTES {
-            return Err("Neovim version output exceeds 64 KiB".into());
+            return Err(StartError::Executable(
+                "Neovim version output exceeds 64 KiB".into(),
+            ));
         }
         let mut stdout = String::new();
         File::open(&stdout_path)
             .and_then(|mut file| file.read_to_string(&mut stdout))
             .map_err(|error| format!("cannot read Neovim version output: {error}"))?;
-        let first = stdout.lines().next().unwrap_or("");
-        let version = first
-            .strip_prefix("NVIM v")
-            .ok_or("Neovim version output is incompatible")?;
-        let mut components = version.split('.');
-        let major = components
-            .next()
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or("Neovim major version is invalid")?;
-        let minor = components
-            .next()
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or("Neovim minor version is invalid")?;
-        if major >= 2 || (major == 0 && minor < 9) {
-            return Err(format!(
-                "Neovim {version} is unsupported; require >=0.9 and <2.0"
-            ));
-        }
-        Ok(())
+        check_version_output(&stdout).map_err(StartError::Executable)
     })();
     let cleanup = remove_temp_tree(&temp_dir);
     match result {
-        Ok(()) => cleanup,
-        Err(error) => Err(with_cleanup_error(error, cleanup)),
+        Ok(()) => cleanup.map_err(StartError::from),
+        Err(error) => Err(error.map_message(|error| with_cleanup_error(error, cleanup))),
     }
+}
+
+fn check_version_output(stdout: &str) -> Result<(), String> {
+    let first = stdout.lines().next().unwrap_or("");
+    let version = first
+        .strip_prefix("NVIM v")
+        .ok_or("Neovim version output is incompatible")?;
+    let mut components = version.split('.');
+    let major = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("Neovim major version is invalid")?;
+    let minor = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("Neovim minor version is invalid")?;
+    if major >= 2 || (major == 0 && minor < 9) {
+        return Err(format!("Neovim {version} is unsupported"));
+    }
+    Ok(())
 }
 
 fn create_probe_file(path: &Path) -> Result<File, String> {
@@ -2296,17 +2312,31 @@ end, { buffer = buf, expr = true })
         let executable = root.join("fake-nvim");
         fs::write(&executable, "#!/bin/sh\nprintf 'NVIM v2.0.0\\n'\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o722)).unwrap();
-        assert!(
-            resolve_executable(Some(&executable))
+        assert_eq!(
+            resolve_executable(Some(&executable)).unwrap_err(),
+            "Neovim executable must not be group/world writable; pass --neovim PATH or set INTERVIEW_TUTOR_NEOVIM_EXECUTABLE"
+        );
+        assert_eq!(
+            resolve_executable(Some(&root.join("missing-nvim")))
                 .unwrap_err()
-                .contains("group/world writable")
+                .rsplit_once("; ")
+                .map(|(_, step)| step),
+            Some("pass --neovim PATH or set INTERVIEW_TUTOR_NEOVIM_EXECUTABLE")
         );
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(
-            RpcProcess::start(&executable, "x\n", "interview://bad.py", "python", 20, 8,)
-                .err()
-                .expect("unsupported version fails")
-                .contains("unsupported")
+        assert_eq!(
+            RpcProcess::start_with_cancellation(
+                &executable,
+                "x\n",
+                "interview://bad.py",
+                "python",
+                20,
+                8,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .err()
+            .expect("unsupported version fails"),
+            StartError::Executable("Neovim 2.0.0 is unsupported".into())
         );
         fs::remove_dir_all(root).unwrap();
     }
