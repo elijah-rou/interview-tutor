@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Callable
 
 from pty_harness import (
     CleanupRegistry,
@@ -110,6 +111,35 @@ def controlling_terminal_self_test() -> None:
         session.wait_exit(0)
 
 
+def output_before_exit_self_test() -> None:
+    """Each waiter accepts a marker read in the same iteration that sees the exit."""
+    marker = "output-before-exit"
+    command = [sys.executable, "-c", f"print({marker!r}, flush=True)"]
+    waiters: list[Callable[[PtySession], None]] = [
+        lambda session: session.wait_history(marker.encode()),
+        lambda session: session.wait_screen(marker),
+        lambda session: session.wait_predicate(
+            "output marker", lambda: marker.encode() in session.output
+        ),
+    ]
+    for wait in waiters:
+        with PtySession(command, os.environ.copy(), 80, 24) as session:
+            session.process.wait(timeout=5)
+            wait(session)
+            session.wait_exit(0)
+
+    with PtySession(
+        [sys.executable, "-c", "pass"], os.environ.copy(), 80, 24
+    ) as session:
+        session.process.wait(timeout=5)
+        try:
+            session.wait_history(b"never-produced")
+        except AssertionError as error:
+            assert str(error).startswith("process exited with 0 "), error
+        else:
+            raise AssertionError("exit without the marker did not fail the wait")
+
+
 def cursor_request_self_test() -> None:
     cases = [
         (b"\x1b[4A", (2, 2), None, CursorRequest("4", "A", 2, -2, 5, 5), (2, 0)),
@@ -179,11 +209,13 @@ def main() -> int:
         deadline_cleanup_self_test(temporary)
         injected_failure_registry_self_test(temporary)
         controlling_terminal_self_test()
+        output_before_exit_self_test()
         cursor_request_self_test()
         make_fail_fast_self_test(repository_root, temporary)
     print(
         "PTY_HARNESS_SELF_TEST_PASS timeout_cleanup=1 injected_failure_cleanup=1 "
-        "controlling_terminal=73x19 cursor_sequences=10 make_fail_fast_iterations=2/5"
+        "controlling_terminal=73x19 output_before_exit_waiters=3 cursor_sequences=10 "
+        "make_fail_fast_iterations=2/5"
     )
     return 0
 
