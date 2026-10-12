@@ -104,6 +104,19 @@ impl InterviewerError {
         self.message.contains(pattern)
     }
 
+    /// Whether the next step is the kind-level reconnect, which the TUI renders with the keys
+    /// that reconnect from the current focus.
+    pub fn reconnects(&self) -> bool {
+        self.step.is_none()
+            && matches!(
+                self.kind,
+                ErrorKind::Cancelled
+                    | ErrorKind::Protocol
+                    | ErrorKind::Timeout
+                    | ErrorKind::Transport
+            )
+    }
+
     pub fn next_step(&self) -> &'static str {
         if let Some(step) = self.step {
             return step;

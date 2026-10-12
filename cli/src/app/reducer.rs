@@ -85,6 +85,21 @@ fn start_interviewer_connect(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::ConnectInterviewer { operation }]
 }
 
+fn interviewer_error_text(
+    state: &AppState,
+    error: &crate::interviewer::InterviewerError,
+) -> String {
+    if error.reconnects() {
+        format!(
+            "{}; {}",
+            error.message(),
+            state.interviewer_reconnect_step()
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 fn interviewer_output_tail(output: &str) -> String {
     const MAX_INTERVIEWER_OUTPUT_BYTES: usize = 16 * 1024;
     if output.len() <= MAX_INTERVIEWER_OUTPUT_BYTES {
@@ -757,11 +772,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Err(error) if error.kind() == crate::interviewer::ErrorKind::Authentication => {
                         state.interviewer.status = InterviewerStatus::AuthRequired;
                         state.interviewer.pending_submission_review = None;
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                     }
                     Err(error) => {
                         state.interviewer.status = InterviewerStatus::Disconnected;
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                     }
                 }
                 return Vec::new();
@@ -786,7 +801,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                             } else {
                                 InterviewerStatus::ProtocolError
                             };
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                         return vec![Effect::FinalizeInterviewerTurn {
                             operation,
                             revision,
@@ -2051,6 +2066,24 @@ mod tests {
             Some(
                 "Interviewer worker disconnected; open a problem, then press i outside the Editor to reconnect"
             )
+        );
+
+        let mut connecting = solve_state();
+        connecting.interviewer.composer_focused = true;
+        connecting.interviewer.connecting = Some(OperationId(7));
+        reduce(
+            &mut connecting,
+            Event::InterviewerConnected(
+                OperationId(7),
+                Err(crate::interviewer::InterviewerError::transport(
+                    crate::interviewer::Backend::Pi,
+                    "Pi closed stdout",
+                )),
+            ),
+        );
+        assert_eq!(
+            connecting.error.as_deref(),
+            Some("Pi closed stdout; press Esc, then i to reconnect")
         );
 
         let mut leaving = solve_state();

@@ -118,7 +118,7 @@ Authentication, executable, protocol, timeout, cancellation, and transport failu
 | Codex authentication | run `codex login`, then restart `./interview` |
 | Pi executable or version | install Pi 0.84.4 or set `INTERVIEW_TUTOR_PI_EXECUTABLE` |
 | Codex executable or version | install Codex 0.147.0 or set `INTERVIEW_TUTOR_CODEX_EXECUTABLE` |
-| protocol, timeout, cancellation, transport | press `i` in the Interview pane to reconnect |
+| protocol, timeout, cancellation, transport | press `i` outside the Editor to reconnect (Esc first if the composer is open) |
 | Codex replacement limit reached | restart `./interview` to reconnect |
 
 `i` does not reconnect from the authentication-required state. You can also select `none` or keep using local solve functions.

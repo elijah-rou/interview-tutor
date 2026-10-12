@@ -160,7 +160,7 @@ impl InterviewerSession {
                     backend,
                     "maximum three hints reached for this revision",
                 )
-                .with_step("edit your code for new hints or press Space m for Tutor"));
+                .with_step("edit the source to get more hints"));
             }
         }
         let transcript =
