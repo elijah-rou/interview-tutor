@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::str::FromStr;
 
 pub const INTERVIEWER_ENV: &str = "INTERVIEW_TUTOR_INTERVIEWER";
+const SELECTOR_STEP: &str = "set it to pi, codex, or none";
 
 pub fn resolve(
     cli: Option<Backend>,
@@ -10,7 +11,7 @@ pub fn resolve(
     environment: Option<OsString>,
 ) -> Result<Backend, String> {
     if cli.is_some() && legacy_no_codex {
-        return Err("--interviewer conflicts with legacy --no-codex".into());
+        return Err("--interviewer conflicts with legacy --no-codex; remove --no-codex".into());
     }
     if let Some(cli) = cli {
         return Ok(cli);
@@ -23,13 +24,14 @@ pub fn resolve(
     };
     let environment = environment
         .into_string()
-        .map_err(|_| format!("{INTERVIEWER_ENV} must be UTF-8"))?;
+        .map_err(|_| format!("{INTERVIEWER_ENV} must be UTF-8; {SELECTOR_STEP}"))?;
     if environment.is_empty() {
-        return Err(format!("{INTERVIEWER_ENV} must not be empty"));
+        return Err(format!(
+            "{INTERVIEWER_ENV} must not be empty; {SELECTOR_STEP}"
+        ));
     }
-    Backend::from_str(&environment).map_err(|_| {
-        format!("invalid {INTERVIEWER_ENV} value {environment:?}; expected pi, codex, or none")
-    })
+    Backend::from_str(&environment)
+        .map_err(|_| format!("invalid {INTERVIEWER_ENV} value {environment:?}; {SELECTOR_STEP}"))
 }
 
 pub fn from_environment(cli: Option<Backend>, legacy_no_codex: bool) -> Result<Backend, String> {
@@ -59,9 +61,18 @@ mod tests {
 
     #[test]
     fn selector_rejects_conflicts_empty_and_invalid_selected_values() {
-        assert!(resolve(Some(Backend::None), true, None).is_err());
-        assert!(resolve(None, false, Some(OsString::new())).is_err());
-        assert!(resolve(None, false, Some("Codex".into())).is_err());
+        assert_eq!(
+            resolve(Some(Backend::None), true, None).unwrap_err(),
+            "--interviewer conflicts with legacy --no-codex; remove --no-codex"
+        );
+        assert_eq!(
+            resolve(None, false, Some(OsString::new())).unwrap_err(),
+            "INTERVIEW_TUTOR_INTERVIEWER must not be empty; set it to pi, codex, or none"
+        );
+        assert_eq!(
+            resolve(None, false, Some("Codex".into())).unwrap_err(),
+            "invalid INTERVIEW_TUTOR_INTERVIEWER value \"Codex\"; set it to pi, codex, or none"
+        );
         assert!(resolve(None, false, Some(" codex".into())).is_err());
     }
 }
