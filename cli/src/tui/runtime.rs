@@ -30,8 +30,22 @@ const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const RESTART_STEP: &str = "restart ./interview";
 /// Next step for failures to take over the terminal.
 const TERMINAL_STEP: &str = "run ./interview in an interactive terminal";
-/// Next step once the runner worker thread is gone; drafts still save on the main thread.
-const RUNNER_STOPPED_STEP: &str = "press Esc, then Space b to save, then restart ./interview";
+
+/// The runner worker cannot start or finish runs once its thread is gone; Back still saves the
+/// draft on the main thread before leaving Solve.
+fn runner_stopped_step(state: &AppState) -> String {
+    format!(
+        "{} to save, then restart ./interview",
+        state.leader_step("Space b")
+    )
+}
+
+/// Why the runner worker refused a run; the runtime renders it with keys for the current focus.
+#[derive(Debug, Eq, PartialEq)]
+enum RunStartError {
+    Busy,
+    Stopped,
+}
 
 fn run_retry_step(intent: crate::app::RunIntent) -> &'static str {
     match intent {
@@ -1048,12 +1062,9 @@ impl RunnerWorker {
         plan: runner::ExecutionPlan,
         source: String,
         write_source: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunStartError> {
         if self.active.is_some() {
-            return Err(format!(
-                "runner worker still owns an active Solve operation; {} after it finishes",
-                run_retry_step(intent)
-            ));
+            return Err(RunStartError::Busy);
         }
         let cancellation = RunCancellation::with_signal_state(self.signal_state.clone());
         self.sender
@@ -1066,7 +1077,7 @@ impl RunnerWorker {
                 write_source,
                 cancellation: cancellation.clone(),
             })
-            .map_err(|_| format!("runner worker stopped; {RUNNER_STOPPED_STEP}"))?;
+            .map_err(|_| RunStartError::Stopped)?;
         self.active = Some((operation, revision, intent, cancellation));
         Ok(())
     }
@@ -1114,7 +1125,7 @@ impl RunnerWorker {
             }
         }
     }
-    fn poll(&mut self) -> Vec<Event> {
+    fn poll(&mut self, stopped_step: &dyn Fn() -> String) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
             match self.events.try_recv() {
@@ -1130,7 +1141,7 @@ impl RunnerWorker {
                             revision,
                             intent,
                             None,
-                            Err(format!("runner worker disconnected; {RUNNER_STOPPED_STEP}")),
+                            Err(format!("runner worker disconnected; {}", stopped_step())),
                         ));
                     }
                     if let Some(join) = self.join.take() {
@@ -1342,6 +1353,15 @@ fn apply_effects(
                 if let Err(error) =
                     worker.run(operation, revision, intent, plan, source, write_source)
                 {
+                    let error = match error {
+                        RunStartError::Busy => format!(
+                            "runner worker still owns an active Solve operation; {} after it finishes",
+                            run_retry_step(intent)
+                        ),
+                        RunStartError::Stopped => {
+                            format!("runner worker stopped; {}", runner_stopped_step(state))
+                        }
+                    };
                     effects.extend(reduce(
                         state,
                         Event::RunFinished(operation, revision, intent, None, Err(error)),
@@ -1767,7 +1787,7 @@ pub fn run(
                 let events = {
                     let (runner_worker, interviewer_worker, _) = workers.parts();
                     runner_worker
-                        .poll()
+                        .poll(&|| runner_stopped_step(&state))
                         .into_iter()
                         .chain(interviewer_worker.poll())
                         .collect::<Vec<_>>()
@@ -2476,10 +2496,14 @@ mod tests {
         }
     }
 
+    fn stopped_step() -> String {
+        "press Space b to save, then restart ./interview".into()
+    }
+
     fn poll_one(worker: &mut RunnerWorker) -> Event {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if let Some(event) = worker.poll().into_iter().next() {
+            if let Some(event) = worker.poll(&stopped_step).into_iter().next() {
                 return event;
             }
             assert!(std::time::Instant::now() < deadline, "worker event timeout");
@@ -3030,7 +3054,7 @@ mod tests {
         worker.sender.send(WorkerCommand::Shutdown).unwrap();
         assert!(worker.events.recv_timeout(Duration::from_secs(2)).is_err());
         assert!(
-            matches!(worker.poll().as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected; press Esc, then Space b to save, then restart ./interview")
+            matches!(worker.poll(&stopped_step).as_slice(), [Event::RunFinished(OperationId(9), 4, RunIntent::Test, None, Err(error))] if error == "runner worker disconnected; press Space b to save, then restart ./interview")
         );
         assert!(worker.active.is_none());
         assert!(worker.join.is_none());
@@ -3387,7 +3411,7 @@ mod tests {
                     false,
                 )
                 .unwrap_err()
-                .contains("still owns")
+                == RunStartError::Busy
         );
         assert_eq!(worker.active.as_ref().unwrap().0, OperationId(71));
 
