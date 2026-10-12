@@ -84,6 +84,9 @@ root = Path(__file__).resolve().parent
 if sys.argv[1:] == ["--list"]:
     print("smoke-problem")
     raise SystemExit(0)
+if sys.argv[1:2] == ["--cases"]:
+    print("main")
+    raise SystemExit(0)
 mode = (root / "runner-mode").read_text(encoding="utf-8").strip()
 pid_file = os.environ.get("PRACTICE_FIXTURE_PID_FILE")
 if mode == "normal":
@@ -965,10 +968,11 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
             session.send(b"\t\t")
             session.wait_screen("Output / Test [active]")
             expected = {
-                "fail": ("Exited(7)", ("fail", 7)),
-                "timeout": ("TimedOut", ("error", None)),
-                "cancel": ("Cancelled", ("cancelled", 130)),
-                "flood": ("output truncated", ("pass", 0)),
+                "fail": ("case 1/1 main · fail · exit 7", ("fail", 7)),
+                # The shared deadline may expire during setup's cleanup or during the case.
+                "timeout": ("error · 0/1 cases passed", ("error", None)),
+                "cancel": ("cancelled · 0/1 cases passed", ("cancelled", 130)),
+                "flood": ("case 1/1 main · pass · exit 0", ("pass", 0)),
                 "group-descendant": ("fixture-child", ("pass", 0)),
                 "escaped-descendant": ("fixture-child", ("pass", 0)),
             }[mode]
@@ -976,7 +980,8 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
             if mode == "flood":
                 session.wait_screen("euro:€")
                 session.send(b"j" * 20)
-                session.wait_screen("flood-0005")
+                # Case output is indented, so 20 rows reach the fifth stored flood line.
+                session.wait_screen("flood-0004")
                 assert "hostile-title" not in session.screen.text()
                 assert not session.raw_sequence_seen(b"\x1b]0;hostile-title\x07")
                 assert not session.raw_sequence_seen(b"hostile-title")
@@ -985,6 +990,15 @@ def run_runner_case(fixture: MatrixFixture, mode: str) -> str:
                 )
                 assert len(session.output) <= 4 * 1024 * 1024
                 assert len(session.screen.osc_events) <= 128
+                with sqlite3.connect(database) as connection:
+                    head, omitted, tail = connection.execute(
+                        "SELECT stdout_head, stdout_omitted_bytes, stdout_tail "
+                        "FROM attempt_steps WHERE ordinal = 1"
+                    ).fetchone()
+                assert head.startswith("safe-start\nsplit-euro:€\n"), head[:40]
+                assert omitted > 2 * 1024 * 1024, omitted
+                assert tail.endswith("safe-tail\n"), tail[-40:]
+                assert "hostile-title" not in head + tail
             if mode in {"group-descendant", "escaped-descendant"}:
                 session.wait_predicate("descendant pid fixture", pid_file.exists)
                 escaped_pid = int(pid_file.read_text(encoding="utf-8"))

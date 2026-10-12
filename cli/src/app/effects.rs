@@ -23,6 +23,16 @@ pub enum Effect {
         problem_id: Option<i64>,
         language_slug: String,
     },
+    LoadHistory {
+        operation: OperationId,
+        problem_slug: String,
+        language_slug: String,
+        cursor: crate::database::AttemptCursor,
+    },
+    LoadAttempt {
+        operation: OperationId,
+        attempt_id: i64,
+    },
     OpenSolve {
         operation: OperationId,
         problem_slug: String,
@@ -113,6 +123,9 @@ pub enum Action {
     PreviousFocus,
     CycleLanguage,
     Reload,
+    History,
+    PageOlder,
+    PageNewer,
     Help,
     Quit,
     SaveTest,
@@ -140,6 +153,14 @@ pub enum Event {
     Command(Action),
     OpenSet(String),
     Loaded(OperationId, Result<Box<AppData>, String>),
+    HistoryLoaded(
+        OperationId,
+        Result<Box<crate::database::AttemptPage>, String>,
+    ),
+    AttemptLoaded(
+        OperationId,
+        Result<Box<crate::attempt::AttemptRecord>, String>,
+    ),
     SolveOpened(OperationId, Result<Box<super::model::SolveSession>, String>),
     NeovimStarted(Result<(), String>),
     NeovimDocument(crate::neovim::DocumentUpdate),

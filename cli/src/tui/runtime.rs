@@ -1220,6 +1220,24 @@ fn apply_effects(
                     .map(Box::new);
                 effects.extend(reduce(state, Event::Loaded(operation, result)));
             }
+            Effect::LoadHistory {
+                operation,
+                problem_slug,
+                language_slug,
+                cursor,
+            } => {
+                let result = repository
+                    .history(&problem_slug, &language_slug, cursor)
+                    .map(Box::new);
+                effects.extend(reduce(state, Event::HistoryLoaded(operation, result)));
+            }
+            Effect::LoadAttempt {
+                operation,
+                attempt_id,
+            } => {
+                let result = repository.attempt(attempt_id).map(Box::new);
+                effects.extend(reduce(state, Event::AttemptLoaded(operation, result)));
+            }
             Effect::OpenSolve {
                 operation,
                 problem_slug,

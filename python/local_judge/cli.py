@@ -56,8 +56,8 @@ def run_case(problem: Problem, name: str) -> int:
         print(f"FAIL {problem.slug}: starter is not implemented", file=sys.stderr)
         return 1
     except Exception as error:
-        traceback.print_exc()
         print(f"FAIL {problem.slug}: {error}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     return 0
 

@@ -172,15 +172,23 @@ fn header(state: &AppState) -> Paragraph<'static> {
     )
 }
 
-fn footer_text(width: u16) -> &'static str {
-    const FULL: &str = "j/k move Enter open Esc back Tab pane l lang r reload ? help q quit";
-    const COMPACT: &str = "j/k move Enter open Esc back Tab pane ? help q quit";
-
-    if usize::from(width) >= FULL.len() {
-        FULL
-    } else {
-        COMPACT
-    }
+fn footer_text(screen: Screen, width: u16) -> String {
+    let candidates: &[&str] = match screen {
+        Screen::ProblemDetail => &[
+            "j/k scroll Enter solve a attempts Esc back Tab pane l lang r reload ? help q quit",
+            "j/k scroll Enter solve a attempts Esc back ? help q quit",
+        ],
+        Screen::History => &[
+            "j/k move Enter open PgUp/PgDn page Esc back l lang r reload ? help q quit",
+            "j/k move Enter open PgUp/PgDn page Esc back ? help q quit",
+        ],
+        Screen::Attempt => &["j/k scroll PgUp/PgDn page Esc back ? help q quit"],
+        Screen::SetMenu | Screen::ProblemList | Screen::Solve => &[
+            "j/k move Enter open Esc back Tab pane l lang r reload ? help q quit",
+            "j/k move Enter open Esc back Tab pane ? help q quit",
+        ],
+    };
+    first_fitting_footer(candidates.iter().map(|text| text.to_string()), width)
 }
 
 fn first_fitting_footer(candidates: impl IntoIterator<Item = String>, width: u16) -> String {
@@ -412,6 +420,98 @@ fn problems(state: &AppState, area_height: u16) -> Table<'static> {
     } else {
         "Problems"
     }))
+}
+
+fn history(state: &AppState, area_height: u16) -> Table<'static> {
+    let history = state
+        .history
+        .as_ref()
+        .expect("history screen keeps history state");
+    let language = state
+        .languages
+        .get(state.language_index)
+        .map_or("none", |item| item.display_name.as_str());
+    let page = history.page.as_ref();
+    let mut title = format!("Attempts · {} · {language}", history.problem_title);
+    match page {
+        None => title.push_str(" · loading"),
+        Some(page) if page.rows.is_empty() => title.push_str(" · none recorded"),
+        Some(page) => {
+            if page.has_newer {
+                title.push_str(" · PgUp newer");
+            }
+            if page.has_older {
+                title.push_str(" · PgDn older");
+            }
+        }
+    }
+    if state.focus == Focus::Main {
+        title.push_str(" [active]");
+    }
+    let start = viewport_start(history.selected, area_height);
+    let rows = page
+        .map_or(&[][..], |page| page.rows.as_slice())
+        .iter()
+        .enumerate()
+        .skip(start)
+        .map(|(index, row)| {
+            let style = if index == history.selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(row.id.to_string()),
+                Cell::from(row.run_at.clone()),
+                Cell::from(row.result.to_string()),
+                Cell::from(row.cases.map_or("-".to_string(), |(passed, total)| {
+                    format!("{passed}/{total}")
+                })),
+                Cell::from(row.duration_ms.to_string()),
+                Cell::from(if row.current_revision {
+                    "current".to_string()
+                } else {
+                    format!("{} (outdated)", row.test_revision)
+                }),
+            ])
+            .style(style)
+        })
+        .collect::<Vec<_>>();
+    Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(21),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Min(8),
+        ],
+    )
+    .header(
+        Row::new(["ID", "Run at", "Result", "Cases", "ms", "Revision"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(block(&title))
+}
+
+fn attempt(state: &AppState) -> Paragraph<'static> {
+    let view = state
+        .history
+        .as_ref()
+        .and_then(|history| history.attempt.as_ref())
+        .expect("attempt screen keeps its loaded attempt");
+    let title = if state.focus == Focus::Main {
+        format!("Attempt {} [active]", view.id)
+    } else {
+        format!("Attempt {}", view.id)
+    };
+    Paragraph::new(view.text.clone())
+        .block(block(&title))
+        .wrap(Wrap { trim: false })
+        .scroll((view.scroll, 0))
 }
 
 fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
@@ -901,7 +1001,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let footer = if state.screen == Screen::Solve {
         solve_footer_text(state, area.width)
     } else {
-        footer_text(area.width).to_string()
+        footer_text(state.screen, area.width)
     };
     frame.render_widget(Paragraph::new(footer), vertical[2]);
 
@@ -937,6 +1037,10 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 Screen::ProblemDetail => {
                     frame.render_widget(detail(state, columns[0].width), columns[0])
                 }
+                Screen::History => {
+                    frame.render_widget(history(state, columns[0].height), columns[0])
+                }
+                Screen::Attempt => frame.render_widget(attempt(state), columns[0]),
                 Screen::Solve => unreachable!("solve rendered above"),
             }
             frame.render_widget(progress(state), columns[1]);
@@ -955,7 +1059,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 match state.screen {
                     Screen::SetMenu => 0,
                     Screen::ProblemList => 1,
-                    Screen::ProblemDetail => 2,
+                    Screen::ProblemDetail | Screen::History | Screen::Attempt => 2,
                     Screen::Solve => unreachable!("solve rendered above"),
                 }
             };
@@ -976,6 +1080,10 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                     Screen::ProblemDetail => {
                         frame.render_widget(detail(state, chunks[1].width), chunks[1])
                     }
+                    Screen::History => {
+                        frame.render_widget(history(state, chunks[1].height), chunks[1])
+                    }
+                    Screen::Attempt => frame.render_widget(attempt(state), chunks[1]),
                     Screen::Solve => unreachable!("solve rendered above"),
                 }
             }
@@ -996,7 +1104,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 solve_footer_text(state, popup.width.saturating_sub(2))
             )
         } else {
-            "Help\n\n↑/k up  ↓/j down  Enter open\nEsc back  Tab/Shift-Tab pane\nl language  r reload  ? close  q quit".into()
+            "Help\n\n↑/k up  ↓/j down  Enter open\nEsc back  Tab/Shift-Tab pane\nl language  r reload  ? close  q quit\nProblem detail: a attempts · Attempts: Enter shows output, PgUp/PgDn pages".into()
         };
         frame.render_widget(
             Paragraph::new(help)
@@ -1134,11 +1242,70 @@ mod tests {
     }
 
     #[test]
+    fn history_and_attempt_screens_render_rows_and_output() {
+        let mut state = AppState::new(
+            vec![crate::database::EnabledLanguage {
+                slug: "python".into(),
+                display_name: "Python".into(),
+                runner_path: "python/run".into(),
+            }],
+            0,
+        );
+        state.screen = Screen::History;
+        state.history = Some(crate::app::model::HistoryView {
+            problem_slug: "two-sum".into(),
+            problem_title: "Two Sum".into(),
+            page: Some(crate::database::AttemptPage {
+                rows: vec![crate::attempt::AttemptSummary {
+                    id: 42,
+                    run_at: "2026-10-12T20:46:03Z".into(),
+                    language: "python".into(),
+                    result: crate::database::AttemptOutcome::Fail,
+                    duration_ms: 190,
+                    test_revision: 1,
+                    current_revision: true,
+                    cases: Some((0, 1)),
+                }],
+                has_older: true,
+                has_newer: false,
+            }),
+            selected: 0,
+            attempt: None,
+        });
+        for (width, height) in [(120, 40), (80, 24)] {
+            let screen = rendered(&state, width, height);
+            assert!(screen.contains("Attempts · Two Sum · Python · PgDn older"));
+            assert!(screen.contains("2026-10-12T20:46:03Z"));
+            assert!(screen.contains("0/1"));
+        }
+        assert_eq!(
+            rendered_footer(&state, 80),
+            "j/k move Enter open PgUp/PgDn page Esc back l lang r reload ? help q quit"
+        );
+
+        let history = state.history.as_mut().unwrap();
+        history.attempt = Some(crate::app::model::AttemptView {
+            id: 42,
+            text: "Attempt 42 · two-sum\ncase 1/1 example-1 · fail · exit 1 · 9 ms\n  stderr\n    boom\n"
+                .into(),
+            scroll: 0,
+        });
+        state.screen = Screen::Attempt;
+        let screen = rendered(&state, 120, 40);
+        assert!(screen.contains("Attempt 42 [active]"));
+        assert!(screen.contains("boom"));
+        assert_eq!(
+            rendered_footer(&state, 60),
+            "j/k scroll PgUp/PgDn page Esc back ? help q quit"
+        );
+    }
+
+    #[test]
     fn footer_is_not_clipped_at_supported_widths() {
         let state = AppState::new(Vec::new(), 0);
         for width in [60, 68, 80, 120] {
             let footer = rendered_footer(&state, width);
-            assert_eq!(footer, footer_text(width));
+            assert_eq!(footer, footer_text(state.screen, width));
             assert!(footer.contains("? help"));
             assert!(footer.contains("q quit"));
         }

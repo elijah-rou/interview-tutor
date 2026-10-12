@@ -11,6 +11,7 @@ pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_SCROLL: u16 = u16::MAX;
 pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
+pub const HISTORY_PAGE_ROWS: usize = 100;
 pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
 pub const MAX_VISIBLE_TRANSCRIPT_ENTRIES: usize = 512;
 pub const MAX_VISIBLE_TRANSCRIPT_BYTES: usize = 1024 * 1024;
@@ -165,7 +166,62 @@ pub enum Screen {
     SetMenu,
     ProblemList,
     ProblemDetail,
+    History,
+    Attempt,
     Solve,
+}
+
+/// Recorded attempts of one problem in the selected language, one keyset page at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryView {
+    pub problem_slug: String,
+    pub problem_title: String,
+    /// `None` until the first page loads.
+    pub page: Option<crate::database::AttemptPage>,
+    pub selected: usize,
+    pub attempt: Option<AttemptView>,
+}
+
+impl HistoryView {
+    pub fn selected_attempt_id(&self) -> Option<i64> {
+        self.page
+            .as_ref()
+            .and_then(|page| page.rows.get(self.selected))
+            .map(|row| row.id)
+    }
+}
+
+/// One stored attempt, rendered once on load and bounded like run output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptView {
+    pub id: i64,
+    pub text: String,
+    pub scroll: u16,
+}
+
+impl AttemptView {
+    pub fn new(record: &crate::attempt::AttemptRecord) -> Self {
+        const MARKER: &str = "… output truncated …\n";
+        let mut text = crate::attempt::render_record(record);
+        if text.len() > MAX_RUN_OUTPUT_BYTES {
+            let mut end = MAX_RUN_OUTPUT_BYTES - MARKER.len();
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str(MARKER);
+        }
+        assert!(text.len() <= MAX_RUN_OUTPUT_BYTES);
+        Self {
+            id: record.id,
+            text,
+            scroll: 0,
+        }
+    }
+
+    pub fn scroll_max(&self) -> u16 {
+        u16::try_from(self.text.lines().count().saturating_sub(1)).unwrap_or(u16::MAX)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,6 +494,7 @@ pub struct AppState {
     pub progress_scroll: u16,
     pub data: AppData,
     pub solve: Option<SolveSession>,
+    pub history: Option<HistoryView>,
     pub active_operation: Option<OperationId>,
     pub next_operation: u64,
     pub status: String,
@@ -473,6 +530,7 @@ impl AppState {
             progress_scroll: 0,
             data: AppData::empty(),
             solve: None,
+            history: None,
             active_operation: None,
             next_operation: 1,
             status: "Ready".to_string(),

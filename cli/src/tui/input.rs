@@ -229,6 +229,9 @@ fn browser_key(key: KeyEvent) -> Option<Action> {
         (KeyCode::Tab, _) => Some(Action::NextFocus),
         (KeyCode::Char('l'), _) => Some(Action::CycleLanguage),
         (KeyCode::Char('r'), _) => Some(Action::Reload),
+        (KeyCode::Char('a'), _) => Some(Action::History),
+        (KeyCode::PageDown, _) => Some(Action::PageOlder),
+        (KeyCode::PageUp, _) => Some(Action::PageNewer),
         _ => None,
     }
 }

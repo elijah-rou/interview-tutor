@@ -1,4 +1,4 @@
-use super::model::{AppData, MAX_ROWS, ProblemDetail, ProblemRow, SetRow};
+use super::model::{AppData, HISTORY_PAGE_ROWS, MAX_ROWS, ProblemDetail, ProblemRow, SetRow};
 use crate::database::{
     self, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
     ProgressScope, RowLimit,
@@ -43,6 +43,25 @@ pub struct Repository {
 impl Repository {
     pub fn new(connection: Connection) -> Self {
         Self { connection }
+    }
+
+    pub fn history(
+        &self,
+        problem_slug: &str,
+        language_slug: &str,
+        cursor: database::AttemptCursor,
+    ) -> Result<database::AttemptPage, String> {
+        database::list_attempts(
+            &self.connection,
+            problem_slug,
+            Some(language_slug),
+            cursor,
+            HISTORY_PAGE_ROWS,
+        )
+    }
+
+    pub fn attempt(&self, attempt_id: i64) -> Result<crate::attempt::AttemptRecord, String> {
+        database::get_attempt(&self.connection, attempt_id)
     }
 
     pub fn prepare_execution(
