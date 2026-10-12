@@ -418,9 +418,7 @@ class GeneralizedCliTests(unittest.TestCase):
     def test_explicit_empty_database_flag_is_rejected(self) -> None:
         result = self.run_command(str(ROOT / "practice"), "--db", "", "db")
         self.assertEqual(result.returncode, 2)
-        self.assertIn(
-            "database path must not be empty; pass --db with a file path", result.stderr
-        )
+        self.assertIn("database path must not be empty; pass --db with a file path", result.stderr)
 
     def test_shipped_resources_are_read_only_through_local_crud(self) -> None:
         moved = self.run_command(
@@ -699,9 +697,7 @@ class GeneralizedCliTests(unittest.TestCase):
         result = self.run_command(str(ROOT / "run"), "python", "metadata-only")
         self.assertEqual(result.returncode, 2)
         self.assertIn("no active python adapter", result.stderr)
-        self.assertIn(
-            "run `practice problems show metadata-only` to see adapters", result.stderr
-        )
+        self.assertIn("run `practice problems show metadata-only` to see adapters", result.stderr)
 
 
 if __name__ == "__main__":
