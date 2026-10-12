@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub(crate) const SUPPORTED_CODEX_VERSIONS: [&str; 2] = ["codex-cli 0.146.0", "codex-cli 0.147.0"];
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -69,10 +70,16 @@ impl CodexProcess {
         control_pid: Arc<AtomicI32>,
         cancellation: &CancellationToken,
     ) -> Result<Self, String> {
-        let executable = fs::canonicalize(&executable)
-            .map_err(|error| format!("cannot resolve Codex executable: {error}"))?;
-        let executable = ValidatedExecutable::open(&executable)?;
-        validate_validated_version(&executable, cancellation)?;
+        let executable = ValidatedExecutable::verified(&executable, cancellation)?;
+        Self::start_verified(&executable, control_pid, cancellation)
+    }
+
+    /// Starts an app-server from an executable whose trust and version were already verified.
+    pub(crate) fn start_verified(
+        executable: &ValidatedExecutable,
+        control_pid: Arc<AtomicI32>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, String> {
         if cancellation.is_cancelled() {
             return Err("Codex startup cancelled".into());
         }
@@ -972,7 +979,7 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
         let selected = std::env::split_paths(&paths)
             .map(|base| base.join(path))
             .find(|candidate| candidate.is_file())
-            .ok_or("Codex CLI not found; local solve remains available")?;
+            .ok_or("Codex CLI not found")?;
         fs::canonicalize(selected)
             .map_err(|error| format!("cannot resolve Codex executable: {error}"))?
     };
@@ -980,12 +987,21 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-struct ValidatedExecutable {
+pub(crate) struct ValidatedExecutable {
     file: File,
     display_path: PathBuf,
 }
 
 impl ValidatedExecutable {
+    /// Opens a trusted executable and checks its version; failures are installation problems.
+    pub(crate) fn verified(path: &Path, cancellation: &CancellationToken) -> Result<Self, String> {
+        let path = fs::canonicalize(path)
+            .map_err(|error| format!("cannot resolve Codex executable: {error}"))?;
+        let executable = Self::open(&path)?;
+        validate_validated_version(&executable, cancellation)?;
+        Ok(executable)
+    }
+
     fn open(path: &Path) -> Result<Self, String> {
         let encoded = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| "Codex executable path contains NUL")?;
@@ -1109,10 +1125,8 @@ fn validate_validated_version_with_timeout(
     let version = std::str::from_utf8(&capture.stdout)
         .map_err(|_| "cannot query Codex version: stdout was not UTF-8")?
         .trim();
-    if !matches!(version, "codex-cli 0.146.0" | "codex-cli 0.147.0") {
-        return Err(format!(
-            "unsupported Codex CLI {version}; install verified version 0.146.0 or 0.147.0"
-        ));
+    if !SUPPORTED_CODEX_VERSIONS.contains(&version) {
+        return Err(format!("unsupported Codex CLI {version}"));
     }
     Ok(())
 }
@@ -1779,7 +1793,23 @@ mod tests {
         let executable = directory.join("codex-version");
         fs::write(&executable, "#!/bin/sh\necho 'codex-cli 0.146.9'\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(validate_version(&executable, &CancellationToken::new()).is_err());
+        assert_eq!(
+            validate_version(&executable, &CancellationToken::new()).unwrap_err(),
+            "unsupported Codex CLI codex-cli 0.146.9"
+        );
+        let error = match crate::codex::CodexTransport::connect_executable(
+            executable,
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        ) {
+            Ok(_) => panic!("unsupported Codex version connected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Configuration);
+        assert_eq!(
+            error.to_string(),
+            "unsupported Codex CLI codex-cli 0.146.9; install Codex 0.147.0 or set INTERVIEW_TUTOR_CODEX_EXECUTABLE"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2090,8 +2120,24 @@ mod tests {
             let (_environment, mut ready) = fake_process("normal");
             assert!(ready.account_ready().unwrap());
         }
-        let (_environment, mut auth_required) = fake_process("auth-required");
-        assert!(!auth_required.account_ready().unwrap());
+        {
+            let (_environment, mut auth_required) = fake_process("auth-required");
+            assert!(!auth_required.account_ready().unwrap());
+        }
+        let _environment = FakeEnvironment::new("auth-required");
+        let error = match crate::codex::CodexTransport::connect_executable(
+            fake_executable(),
+            Arc::new(AtomicI32::new(0)),
+            &CancellationToken::new(),
+        ) {
+            Ok(_) => panic!("unauthenticated Codex connected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Authentication);
+        assert_eq!(
+            error.to_string(),
+            "Codex authentication required; run `codex login`, then restart ./interview"
+        );
     }
 
     #[test]
@@ -2512,23 +2558,17 @@ mod tests {
             source_revision: 1,
             solved: false,
         };
-        assert!(
-            session
-                .ask(request())
-                .unwrap_err()
-                .contains("closed stdout")
-        );
-        assert!(
-            session
-                .ask(request())
-                .unwrap_err()
-                .contains("closed stdout")
-        );
-        assert!(
-            session
-                .ask(request())
-                .unwrap_err()
-                .contains("restart limit")
+        for _ in 0..2 {
+            let error = session.ask(request()).unwrap_err();
+            assert!(error.contains("closed stdout"), "{error}");
+            assert!(
+                error.ends_with("; press i in the Interview pane to reconnect"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            session.ask(request()).unwrap_err(),
+            "Codex session restart limit reached; restart ./interview to reconnect"
         );
         drop(session);
         assert_eq!(

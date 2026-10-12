@@ -1,4 +1,4 @@
-use super::error::{ErrorKind, InterviewerError};
+use super::error::{InterviewerError, RECONNECT_STEP};
 use super::prompt::{self, Mode};
 use super::transcript::{self, SessionTranscript, Speaker};
 use super::{Backend, GuidanceMode};
@@ -68,7 +68,8 @@ impl InterviewerSession {
                 return Err(InterviewerError::configuration(
                     Backend::Pi,
                     "disabled interviewer cannot connect",
-                ));
+                )
+                .with_step("restart ./interview with --interviewer pi or codex"));
             }
         };
         Ok(Self::from_transport(transport))
@@ -128,16 +129,16 @@ impl InterviewerSession {
         self.prepare_next_operation(cancellation)?;
         let backend = self.backend();
         if request.question.len() > transcript::MAX_USER_BYTES {
-            return Err(InterviewerError::configuration(
-                backend,
-                "question exceeds 16 KiB",
-            ));
+            return Err(
+                InterviewerError::configuration(backend, "question exceeds 16 KiB")
+                    .with_step("shorten the question"),
+            );
         }
         if request.latest_output.len() > transcript::MAX_LATEST_OUTPUT_BYTES {
-            return Err(InterviewerError::configuration(
-                backend,
-                "latest output exceeds 16 KiB",
-            ));
+            return Err(
+                InterviewerError::configuration(backend, "latest output exceeds 16 KiB")
+                    .with_step(RECONNECT_STEP),
+            );
         }
         let mode = request.mode;
         if let Mode::Hint(level) = mode
@@ -147,7 +148,8 @@ impl InterviewerSession {
                 return Err(InterviewerError::configuration(
                     backend,
                     "hint level must be 1 through 3",
-                ));
+                )
+                .with_step(RECONNECT_STEP));
             }
             if self.hint_revision != Some(request.source_revision) {
                 self.hint_revision = Some(request.source_revision);
@@ -157,7 +159,8 @@ impl InterviewerSession {
                 return Err(InterviewerError::configuration(
                     backend,
                     "maximum three hints reached for this revision",
-                ));
+                )
+                .with_step("edit your code for new hints or press Space m for Tutor"));
             }
         }
         let transcript =
@@ -178,6 +181,7 @@ impl InterviewerSession {
             prompt::system_contract(mode, request.guidance, request.solved),
             serde_json::to_string(&payload).map_err(|_| {
                 InterviewerError::configuration(backend, "cannot encode interviewer prompt")
+                    .with_step(RECONNECT_STEP)
             })?
         );
         let raw = self.transport.raw_turn(
@@ -304,14 +308,6 @@ fn combine_finish_error(
 ) -> InterviewerError {
     match cleanup {
         Ok(()) => primary,
-        Err(cleanup) => InterviewerError::new(
-            primary.backend(),
-            if primary.kind() == ErrorKind::Authentication {
-                ErrorKind::Authentication
-            } else {
-                primary.kind()
-            },
-            format!("{primary}; cleanup failed: {cleanup}"),
-        ),
+        Err(cleanup) => primary.with_cleanup_failure(cleanup.message()),
     }
 }
