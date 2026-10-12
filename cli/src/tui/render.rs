@@ -249,9 +249,8 @@ fn solve_footer_text(state: &AppState, width: u16) -> String {
                 ]
             }
             (SolvePane::Interview, _) => vec![
-                format!(
-                    "i ask · Space-m mode · ↑/↓ row · PgUp/PgDn page · Home/End · Space t/s/b/c/? · Tab panes"
-                ),
+                "i ask · Space-m mode · ↑/↓ row · PgUp/PgDn page · Home/End · Space t/s/b/c/? · Tab panes"
+                    .to_string(),
                 format!(
                     "i ask · Space-m mode · PgUp/PgDn/Home/End · Space t/s/b/? · c {collapse_verb} · Tab panes"
                 ),
