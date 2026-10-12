@@ -259,9 +259,9 @@ feature_catalog() {
     step db-path 0 ./practice --db "$db" db
     expect_out "$db"
     step unknown-set 2 ./practice --db "$db" --set no-such-set list
-    expect_err 'unknown problem set: no-such-set'
+    expect_err 'unknown problem set: no-such-set; run `practice sets list` to see IDs'
     step unknown-problem 2 ./practice --db "$db" --set blind75 show no-such-problem
-    expect_err 'unknown problem: no-such-problem'
+    expect_err 'unknown problem: no-such-problem; run `practice --set blind75 list` to see slugs'
     expect_attempts "$db" ''
     assert_pristine
 }
@@ -283,7 +283,7 @@ feature_judge() {
     step practice-run 0 ./practice --db "$db" run python two-sum
     expect_err '[stdout] PASS two-sum'
     step unknown-slug 2 ./run --db "$db" python no-such-problem
-    expect_err 'unknown problem: no-such-problem'
+    expect_err 'unknown problem: no-such-problem; run `practice problems list` to see slugs'
     step rust-starter 101 ./run --db "$db" rust two-sum
     expect_err 'not implemented: two-sum'
     write_rust_two_sum_correct
@@ -353,7 +353,7 @@ feature_admin() {
     step shipped-update-refused 2 ./practice --db "$db" problems update two-sum --title 'Renamed'
     expect_err 'shipped problem is read-only: two-sum'
     step shipped-set-delete-refused 2 ./practice --db "$db" sets delete blind75 --yes
-    expect_err 'shipped problem set is read-only: blind75'
+    expect_err 'shipped problem set is read-only: blind75; create your own with `practice sets create ID --name NAME`'
     step unguarded-delete-refused 2 ./practice --db "$db" sets delete verify-favorites
     expect_err 'required arguments were not provided'
     step run-metadata-only 2 ./run --db "$db" python verify-pair-sum

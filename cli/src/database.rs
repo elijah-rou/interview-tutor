@@ -1,6 +1,7 @@
 use crate::catalog::{
     ProblemSeed, ProblemSetSeed, SeedCatalog, validate_http_url, validate_identifier,
 };
+use crate::config::REPORT_BUG_STEP;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -17,6 +18,13 @@ pub const MAX_DESCRIPTION_LENGTH: usize = 2_000;
 pub const MAX_STATEMENT_LENGTH: usize = 1_000_000;
 pub const MAX_DATABASE_QUERY_ROWS: usize = 100_000;
 const SCHEMA_VERSION: i64 = 2;
+const SHIPPED_LANGUAGES: [(&str, &str, &str); 2] = [
+    ("python", "Python", "python/run"),
+    ("rust", "Rust", "rust/run"),
+];
+const DATABASE_STEP: &str = "check the database file or pass --db PATH";
+const V1_DATABASE_STEP: &str = "fix the v1 rows with sqlite3 or pass --db PATH";
+const LANGUAGE_STEP: &str = "use python or rust";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RowLimit(usize);
@@ -37,10 +45,19 @@ impl RowLimit {
 
     fn check<T>(self, label: &str, rows: Vec<T>) -> Result<Vec<T>, String> {
         if rows.len() > self.0 {
-            return Err(format!("{label} row limit exceeded: maximum {}", self.0));
+            return Err(row_limit_error(label, self.0));
         }
         Ok(rows)
     }
+}
+
+fn row_limit_error(label: &str, maximum: usize) -> String {
+    let step = if maximum < MAX_DATABASE_QUERY_ROWS {
+        "use the `practice` CLI for data this large"
+    } else {
+        DATABASE_STEP
+    };
+    format!("{label} row limit exceeded: maximum {maximum}; {step}")
 }
 
 const SCHEMA_SQL: &str = r#"
@@ -347,6 +364,12 @@ struct LegacyProblem {
 }
 
 fn sql_error(error: rusqlite::Error) -> String {
+    let step = match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            "close other practice or interview-tutor processes using it"
+        }
+        _ => DATABASE_STEP,
+    };
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -354,7 +377,7 @@ fn sql_error(error: rusqlite::Error) -> String {
         message.push_str(&cause.to_string());
         source = cause.source();
     }
-    message
+    format!("{message}; {step}")
 }
 
 fn constraint_error(error: rusqlite::Error, message: String) -> String {
@@ -402,17 +425,26 @@ fn transaction<T>(
 pub fn open_database(path: &Path, root: &Path) -> Result<Connection, String> {
     let catalog = crate::catalog::load_seed_catalog(root)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create {}: {error}; check its permissions or pass --db PATH",
+                parent.display()
+            )
+        })?;
     }
-    let connection = Connection::open(path)
-        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let connection = Connection::open(path).map_err(|error| {
+        format!(
+            "cannot open database {}: {error}; check the path or pass --db PATH",
+            path.display()
+        )
+    })?;
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(sql_error)?;
     if !(0..=SCHEMA_VERSION).contains(&schema_version) {
         return Err(format!(
-            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION})"
+            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION}); \
+             update interview-tutor or pass --db PATH"
         ));
     }
     connection
@@ -439,7 +471,10 @@ pub fn open_database(path: &Path, root: &Path) -> Result<Connection, String> {
         .optional()
         .map_err(sql_error)?;
     if violation.is_some() {
-        return Err("database foreign-key violations detected".to_string());
+        return Err(
+            "database foreign-key violations detected; run PRAGMA foreign_key_check in sqlite3"
+                .to_string(),
+        );
     }
     Ok(connection)
 }
@@ -451,7 +486,8 @@ fn migrate_if_needed(
 ) -> Result<(), String> {
     if !(0..=SCHEMA_VERSION).contains(&schema_version) {
         return Err(format!(
-            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION})"
+            "unsupported database schema version: {schema_version} (supported 0 through {SCHEMA_VERSION}); \
+             update interview-tutor or pass --db PATH"
         ));
     }
     let exists: bool = connection
@@ -464,7 +500,8 @@ fn migrate_if_needed(
     if !exists {
         if schema_version != 0 {
             return Err(format!(
-                "database schema version {schema_version} is missing the problems table"
+                "database schema version {schema_version} is missing the problems table; \
+                 {DATABASE_STEP}"
             ));
         }
         return transaction(connection, || {
@@ -489,14 +526,17 @@ fn migrate_if_needed(
         .map_err(sql_error)?;
     let legacy_shape = columns.contains("problem_set_id");
     if schema_version == 1 && !legacy_shape {
-        return Err("database schema version 1 does not have the v1 table shape".to_string());
+        return Err(format!(
+            "database schema version 1 does not have the v1 table shape; {DATABASE_STEP}"
+        ));
     }
     if legacy_shape {
         return migrate_v1(connection, catalog);
     }
     if schema_version != 0 {
         return Err(format!(
-            "database schema version {schema_version} does not have a supported table shape"
+            "database schema version {schema_version} does not have a supported table shape; \
+             {DATABASE_STEP}"
         ));
     }
     transaction(connection, || {
@@ -557,7 +597,7 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
             if let Some(existing) = metadata_by_slug.get(&problem.slug) {
                 if existing != &metadata {
                     return Err(format!(
-                        "v1 problem metadata conflicts across sets: {}",
+                        "v1 problem metadata conflicts across sets: {}; {V1_DATABASE_STEP}",
                         problem.slug
                     ));
                 }
@@ -572,7 +612,9 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
             }
         }
         if external_owners.values().any(|owners| owners.len() > 1) {
-            return Err("v1 LeetCode ids conflict across global problem slugs".to_string());
+            return Err(format!(
+                "v1 LeetCode ids conflict across global problem slugs; {V1_DATABASE_STEP}"
+            ));
         }
         for shipped_problem in &catalog.problems {
             let Some(leetcode_id) = shipped_problem.leetcode_id else {
@@ -584,7 +626,8 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
                     .any(|slug| slug != shipped_problem.slug.as_str())
             }) {
                 return Err(format!(
-                    "shipped catalog LeetCode id conflicts with v1 problem: {leetcode_id}"
+                    "shipped catalog LeetCode id conflicts with v1 problem: {leetcode_id}; \
+                     {V1_DATABASE_STEP}"
                 ));
             }
         }
@@ -595,10 +638,7 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
             .collect();
 
         connection.execute_batch(SCHEMA_SQL).map_err(sql_error)?;
-        for (slug, name, runner) in [
-            ("python", "Python", "python/run"),
-            ("rust", "Rust", "rust/run"),
-        ] {
+        for (slug, name, runner) in SHIPPED_LANGUAGES {
             connection
                 .execute(
                     "INSERT INTO languages(slug, display_name, runner_path) VALUES (?, ?, ?)",
@@ -699,7 +739,8 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
             .map_err(sql_error)?;
         if legacy_attempt_count != migrated_attempt_count {
             return Err(format!(
-                "v1 attempt migration count mismatch: {migrated_attempt_count} != {legacy_attempt_count}"
+                "v1 attempt migration count mismatch: {migrated_attempt_count} != {legacy_attempt_count}; \
+                 {V1_DATABASE_STEP}"
             ));
         }
         connection
@@ -717,10 +758,7 @@ fn migrate_v1(connection: &Connection, catalog: &SeedCatalog) -> Result<(), Stri
 }
 
 fn ensure_languages(connection: &Connection) -> Result<(), String> {
-    for (slug, name, runner) in [
-        ("python", "Python", "python/run"),
-        ("rust", "Rust", "rust/run"),
-    ] {
+    for (slug, name, runner) in SHIPPED_LANGUAGES {
         connection
             .execute(
                 "INSERT INTO languages(slug, display_name, runner_path) VALUES (?, ?, ?) \
@@ -743,9 +781,9 @@ fn sync_seed_catalog(connection: &Connection, catalog: &SeedCatalog) -> Result<(
         .optional()
         .map_err(sql_error)?
         .map_or(Ok(0), |value| {
-            value
-                .parse()
-                .map_err(|error| format!("invalid stored catalog revision: {error}"))
+            value.parse().map_err(|error| {
+                format!("invalid stored catalog revision: {error}; {DATABASE_STEP}")
+            })
         })?;
     if current_revision >= catalog.revision {
         return Ok(());
@@ -846,7 +884,8 @@ fn rename_managed_problem_sets(
             .map_err(sql_error)?;
         if target_exists {
             return Err(format!(
-                "cannot rename shipped problem set {old_slug}: target already exists: {new_slug}"
+                "cannot rename shipped problem set {old_slug}: target already exists: {new_slug}; \
+                 rename the local {new_slug} set with sqlite3"
             ));
         }
         connection
@@ -875,7 +914,7 @@ fn sync_problem(
         .map_err(sql_error)?;
     if current_revision > 0 && existing_managed == Some(false) {
         return Err(format!(
-            "shipped catalog conflicts with local problem: {}",
+            "shipped catalog conflicts with local problem: {}; rename it in catalog/problems.json",
             problem.slug
         ));
     }
@@ -890,7 +929,8 @@ fn sync_problem(
             .map_err(sql_error)?;
         if let Some((slug, false)) = conflict {
             return Err(format!(
-                "shipped catalog LeetCode id conflicts with local problem: {slug}"
+                "shipped catalog LeetCode id conflicts with local problem: {slug}; \
+                 change leetcode_id in catalog/problems.json"
             ));
         }
         connection
@@ -949,7 +989,7 @@ fn sync_problem(
             .map_err(sql_error)?;
         let Some(language_id) = language_id else {
             return Err(format!(
-                "catalog references unknown language: {}",
+                "catalog references unknown language: {}; {LANGUAGE_STEP} in catalog/problems.json",
                 adapter.language
             ));
         };
@@ -983,8 +1023,8 @@ fn sync_problem_set(
         .map_err(sql_error)?;
     if current_revision > 0 && existing_managed == Some(false) {
         return Err(format!(
-            "shipped catalog conflicts with local problem set: {}",
-            problem_set.id
+            "shipped catalog conflicts with local problem set: {}; rename problem_sets/{}.json",
+            problem_set.id, problem_set.id
         ));
     }
     connection
@@ -1083,7 +1123,7 @@ pub fn get_problem_set(connection: &Connection, slug: &str) -> Result<ProblemSet
         )
         .optional()
         .map_err(sql_error)?
-        .ok_or_else(|| format!("unknown problem set: {slug}"))
+        .ok_or_else(|| format!("unknown problem set: {slug}; run `practice sets list` to see IDs"))
 }
 
 pub fn list_problem_sets(connection: &Connection) -> Result<Vec<(ProblemSet, i64)>, String> {
@@ -1194,14 +1234,19 @@ pub fn resolve_problem(
 ) -> Result<ResolvedProblem, String> {
     let Some(set_slug) = set_slug else {
         if is_ascii_decimal(reference) {
-            return Err("a numeric problem selector requires a problem set".to_string());
+            return Err(
+                "a numeric problem selector requires a problem set; use the problem slug instead"
+                    .to_string(),
+            );
         }
         let sql = format!("SELECT {PROBLEM_COLUMNS} FROM problems AS p WHERE p.slug = ?");
         let problem = connection
             .query_row(&sql, params![reference], problem_from_row)
             .optional()
             .map_err(sql_error)?
-            .ok_or_else(|| format!("unknown problem: {reference}"))?;
+            .ok_or_else(|| {
+                format!("unknown problem: {reference}; run `practice problems list` to see slugs")
+            })?;
         return Ok(ResolvedProblem {
             problem,
             membership: None,
@@ -1211,11 +1256,11 @@ pub fn resolve_problem(
     let (selector, selector_value): (&str, rusqlite::types::Value) = if is_ascii_decimal(reference)
     {
         if reference == "0" || (reference.len() > 1 && reference.starts_with('0')) {
-            return Err(format!("invalid 1-based problem index: {reference}"));
+            return Err(invalid_index_error(reference));
         }
         let ordinal: i64 = reference
             .parse()
-            .map_err(|_| format!("invalid 1-based problem index: {reference}"))?;
+            .map_err(|_| invalid_index_error(reference))?;
         ("m.ordinal", ordinal.into())
     } else {
         ("p.slug", reference.to_string().into())
@@ -1245,7 +1290,8 @@ pub fn resolve_problem(
     }
     if is_ascii_decimal(reference) {
         return Err(format!(
-            "problem index out of range for {set_slug}: {reference}"
+            "problem index out of range for {set_slug}: {reference}; \
+             run `practice --set {set_slug} list` to see indexes"
         ));
     }
     let global_exists: bool = connection
@@ -1255,11 +1301,16 @@ pub fn resolve_problem(
             |row| row.get(0),
         )
         .map_err(sql_error)?;
+    let step = format!("run `practice --set {set_slug} list` to see slugs");
     if global_exists {
-        Err(format!("problem is not in {set_slug}: {reference}"))
+        Err(format!("problem is not in {set_slug}: {reference}; {step}"))
     } else {
-        Err(format!("unknown problem: {reference}"))
+        Err(format!("unknown problem: {reference}; {step}"))
     }
+}
+
+fn invalid_index_error(reference: &str) -> String {
+    format!("invalid 1-based problem index: {reference}; use 1 or higher, without leading zeros")
 }
 
 pub fn get_implementation(
@@ -1276,7 +1327,9 @@ pub fn get_implementation(
         .optional()
         .map_err(sql_error)?;
     let Some(language_id) = language_id else {
-        return Err(format!("unknown or disabled language: {language_slug}"));
+        return Err(format!(
+            "unknown or disabled language: {language_slug}; {LANGUAGE_STEP}"
+        ));
     };
     let implementation = connection
         .query_row(
@@ -1307,7 +1360,10 @@ pub fn get_implementation(
                 |row| row.get::<_, String>(0),
             )
             .unwrap_or_else(|_| "<unknown>".to_string());
-        format!("no active {language_slug} adapter for problem: {slug}")
+        format!(
+            "no active {language_slug} adapter for problem: {slug}; \
+             run `practice problems show {slug}` to see adapters"
+        )
     })
 }
 
@@ -1425,7 +1481,7 @@ pub fn get_enabled_language(
         )
         .optional()
         .map_err(sql_error)?
-        .ok_or_else(|| format!("unknown or disabled language: {slug}"))
+        .ok_or_else(|| format!("unknown or disabled language: {slug}; {LANGUAGE_STEP}"))
 }
 
 pub fn list_enabled_languages(connection: &Connection) -> Result<Vec<EnabledLanguage>, String> {
@@ -1475,7 +1531,9 @@ pub fn list_enabled_languages_bounded(
             || language.display_name.chars().count() > MAX_TITLE_LENGTH
             || language.runner_path.chars().count() > MAX_DESCRIPTION_LENGTH
         {
-            return Err("enabled-language row contains oversized text".to_string());
+            return Err(format!(
+                "enabled-language row contains oversized text; {DATABASE_STEP}"
+            ));
         }
     }
     Ok(rows)
@@ -1665,7 +1723,9 @@ pub fn progress_summary_bounded(
     if let Some(language_slug) = language_slug
         && !language_is_enabled(connection, language_slug)?
     {
-        return Err(format!("unknown or disabled language: {language_slug}"));
+        return Err(format!(
+            "unknown or disabled language: {language_slug}; {LANGUAGE_STEP}"
+        ));
     }
 
     let (sql, set_id) = match scope {
@@ -1713,7 +1773,7 @@ pub fn progress_summary_bounded(
         let (_problem_id, difficulty, topic, is_completed) = row.map_err(sql_error)?;
         if topic.chars().count() > MAX_TOPIC_LENGTH {
             return Err(format!(
-                "progress topic exceeds {MAX_TOPIC_LENGTH} characters"
+                "progress topic exceeds {MAX_TOPIC_LENGTH} characters; {DATABASE_STEP}"
             ));
         }
         let completed_increment = usize::from(is_completed);
@@ -1731,10 +1791,7 @@ pub fn progress_summary_bounded(
     }
 
     if total > limit.0 {
-        return Err(format!(
-            "progress-input row limit exceeded: maximum {}",
-            limit.0
-        ));
+        return Err(row_limit_error("progress-input", limit.0));
     }
 
     Ok(ProgressSummary {
@@ -1774,7 +1831,7 @@ pub fn record_attempt(
     set_slug: Option<&str>,
 ) -> Result<i64, String> {
     if duration_ms < 0 {
-        return Err("duration must not be negative".to_string());
+        return Err("duration must not be negative; pass a duration_ms of 0 or more".to_string());
     }
     let problem = resolve_problem(connection, problem_slug, None)?.problem;
     let language_id: Option<i64> = connection
@@ -1786,7 +1843,9 @@ pub fn record_attempt(
         .optional()
         .map_err(sql_error)?;
     let Some(language_id) = language_id else {
-        return Err(format!("unknown language: {language_slug}"));
+        return Err(format!(
+            "unknown language: {language_slug}; {LANGUAGE_STEP}"
+        ));
     };
     let set_id = if let Some(set_slug) = set_slug {
         resolve_problem(connection, problem_slug, Some(set_slug))?;
@@ -1822,10 +1881,12 @@ pub fn finalize_attempt_cancelled(
     signal_exit_code: i32,
 ) -> Result<(), String> {
     if attempt_id <= 0 {
-        return Err("attempt id must be positive".to_string());
+        return Err(format!("attempt id must be positive; {REPORT_BUG_STEP}"));
     }
     if !matches!(signal_exit_code, 130 | 143) {
-        return Err("cancelled signal exit code must be 130 or 143".to_string());
+        return Err(format!(
+            "cancelled signal exit code must be 130 or 143; {REPORT_BUG_STEP}"
+        ));
     }
     let transaction = connection.unchecked_transaction().map_err(sql_error)?;
     let updated = transaction
@@ -1836,7 +1897,7 @@ pub fn finalize_attempt_cancelled(
         .map_err(sql_error)?;
     if updated != 1 {
         return Err(format!(
-            "attempt finalization updated {updated} rows; expected 1"
+            "attempt finalization updated {updated} rows, expected 1; {DATABASE_STEP}"
         ));
     }
     transaction.commit().map_err(sql_error)
@@ -1854,44 +1915,53 @@ pub struct NewProblem<'a> {
     pub premium: bool,
 }
 
-fn validate_url(label: &str, url: &str) -> Result<(), String> {
+fn validate_url(label: &str, flag: &str, url: &str) -> Result<(), String> {
     if url.is_empty() {
         Ok(())
     } else {
         validate_http_url(label, url)
+            .map_err(|error| format!("{error}; pass an http or https URL to {flag}"))
     }
 }
 
+fn validate_problem_slug(slug: &str) -> Result<(), String> {
+    validate_identifier(slug, "problem slug", true).map_err(|error| {
+        format!("{error}; use up to 64 of a-z, 0-9, - and _, with at least one letter")
+    })
+}
+
+const STATEMENT_STEP: &str = "shorten --statement or --statement-file";
+
 pub fn create_problem(connection: &Connection, new: &NewProblem<'_>) -> Result<(), String> {
-    validate_identifier(new.slug, "problem slug", true)?;
+    validate_problem_slug(new.slug)?;
     let title = new.title.trim();
     let topic = new.topic.trim();
     if title.is_empty() {
-        return Err("problem title must not be empty".to_string());
+        return Err("problem title must not be empty; pass a non-empty --title".to_string());
     }
     if title.chars().count() > MAX_TITLE_LENGTH {
         return Err(format!(
-            "problem title exceeds {MAX_TITLE_LENGTH} characters"
+            "problem title exceeds {MAX_TITLE_LENGTH} characters; shorten --title"
         ));
     }
     if topic.is_empty() {
-        return Err("problem topic must not be empty".to_string());
+        return Err("problem topic must not be empty; pass a non-empty --topic".to_string());
     }
     if topic.chars().count() > MAX_TOPIC_LENGTH {
         return Err(format!(
-            "problem topic exceeds {MAX_TOPIC_LENGTH} characters"
+            "problem topic exceeds {MAX_TOPIC_LENGTH} characters; shorten --topic"
         ));
     }
     if new.statement_markdown.chars().count() > MAX_STATEMENT_LENGTH {
         return Err(format!(
-            "problem statement exceeds {MAX_STATEMENT_LENGTH} characters"
+            "problem statement exceeds {MAX_STATEMENT_LENGTH} characters; {STATEMENT_STEP}"
         ));
     }
     if new.leetcode_id.is_some_and(|id| id <= 0) {
-        return Err("LeetCode id must be positive".to_string());
+        return Err("LeetCode id must be positive; pass a positive --leetcode-id".to_string());
     }
-    validate_url("LeetCode", new.leetcode_url)?;
-    validate_url("NeetCode", new.neetcode_url)?;
+    validate_url("LeetCode", "--leetcode-url", new.leetcode_url)?;
+    validate_url("NeetCode", "--neetcode-url", new.neetcode_url)?;
     let now = timestamp(connection)?;
     connection
         .execute(
@@ -1917,7 +1987,10 @@ pub fn create_problem(connection: &Connection, new: &NewProblem<'_>) -> Result<(
         .map_err(|error| {
             constraint_error(
                 error,
-                format!("problem already exists or conflicts: {}", new.slug),
+                format!(
+                    "problem already exists or conflicts: {}; choose another slug or --leetcode-id",
+                    new.slug
+                ),
             )
         })?;
     Ok(())
@@ -1929,19 +2002,22 @@ pub fn create_problem_set(
     name: &str,
     description: &str,
 ) -> Result<(), String> {
-    validate_identifier(slug, "problem-set id", false)?;
+    validate_identifier(slug, "problem-set id", false).map_err(|error| {
+        format!("{error}; use up to 64 of a-z, 0-9, - and _, starting with a letter")
+    })?;
     let name = name.trim();
     if name.is_empty() {
-        return Err("problem-set name must not be empty".to_string());
+        return Err("problem-set name must not be empty; pass a non-empty --name".to_string());
     }
     if name.chars().count() > MAX_TITLE_LENGTH {
         return Err(format!(
-            "problem-set name exceeds {MAX_TITLE_LENGTH} characters"
+            "problem-set name exceeds {MAX_TITLE_LENGTH} characters; shorten --name"
         ));
     }
     if description.chars().count() > MAX_DESCRIPTION_LENGTH {
         return Err(format!(
-            "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters"
+            "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters; \
+             shorten --description"
         ));
     }
     let now = timestamp(connection)?;
@@ -1952,14 +2028,22 @@ pub fn create_problem_set(
              ) VALUES (?, ?, ?, 0, ?, ?)",
             params![slug, name, description, now, now],
         )
-        .map_err(|error| constraint_error(error, format!("problem set already exists: {slug}")))?;
+        .map_err(|error| {
+            constraint_error(
+                error,
+                format!("problem set already exists: {slug}; choose another ID"),
+            )
+        })?;
     Ok(())
 }
 
 fn mutable_problem_set(connection: &Connection, slug: &str) -> Result<ProblemSet, String> {
     let problem_set = get_problem_set(connection, slug)?;
     if problem_set.managed {
-        Err(format!("shipped problem set is read-only: {slug}"))
+        Err(format!(
+            "shipped problem set is read-only: {slug}; \
+             create your own with `practice sets create ID --name NAME`"
+        ))
     } else {
         Ok(problem_set)
     }
@@ -1982,7 +2066,9 @@ fn validate_member_order(connection: &Connection, set_id: i64) -> Result<usize, 
         .enumerate()
         .any(|(index, ordinal)| *ordinal != (index + 1) as i64)
     {
-        Err("problem-set membership order is not contiguous".to_string())
+        Err(format!(
+            "problem-set membership order is not contiguous; {DATABASE_STEP}"
+        ))
     } else {
         Ok(ordinals.len())
     }
@@ -2000,11 +2086,17 @@ pub fn add_set_member(
         let problem = resolve_problem(connection, problem_slug, None)?.problem;
         let count = validate_member_order(connection, problem_set.id)?;
         if count >= 999_999 {
-            return Err("problem set reached its maximum size".to_string());
+            return Err(format!(
+                "problem set reached its maximum size; \
+                 remove problems with `practice sets remove {set_slug} PROBLEM`"
+            ));
         }
         let target = index.unwrap_or(count as i64 + 1);
         if target < 1 || target > count as i64 + 1 {
-            return Err(format!("index must be between 1 and {}", count + 1));
+            return Err(format!(
+                "index must be between 1 and {}; omit --index to append",
+                count + 1
+            ));
         }
         connection
             .execute(
@@ -2027,7 +2119,13 @@ pub fn add_set_member(
                 params![problem_set.id, problem.id, target, section],
             )
             .map_err(|error| {
-                constraint_error(error, format!("problem is already in set: {problem_slug}"))
+                constraint_error(
+                    error,
+                    format!(
+                        "problem is already in set: {problem_slug}; \
+                         reorder it with `practice sets move {set_slug} {problem_slug} --index N`"
+                    ),
+                )
             })?;
         connection
             .execute(
@@ -2059,7 +2157,10 @@ pub fn remove_set_member(
             .optional()
             .map_err(sql_error)?;
         let Some(ordinal) = ordinal else {
-            return Err(format!("problem is not in {set_slug}: {problem_slug}"));
+            return Err(format!(
+                "problem is not in {set_slug}: {problem_slug}; \
+                 run `practice sets show {set_slug}` to see members"
+            ));
         };
         connection
             .execute(
@@ -2118,10 +2219,16 @@ pub fn move_set_member(
                 .map_err(sql_error)?
         };
         if index < 1 || index > rows.len() as i64 {
-            return Err(format!("index must be between 1 and {}", rows.len()));
+            return Err(format!(
+                "index must be between 1 and {}; run `practice sets show {set_slug}` to see positions",
+                rows.len()
+            ));
         }
         let Some(selected_index) = rows.iter().position(|(_, slug)| slug == problem_slug) else {
-            return Err(format!("problem is not in {set_slug}: {problem_slug}"));
+            return Err(format!(
+                "problem is not in {set_slug}: {problem_slug}; \
+                 run `practice sets show {set_slug}` to see members"
+            ));
         };
         let mut problem_ids: Vec<i64> = rows.into_iter().map(|(id, _)| id).collect();
         let selected = problem_ids.remove(selected_index);
@@ -2153,6 +2260,10 @@ pub fn move_set_member(
     })
 }
 
+pub fn shipped_problem_error(slug: &str) -> String {
+    format!("shipped problem is read-only: {slug}; add your own with `practice problems add`")
+}
+
 pub fn add_implementation(
     connection: &Connection,
     problem_slug: &str,
@@ -2161,7 +2272,7 @@ pub fn add_implementation(
 ) -> Result<(), String> {
     let problem = resolve_problem(connection, problem_slug, None)?.problem;
     if problem.managed {
-        return Err(format!("shipped problem is read-only: {problem_slug}"));
+        return Err(shipped_problem_error(problem_slug));
     }
     let language_id: Option<i64> = connection
         .query_row(
@@ -2172,18 +2283,24 @@ pub fn add_implementation(
         .optional()
         .map_err(sql_error)?;
     let Some(language_id) = language_id else {
-        return Err(format!("unknown language: {language_slug}"));
+        return Err(format!(
+            "unknown language: {language_slug}; {LANGUAGE_STEP}"
+        ));
     };
     let path = Path::new(solution_path);
     if path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
-        return Err("solution path must be relative to the project root".to_string());
+        return Err(format!(
+            "solution path must be relative to the project root; pass a path under {language_slug}/"
+        ));
     }
     let first = path.components().next().and_then(|part| match part {
         Component::Normal(value) => value.to_str(),
         _ => None,
     });
     if first != Some(language_slug) {
-        return Err(format!("solution path must be inside {language_slug}/"));
+        return Err(format!(
+            "solution path must be inside {language_slug}/; pass a path under {language_slug}/"
+        ));
     }
     connection
         .execute(
@@ -2217,7 +2334,7 @@ pub fn update_problem(
 ) -> Result<(), String> {
     let problem = resolve_problem(connection, slug, None)?.problem;
     if problem.managed {
-        return Err(format!("shipped problem is read-only: {slug}"));
+        return Err(shipped_problem_error(slug));
     }
     let title = update.title.unwrap_or(&problem.title).trim();
     let difficulty = update.difficulty.unwrap_or(problem.difficulty);
@@ -2231,27 +2348,34 @@ pub fn update_problem(
     let leetcode_url = update.leetcode_url.unwrap_or(&problem.leetcode_url);
     let neetcode_url = update.neetcode_url.unwrap_or(&problem.neetcode_url);
     if revision < problem.test_revision {
-        return Err("test revision cannot decrease".to_string());
+        return Err(format!(
+            "test revision cannot decrease; pass --test-revision {} or higher",
+            problem.test_revision
+        ));
     }
     if revision <= 0 {
-        return Err("test revision must be positive".to_string());
+        return Err("test revision must be positive; pass a positive --test-revision".to_string());
     }
     if leetcode_id.is_some_and(|id| id <= 0) {
-        return Err("LeetCode id must be positive".to_string());
+        return Err("LeetCode id must be positive; pass a positive --leetcode-id".to_string());
     }
     if title.is_empty() || title.chars().count() > MAX_TITLE_LENGTH {
-        return Err("problem title is empty or too long".to_string());
+        return Err(format!(
+            "problem title is empty or too long; pass --title with 1 to {MAX_TITLE_LENGTH} characters"
+        ));
     }
     if topic.is_empty() || topic.chars().count() > MAX_TOPIC_LENGTH {
-        return Err("problem topic is empty or too long".to_string());
+        return Err(format!(
+            "problem topic is empty or too long; pass --topic with 1 to {MAX_TOPIC_LENGTH} characters"
+        ));
     }
     if statement.chars().count() > MAX_STATEMENT_LENGTH {
         return Err(format!(
-            "problem statement exceeds {MAX_STATEMENT_LENGTH} characters"
+            "problem statement exceeds {MAX_STATEMENT_LENGTH} characters; {STATEMENT_STEP}"
         ));
     }
-    validate_url("LeetCode", leetcode_url)?;
-    validate_url("NeetCode", neetcode_url)?;
+    validate_url("LeetCode", "--leetcode-url", leetcode_url)?;
+    validate_url("NeetCode", "--neetcode-url", neetcode_url)?;
     connection
         .execute(
             "UPDATE problems SET \
@@ -2276,7 +2400,9 @@ pub fn update_problem(
         .map_err(|error| {
             constraint_error(
                 error,
-                "LeetCode id is already assigned to another problem".to_string(),
+                "LeetCode id is already assigned to another problem; \
+                 pass a different --leetcode-id"
+                    .to_string(),
             )
         })?;
     Ok(())
@@ -2285,7 +2411,7 @@ pub fn update_problem(
 pub fn delete_problem(connection: &Connection, slug: &str) -> Result<(), String> {
     let problem = resolve_problem(connection, slug, None)?.problem;
     if problem.managed {
-        return Err(format!("shipped problem is read-only: {slug}"));
+        return Err(shipped_problem_error(slug));
     }
     let memberships: i64 = connection
         .query_row(
@@ -2302,8 +2428,13 @@ pub fn delete_problem(connection: &Connection, slug: &str) -> Result<(), String>
         )
         .map_err(sql_error)?;
     if memberships != 0 || attempts != 0 {
+        let step = if attempts != 0 {
+            format!("edit it with `practice problems update {slug}` instead")
+        } else {
+            format!("remove it from each set with `practice sets remove SET {slug}`")
+        };
         return Err(format!(
-            "cannot delete {slug}: {memberships} memberships and {attempts} attempts remain"
+            "cannot delete {slug}: {memberships} memberships and {attempts} attempts remain; {step}"
         ));
     }
     transaction(connection, || {
@@ -2330,11 +2461,14 @@ pub fn update_problem_set(
     let name = name.unwrap_or(&problem_set.name).trim();
     let description = description.unwrap_or(&problem_set.description);
     if name.is_empty() || name.chars().count() > MAX_TITLE_LENGTH {
-        return Err("problem-set name is empty or too long".to_string());
+        return Err(format!(
+            "problem-set name is empty or too long; pass --name with 1 to {MAX_TITLE_LENGTH} characters"
+        ));
     }
     if description.chars().count() > MAX_DESCRIPTION_LENGTH {
         return Err(format!(
-            "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters"
+            "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters; \
+             shorten --description"
         ));
     }
     connection

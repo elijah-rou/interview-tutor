@@ -371,6 +371,10 @@ fn spawn_errors_do_not_record_and_recording_is_explicit_and_once() {
     )
     .unwrap_err();
     assert!(error.contains("not executable"));
+    assert!(
+        error.ends_with(&format!("; run `chmod +x {}`", plan.runner_path.display())),
+        "{error}"
+    );
     let mut permissions = fs::metadata(&plan.runner_path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&plan.runner_path, permissions).unwrap();

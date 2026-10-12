@@ -1,3 +1,4 @@
+use crate::config::REPORT_BUG_STEP;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
@@ -41,6 +42,11 @@ impl SignalState {
     }
 }
 
+/// Signal-disposition failures have no user recovery, so public entry points ask for a report.
+fn with_report_step(error: String) -> String {
+    format!("{error}; {REPORT_BUG_STEP}")
+}
+
 fn signal_exit_code(signal: i32) -> i32 {
     match signal {
         libc::SIGINT => 130,
@@ -62,7 +68,7 @@ pub struct ScopedSignalHandlers {
 
 impl ScopedSignalHandlers {
     pub fn register() -> Result<Self, String> {
-        Self::register_signals(&[libc::SIGINT, libc::SIGTERM])
+        Self::register_signals(&[libc::SIGINT, libc::SIGTERM]).map_err(with_report_step)
     }
 
     fn register_signals(signals: &[i32]) -> Result<Self, String> {
@@ -129,7 +135,7 @@ impl ScopedSignalHandlers {
     pub fn restore(mut self) -> Result<(), String> {
         let result = self.restore_inner();
         self.lock.take();
-        result
+        result.map_err(with_report_step)
     }
 
     fn restore_inner(&mut self) -> Result<(), String> {
@@ -151,7 +157,7 @@ impl ScopedSignalHandlers {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(errors.join("; "))
+            Err(errors.join(" and "))
         }
     }
 }
@@ -169,6 +175,22 @@ pub struct BlockedExecutionSignals {
 
 impl BlockedExecutionSignals {
     pub fn block() -> Result<Self, String> {
+        Self::block_inner().map_err(with_report_step)
+    }
+
+    pub fn pending_exit_code(&self) -> Result<Option<i32>, String> {
+        self.pending_exit_code_inner().map_err(with_report_step)
+    }
+
+    pub fn consume_pending(&self) -> Result<(), String> {
+        self.consume_pending_inner().map_err(with_report_step)
+    }
+
+    pub fn restore(mut self) -> Result<(), String> {
+        self.restore_inner().map_err(with_report_step)
+    }
+
+    fn block_inner() -> Result<Self, String> {
         // SAFETY: all signal sets are initialized before use and pthread_sigmask changes only the
         // calling thread's mask.
         unsafe {
@@ -202,7 +224,7 @@ impl BlockedExecutionSignals {
         }
     }
 
-    pub fn pending_exit_code(&self) -> Result<Option<i32>, String> {
+    fn pending_exit_code_inner(&self) -> Result<Option<i32>, String> {
         // SAFETY: pending is initialized by sigpending before sigismember reads it.
         unsafe {
             let mut pending = std::mem::zeroed();
@@ -228,7 +250,7 @@ impl BlockedExecutionSignals {
         }
     }
 
-    pub fn consume_pending(&self) -> Result<(), String> {
+    fn consume_pending_inner(&self) -> Result<(), String> {
         // SAFETY: pending and wait_set are initialized before use. sigwait is called only for a
         // signal proven pending and blocked in this thread.
         unsafe {
@@ -269,7 +291,7 @@ impl BlockedExecutionSignals {
                 }
                 if received != signal {
                     return Err(format!(
-                        "consumed unexpected execution signal {received}; expected {signal}"
+                        "consumed unexpected execution signal {received}, expected {signal}"
                     ));
                 }
             }
@@ -277,7 +299,7 @@ impl BlockedExecutionSignals {
         }
     }
 
-    pub fn restore(mut self) -> Result<(), String> {
+    fn restore_inner(&mut self) -> Result<(), String> {
         // SAFETY: prior_mask was initialized by the successful pthread_sigmask call in block.
         let error = unsafe {
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.prior_mask, std::ptr::null_mut())

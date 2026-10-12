@@ -1,3 +1,4 @@
+use crate::config::{REPORT_BUG_STEP, ROOT_STEP};
 use crate::database;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
@@ -29,6 +30,7 @@ const MAX_READ_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_EVENT_QUEUE_CAPACITY: usize = 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const FINAL_DRAIN_LIMIT: Duration = Duration::from_millis(100);
+const RERUN_STEP: &str = "run the tests again";
 
 #[derive(Clone, Debug)]
 pub struct ExecutionLimits {
@@ -206,7 +208,7 @@ pub fn plan_execution(
     validate_runner(&runner_path)?;
     if !solution_path.is_file() {
         return Err(format!(
-            "solution file is not installed: {}",
+            "solution file is not installed: {}; restore or create that file",
             solution_path.display()
         ));
     }
@@ -223,16 +225,19 @@ pub fn plan_execution(
 fn validate_runner(path: &Path) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|error| {
         format!(
-            "language runner is not installed: {}: {error}",
+            "language runner is not installed: {}: {error}; restore it from the repository",
             path.display()
         )
     })?;
     if !metadata.is_file() {
-        return Err(format!("language runner is not a file: {}", path.display()));
+        return Err(format!(
+            "language runner is not a file: {}; restore it from the repository",
+            path.display()
+        ));
     }
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err(format!(
-            "language runner is not executable: {}",
+            "language runner is not executable: {0}; run `chmod +x {0}`",
             path.display()
         ));
     }
@@ -546,7 +551,9 @@ fn send_group_signal(process_group: Pid, signal: Signal) -> Result<bool, String>
     match kill(Pid::from_raw(-process_group.as_raw()), signal) {
         Ok(()) => Ok(true),
         Err(Errno::ESRCH) => Ok(false),
-        Err(error) => Err(format!("cannot signal runner process group: {error}")),
+        Err(error) => Err(format!(
+            "cannot signal runner process group: {error}; {RERUN_STEP}"
+        )),
     }
 }
 
@@ -554,7 +561,9 @@ fn group_exists(process_group: Pid) -> Result<bool, String> {
     match kill(Pid::from_raw(-process_group.as_raw()), None) {
         Ok(()) | Err(Errno::EPERM) => Ok(true),
         Err(Errno::ESRCH) => Ok(false),
-        Err(error) => Err(format!("cannot inspect runner process group: {error}")),
+        Err(error) => Err(format!(
+            "cannot inspect runner process group: {error}; {RERUN_STEP}"
+        )),
     }
 }
 
@@ -595,13 +604,18 @@ fn child_has_exited(child_pid: Pid) -> Result<bool, String> {
         Ok(WaitStatus::Exited(observed_pid, _)) | Ok(WaitStatus::Signaled(observed_pid, _, _)) => {
             if observed_pid != child_pid {
                 return Err(format!(
-                    "observed unexpected runner pid {observed_pid}; expected {child_pid}"
+                    "observed unexpected runner pid {observed_pid}, expected {child_pid}; \
+                     {REPORT_BUG_STEP}"
                 ));
             }
             Ok(true)
         }
-        Ok(status) => Err(format!("observed unexpected runner status: {status:?}")),
-        Err(error) => Err(format!("cannot inspect language runner: {error}")),
+        Ok(status) => Err(format!(
+            "observed unexpected runner status: {status:?}; {REPORT_BUG_STEP}"
+        )),
+        Err(error) => Err(format!(
+            "cannot inspect language runner: {error}; {RERUN_STEP}"
+        )),
     }
 }
 
@@ -612,7 +626,7 @@ fn termination_from_status(status: ExitStatus) -> Result<Termination, String> {
     status
         .signal()
         .map(Termination::Signalled)
-        .ok_or_else(|| "runner ended without an exit code or signal".to_string())
+        .ok_or_else(|| format!("runner ended without an exit code or signal; {REPORT_BUG_STEP}"))
 }
 
 fn priority_termination(
@@ -700,7 +714,9 @@ fn execute_command(
     cancellation: &CancellationToken,
     event_sender: Option<&SyncSender<ExecutionEvent>>,
 ) -> Result<ExecutionResult, String> {
-    limits.validate()?;
+    limits
+        .validate()
+        .map_err(|error| format!("{error}; {REPORT_BUG_STEP}"))?;
     validate_runner(spec.executable)?;
     let mut command = Command::new(spec.executable);
     command
@@ -727,7 +743,7 @@ fn execute_command(
             }
             Err(error) => {
                 return Err(format!(
-                    "cannot execute {}: {error}",
+                    "cannot execute {}: {error}; run it directly to see why",
                     spec.executable.display()
                 ));
             }
@@ -752,12 +768,15 @@ fn execute_command(
         ) {
             Ok(reader) => readers.push(reader),
             Err(error) => {
-                pending_error = Some(format!("cannot start runner stdout reader: {error}"));
+                pending_error = Some(format!(
+                    "cannot start runner stdout reader: {error}; {RERUN_STEP}"
+                ));
             }
         },
         None => {
-            pending_error =
-                Some("language runner stdout was not captured after successful spawn".to_string());
+            pending_error = Some(format!(
+                "language runner stdout was not captured after successful spawn; {REPORT_BUG_STEP}"
+            ));
         }
     }
     if pending_error.is_none() {
@@ -771,13 +790,16 @@ fn execute_command(
             ) {
                 Ok(reader) => readers.push(reader),
                 Err(error) => {
-                    pending_error = Some(format!("cannot start runner stderr reader: {error}"));
+                    pending_error = Some(format!(
+                        "cannot start runner stderr reader: {error}; {RERUN_STEP}"
+                    ));
                 }
             },
             None => {
-                pending_error = Some(
-                    "language runner stderr was not captured after successful spawn".to_string(),
-                );
+                pending_error = Some(format!(
+                    "language runner stderr was not captured after successful spawn; \
+                     {REPORT_BUG_STEP}"
+                ));
             }
         }
     }
@@ -849,7 +871,7 @@ fn execute_command(
                 {
                     requested_termination = Some(termination);
                 } else if let Err(error) = result {
-                    pending_error = Some(format!("cannot drain runner {stream:?}: {error}"));
+                    pending_error = Some(drain_error(stream, &error));
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -863,9 +885,10 @@ fn execute_command(
                     match status_observation {
                         Ok(true) => observed_exit = true,
                         Ok(false) => {
-                            pending_error = Some(
-                                "runner pipes closed before child status was available".to_string(),
-                            )
+                            pending_error = Some(format!(
+                                "runner pipes closed before child status was available; \
+                                 {REPORT_BUG_STEP}"
+                            ))
                         }
                         Err(error) => pending_error = Some(error),
                     }
@@ -880,7 +903,9 @@ fn execute_command(
     let final_status = match child.wait() {
         Ok(status) => Some(status),
         Err(error) => {
-            pending_error.get_or_insert_with(|| format!("cannot reap language runner: {error}"));
+            pending_error.get_or_insert_with(|| {
+                format!("cannot reap language runner: {error}; {RERUN_STEP}")
+            });
             None
         }
     };
@@ -905,8 +930,7 @@ fn execute_command(
             Ok(ReaderMessage::Finished(stream, result)) => {
                 finished_readers += 1;
                 if let Err(error) = result {
-                    pending_error
-                        .get_or_insert_with(|| format!("cannot drain runner {stream:?}: {error}"));
+                    pending_error.get_or_insert_with(|| drain_error(stream, &error));
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -931,8 +955,7 @@ fn execute_command(
             ReaderMessage::Finished(stream, result) => {
                 finished_readers += 1;
                 if let Err(error) = result {
-                    pending_error
-                        .get_or_insert_with(|| format!("cannot drain runner {stream:?}: {error}"));
+                    pending_error.get_or_insert_with(|| drain_error(stream, &error));
                 }
             }
         }
@@ -942,7 +965,9 @@ fn execute_command(
     }
     for reader in readers {
         if reader.join().is_err() {
-            pending_error.get_or_insert_with(|| "runner pipe reader thread panicked".to_string());
+            pending_error.get_or_insert_with(|| {
+                format!("runner pipe reader thread panicked; {REPORT_BUG_STEP}")
+            });
         }
     }
 
@@ -958,7 +983,9 @@ fn execute_command(
         termination
     } else {
         termination_from_status(final_status.ok_or_else(|| {
-            pending_error.unwrap_or_else(|| "language runner status is unavailable".to_string())
+            pending_error.unwrap_or_else(|| {
+                format!("language runner status is unavailable; {REPORT_BUG_STEP}")
+            })
         })?)?
     };
     let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -985,6 +1012,10 @@ fn execute_command(
     })
 }
 
+fn drain_error(stream: Stream, error: &io::Error) -> String {
+    format!("cannot drain runner {stream:?}: {error}; {RERUN_STEP}")
+}
+
 pub fn execute(
     plan: &ExecutionPlan,
     database_path: &Path,
@@ -994,14 +1025,14 @@ pub fn execute(
 ) -> Result<ExecutionResult, String> {
     if !plan.root.is_dir() {
         return Err(format!(
-            "project root does not exist: {}",
+            "project root does not exist: {}; {ROOT_STEP}",
             plan.root.display()
         ));
     }
     let parent = plan
         .runner_path
         .parent()
-        .ok_or_else(|| "language runner has no parent directory".to_string())?;
+        .ok_or_else(|| format!("language runner has no parent directory; {REPORT_BUG_STEP}"))?;
     execute_command(
         CommandSpec {
             executable: &plan.runner_path,
@@ -1024,7 +1055,7 @@ pub fn discover_adapters(
 ) -> Result<Vec<String>, String> {
     let parent = runner_path
         .parent()
-        .ok_or_else(|| "language runner has no parent directory".to_string())?;
+        .ok_or_else(|| format!("language runner has no parent directory; {REPORT_BUG_STEP}"))?;
     let result = execute_command(
         CommandSpec {
             executable: runner_path,
@@ -1048,15 +1079,17 @@ pub fn discover_adapters(
         .expect("discovery execution captures stderr");
     if result.termination != Termination::Exited(0) {
         return Err(format!(
-            "language runner discovery failed: {:?}: {}",
+            "language runner discovery failed: {:?}: {}; run `{} --list` to see why",
             result.termination,
-            stderr.trim()
+            stderr.trim(),
+            runner_path.display()
         ));
     }
     if result.discovery_stdout_truncated {
         return Err(format!(
-            "language runner discovery exceeded {} output bytes",
-            limits.display_output_bytes
+            "language runner discovery exceeded {} output bytes; run `{} --list` to see why",
+            limits.display_output_bytes,
+            runner_path.display()
         ));
     }
     Ok(stdout

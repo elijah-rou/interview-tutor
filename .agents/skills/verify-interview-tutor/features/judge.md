@@ -31,7 +31,7 @@ Preconditions:
 - **Correct Python solution.** Write a hash-map `twoSum`, then run `./run --db "$DB" python two-sum`. Exit code is `0` and stderr has `[stdout] PASS two-sum`.
 - **Set and index.** Run `./run --db "$DB" python blind75 16`. Exit code is `0` and stderr has `[stdout] PASS two-sum`.
 - **Through practice.** Run `./practice --db "$DB" run python two-sum`. Exit code is `0` and stderr has `[stdout] PASS two-sum`.
-- **Unknown slug.** Run `./run --db "$DB" python no-such-problem`. Exit code is `2` and stderr has `unknown problem: no-such-problem`.
+- **Unknown slug.** Run `./run --db "$DB" python no-such-problem`. Exit code is `2` and stderr has ``unknown problem: no-such-problem; run `practice problems list` to see slugs``.
 - **Rust starter.** Run `./run --db "$DB" rust two-sum`. Exit code is `101` and stderr has `not implemented: two-sum`.
 - **Correct Rust solution.** Replace the starter body with a hash-map solution, then run `./run --db "$DB" rust two-sum`. Exit code is `0` and stderr has `[stdout] PASS two-sum`.
 - **Recorded attempts.** Reading `attempts` gives exactly seven rows, in order: python fail 1, python fail 1, python pass 0, python pass 0 with set `blind75`, python pass 0, rust fail 101, rust pass 0. The unknown slug added none.

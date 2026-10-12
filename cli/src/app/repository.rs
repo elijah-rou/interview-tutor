@@ -10,7 +10,10 @@ use std::path::Path;
 fn validate_chars(label: &str, value: &str, maximum: usize) -> Result<(), String> {
     let length = value.chars().count();
     if length > maximum {
-        return Err(format!("{label} exceeds {maximum} characters: {length}"));
+        return Err(format!(
+            "{label} exceeds {maximum} characters: {length}; \
+             check the database file or pass --db PATH"
+        ));
     }
     Ok(())
 }
@@ -85,10 +88,18 @@ impl Repository {
                 Some(language_slug),
                 limit,
             )?;
-            let member_count = usize::try_from(member_count)
-                .map_err(|_| "negative problem-set member count".to_string())?;
+            let member_count = usize::try_from(member_count).map_err(|_| {
+                format!(
+                    "negative problem-set member count; {}",
+                    crate::config::REPORT_BUG_STEP
+                )
+            })?;
             if member_count > MAX_ROWS {
-                return Err(format!("problem-set member count exceeds {MAX_ROWS}"));
+                return Err(format!(
+                    "problem-set member count exceeds {MAX_ROWS}: {}; \
+                     remove problems with `practice sets remove {} PROBLEM`",
+                    set.slug, set.slug
+                ));
             }
             sets.push(SetRow {
                 slug: set.slug,
@@ -140,10 +151,9 @@ impl Repository {
         }
 
         let detail = if let Some(id) = problem_id {
-            let row = problems
-                .iter()
-                .find(|row| row.id == id)
-                .ok_or_else(|| format!("selected problem no longer exists: {id}"))?;
+            let row = problems.iter().find(|row| row.id == id).ok_or_else(|| {
+                format!("selected problem no longer exists: {id}; press Esc, then r to reload")
+            })?;
             let resolved = database::resolve_problem(&self.connection, &row.slug, set_slug)?;
             validate_chars(
                 "problem statement",

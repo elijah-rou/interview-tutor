@@ -240,7 +240,10 @@ fn print_table(headers: &[String], rows: &[Vec<String>]) -> Result<(), String> {
         .collect();
     for row in rows {
         if row.len() != headers.len() {
-            return Err("table row does not match its header".to_string());
+            return Err(format!(
+                "table row does not match its header; {}",
+                config::REPORT_BUG_STEP
+            ));
         }
         for (index, cell) in row.iter().enumerate() {
             widths[index] = widths[index].max(cell.chars().count());
@@ -491,7 +494,9 @@ fn run_one(
 
     io::stderr()
         .write_all(result.display_output.as_bytes())
-        .map_err(|error| format!("cannot write runner output: {error}"))?;
+        .map_err(|error| {
+            format!("cannot write runner output: {error}; redirect stderr to a writable file")
+        })?;
     Ok(run_result)
 }
 
@@ -502,7 +507,11 @@ fn command_run(context: &Context, args: &RunArgs) -> Result<i32, String> {
         }
         [set_slug, reference] => run_one(context, &args.language, reference, Some(set_slug))
             .map(RunOneResult::status_code),
-        _ => Err("run expects LANGUAGE PROBLEM or LANGUAGE SET PROBLEM_OR_INDEX".to_string()),
+        _ => Err(
+            "run expects LANGUAGE PROBLEM or LANGUAGE SET PROBLEM_OR_INDEX; \
+                  run `practice run --help` for usage"
+                .to_string(),
+        ),
     }
 }
 
@@ -659,22 +668,28 @@ fn command_problems(context: &Context, command: &ProblemsCommand) -> Result<i32,
 
 fn read_statement(path: Option<&Path>, direct: Option<&String>) -> Result<String, String> {
     if let Some(path) = path {
-        let metadata = fs::metadata(path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let metadata = fs::metadata(path).map_err(|error| statement_file_error(path, &error))?;
         let maximum_bytes = u64::try_from(database::MAX_STATEMENT_LENGTH)
             .expect("statement limit fits u64")
             .saturating_mul(4)
             .saturating_add(1);
         if metadata.len() > maximum_bytes {
             return Err(format!(
-                "problem statement exceeds {} characters",
+                "problem statement exceeds {} characters; shorten --statement-file",
                 database::MAX_STATEMENT_LENGTH
             ));
         }
-        fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+        fs::read_to_string(path).map_err(|error| statement_file_error(path, &error))
     } else {
         Ok(direct.cloned().unwrap_or_default())
     }
+}
+
+fn statement_file_error(path: &Path, error: &io::Error) -> String {
+    format!(
+        "cannot read {}: {error}; check the --statement-file path",
+        path.display()
+    )
 }
 
 fn register_adapter(
@@ -685,12 +700,12 @@ fn register_adapter(
 ) -> Result<(), String> {
     let resolved_problem = database::resolve_problem(&context.connection, problem, None)?.problem;
     if resolved_problem.managed {
-        return Err(format!("shipped problem is read-only: {problem}"));
+        return Err(database::shipped_problem_error(problem));
     }
     let solution = context.root.join(solution_path);
     if !solution.is_file() {
         return Err(format!(
-            "solution file does not exist: {}",
+            "solution file does not exist: {}; create it or pass an existing SOLUTION_PATH",
             solution.display()
         ));
     }
@@ -706,10 +721,13 @@ fn register_adapter(
         &discovery_limits,
         &runner::CancellationToken::new(),
     )
-    .map_err(|error| format!("language runner discovery failed: {language}: {error}"))?;
+    // Discovery errors already end with their own next step.
+    .map_err(|error| format!("cannot discover {language} adapters: {error}"))?;
     if !adapters.iter().any(|slug| slug == problem) {
         return Err(format!(
-            "{language} runner does not expose problem adapter: {problem}"
+            "{language} runner does not expose problem adapter: {problem}; \
+             run `{} --list` to see its adapters",
+            runner_path.display()
         ));
     }
     database::add_implementation(&context.connection, problem, language, solution_path)

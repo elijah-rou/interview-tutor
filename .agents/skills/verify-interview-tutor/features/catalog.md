@@ -33,8 +33,8 @@ Preconditions:
 - **Global problem views.** Run `./practice --db "$DB" problems show two-sum` and `./practice --db "$DB" problems list`. Both exit `0` and include `two-sum`.
 - **Global set view.** Run `./practice --db "$DB" sets show runtime-practice`. Stdout includes `runtime-practice`.
 - **Database path.** Run `./practice --db "$DB" db`. Stdout includes `/proof/catalog/progress.db`.
-- **Unknown set.** Run `./practice --db "$DB" --set no-such-set list`. Exit code is `2` and stderr is `error: unknown problem set: no-such-set`.
-- **Unknown problem.** Run `./practice --db "$DB" --set blind75 show no-such-problem`. Exit code is `2` and stderr is `error: unknown problem: no-such-problem`.
+- **Unknown set.** Run `./practice --db "$DB" --set no-such-set list`. Exit code is `2` and stderr is ``error: unknown problem set: no-such-set; run `practice sets list` to see IDs``.
+- **Unknown problem.** Run `./practice --db "$DB" --set blind75 show no-such-problem`. Exit code is `2` and stderr is ``error: unknown problem: no-such-problem; run `practice --set blind75 list` to see slugs``.
 - **No side effects.** The feature's `attempts` table is empty, and `/work` still matches `/src`.
 
 ## Gotchas
