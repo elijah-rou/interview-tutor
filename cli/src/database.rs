@@ -26,6 +26,15 @@ const DATABASE_STEP: &str = "check the database file or pass --db PATH";
 const V1_DATABASE_STEP: &str = "fix the v1 rows with sqlite3 or pass --db PATH";
 const LANGUAGE_STEP: &str = "use python or rust";
 
+/// Runners list a fixed set of adapters, so registering a custom problem first needs a code change.
+pub fn add_adapter_code_step(problem_slug: &str, language_slug: &str) -> String {
+    match language_slug {
+        "python" => format!("add a {problem_slug} adapter in python/local_judge/"),
+        "rust" => format!("add a {problem_slug} adapter in rust/src/problems/"),
+        _ => format!("add a {problem_slug} adapter to the {language_slug} runner"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RowLimit(usize);
 
@@ -1380,7 +1389,10 @@ fn missing_adapter_error(
         )
         .map_err(sql_error)?;
     let step = if !managed {
-        format!("add one with `practice problems adapter {slug} {language_slug} SOLUTION_PATH`")
+        format!(
+            "{}, then run `practice problems adapter {slug} {language_slug} SOLUTION_PATH`",
+            add_adapter_code_step(&slug, language_slug)
+        )
     } else if has_adapter {
         format!("use a language listed by `practice problems show {slug}`")
     } else {

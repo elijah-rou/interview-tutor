@@ -725,9 +725,8 @@ fn register_adapter(
     .map_err(|error| format!("cannot discover {language} adapters: {error}"))?;
     if !adapters.iter().any(|slug| slug == problem) {
         return Err(format!(
-            "{language} runner does not expose problem adapter: {problem}; \
-             run `{} --list` to see its adapters",
-            runner_path.display()
+            "{language} runner does not expose problem adapter: {problem}; {}, then rerun this command",
+            database::add_adapter_code_step(problem, language)
         ));
     }
     database::add_implementation(&context.connection, problem, language, solution_path)

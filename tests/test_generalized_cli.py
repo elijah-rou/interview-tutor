@@ -702,8 +702,23 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("no active python adapter", result.stderr)
         self.assertIn(
-            "add one with `practice problems adapter metadata-only python SOLUTION_PATH`",
+            "add a metadata-only adapter in python/local_judge/, "
+            "then run `practice problems adapter metadata-only python SOLUTION_PATH`",
             result.stderr,
+        )
+        registered = self.run_command(
+            str(ROOT / "practice"),
+            "problems",
+            "adapter",
+            "metadata-only",
+            "python",
+            "python/problems/easy/contains_duplicate.py",
+        )
+        self.assertEqual(registered.returncode, 2)
+        self.assertIn(
+            "python runner does not expose problem adapter: metadata-only; "
+            "add a metadata-only adapter in python/local_judge/, then rerun this command",
+            registered.stderr,
         )
 
 
