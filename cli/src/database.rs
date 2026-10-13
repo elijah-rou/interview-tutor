@@ -1352,19 +1352,43 @@ pub fn get_implementation(
         )
         .optional()
         .map_err(sql_error)?;
-    implementation.ok_or_else(|| {
-        let slug = connection
-            .query_row(
-                "SELECT slug FROM problems WHERE id = ?",
-                params![problem_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_else(|_| "<unknown>".to_string());
-        format!(
-            "no active {language_slug} adapter for problem: {slug}; \
-             run `practice problems show {slug}` to see adapters"
+    match implementation {
+        Some(implementation) => Ok(implementation),
+        None => Err(missing_adapter_error(
+            connection,
+            problem_id,
+            language_slug,
+        )?),
+    }
+}
+
+/// Shipped problems cannot take new adapters, so their step points at what exists instead.
+fn missing_adapter_error(
+    connection: &Connection,
+    problem_id: i64,
+    language_slug: &str,
+) -> Result<String, String> {
+    let (slug, managed, has_adapter): (String, bool, bool) = connection
+        .query_row(
+            "SELECT p.slug, p.managed, EXISTS( \
+                SELECT 1 FROM problem_implementations AS i \
+                JOIN languages AS l ON l.id = i.language_id \
+                WHERE i.problem_id = p.id AND i.enabled = 1 AND l.enabled = 1 \
+             ) FROM problems AS p WHERE p.id = ?",
+            params![problem_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-    })
+        .map_err(sql_error)?;
+    let step = if !managed {
+        format!("add one with `practice problems adapter {slug} {language_slug} SOLUTION_PATH`")
+    } else if has_adapter {
+        format!("use a language listed by `practice problems show {slug}`")
+    } else {
+        format!("it has no tests to run, so read it with `practice problems show {slug}`")
+    };
+    Ok(format!(
+        "no active {language_slug} adapter for problem: {slug}; {step}"
+    ))
 }
 
 pub fn completed_problem_ids(

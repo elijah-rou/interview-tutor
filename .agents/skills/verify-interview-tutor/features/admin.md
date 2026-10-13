@@ -32,7 +32,7 @@ Preconditions:
 - **Adapter refusals.** Run `./practice --db "$DB" problems adapter verify-pair-sum python python/problems/easy/verify_pair_sum.py`. Exit code is `2` with `solution file does not exist`. With the existing file `python/problems/easy/contains_duplicate.py`, exit code is `2` with `python runner does not expose problem adapter: verify-pair-sum`.
 - **Shipped stays read-only.** Run `problems delete two-sum --yes` and `problems update two-sum --title 'Renamed'`. Both exit `2` with `shipped problem is read-only: two-sum`. Then `sets delete blind75 --yes` exits `2` with ``shipped problem set is read-only: blind75; create your own with `practice sets create ID --name NAME` ``.
 - **Guarded delete.** Run `./practice --db "$DB" sets delete verify-favorites`. Exit code is `2` with `required arguments were not provided`.
-- **Metadata-only run.** Run `./run --db "$DB" python verify-pair-sum`. Exit code is `2` with `no active python adapter for problem: verify-pair-sum`.
+- **Metadata-only run.** Run `./run --db "$DB" python verify-pair-sum`. Exit code is `2` with ``no active python adapter for problem: verify-pair-sum; add one with `practice problems adapter verify-pair-sum python SOLUTION_PATH` ``.
 - **Remove and delete.** Run `sets remove verify-favorites verify-pair-sum`, `sets delete verify-favorites --yes`, and `problems delete verify-pair-sum --yes`, each exiting `0`. Then `problems show verify-pair-sum` exits `2` with `unknown problem: verify-pair-sum`, and `sets list` no longer shows `verify-favorites`.
 - **Shipped intact.** Run `./practice --db "$DB" --set blind75 show two-sum`. It still shows `Two Sum`. No attempts were recorded, and `/work` matches `/src`.
 

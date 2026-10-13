@@ -288,6 +288,10 @@ class GeneralizedCliTests(unittest.TestCase):
             if index in (7, 8, 9):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("no active python adapter", result.stderr)
+                self.assertIn(
+                    f"it has no tests to run, so read it with `practice problems show {slug}`",
+                    result.stderr,
+                )
             elif index == 5:
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(f"FAIL {slug}:", result.stderr)
@@ -697,7 +701,10 @@ class GeneralizedCliTests(unittest.TestCase):
         result = self.run_command(str(ROOT / "run"), "python", "metadata-only")
         self.assertEqual(result.returncode, 2)
         self.assertIn("no active python adapter", result.stderr)
-        self.assertIn("run `practice problems show metadata-only` to see adapters", result.stderr)
+        self.assertIn(
+            "add one with `practice problems adapter metadata-only python SOLUTION_PATH`",
+            result.stderr,
+        )
 
 
 if __name__ == "__main__":

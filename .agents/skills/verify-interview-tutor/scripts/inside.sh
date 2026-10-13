@@ -357,7 +357,7 @@ feature_admin() {
     step unguarded-delete-refused 2 ./practice --db "$db" sets delete verify-favorites
     expect_err 'required arguments were not provided'
     step run-metadata-only 2 ./run --db "$db" python verify-pair-sum
-    expect_err 'no active python adapter for problem: verify-pair-sum'
+    expect_err 'no active python adapter for problem: verify-pair-sum; add one with `practice problems adapter verify-pair-sum python SOLUTION_PATH`'
     step set-remove 0 ./practice --db "$db" sets remove verify-favorites verify-pair-sum
     step set-delete 0 ./practice --db "$db" sets delete verify-favorites --yes
     step problem-delete 0 ./practice --db "$db" problems delete verify-pair-sum --yes
