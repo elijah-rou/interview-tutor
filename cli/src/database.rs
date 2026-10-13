@@ -29,7 +29,10 @@ const LANGUAGE_STEP: &str = "use python or rust";
 /// Runners list a fixed set of adapters, so registering a custom problem first needs a code change.
 pub fn add_adapter_code_step(problem_slug: &str, language_slug: &str) -> String {
     match language_slug {
-        "python" => format!("add a {problem_slug} adapter in python/local_judge/"),
+        "python" => format!(
+            "add a {problem_slug} adapter in python/local_judge/registry.py \
+             with cases in python/tests/cases.py"
+        ),
         "rust" => format!("add a {problem_slug} adapter in rust/src/problems/"),
         _ => format!("add a {problem_slug} adapter to the {language_slug} runner"),
     }
@@ -2336,6 +2339,22 @@ pub fn add_implementation(
     if first != Some(language_slug) {
         return Err(format!(
             "solution path must be inside {language_slug}/; pass a path under {language_slug}/"
+        ));
+    }
+    let owner: Option<String> = connection
+        .query_row(
+            "SELECT p.slug FROM problem_implementations AS i \
+             JOIN problems AS p ON p.id = i.problem_id \
+             WHERE i.language_id = ? AND i.solution_path = ? AND i.problem_id != ?",
+            params![language_id, solution_path, problem.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    if let Some(owner) = owner {
+        return Err(format!(
+            "solution path is already used by problem: {owner}; \
+             pass a SOLUTION_PATH no other problem uses"
         ));
     }
     connection

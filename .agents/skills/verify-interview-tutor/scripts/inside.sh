@@ -347,7 +347,7 @@ feature_admin() {
     step adapter-missing-file 2 ./practice --db "$db" problems adapter verify-pair-sum python python/problems/easy/verify_pair_sum.py
     expect_err 'solution file does not exist'
     step adapter-unregistered 2 ./practice --db "$db" problems adapter verify-pair-sum python python/problems/easy/contains_duplicate.py
-    expect_err 'python runner does not expose problem adapter: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/, then rerun this command'
+    expect_err 'python runner does not expose problem adapter: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/registry.py with cases in python/tests/cases.py, then rerun this command'
     step shipped-delete-refused 2 ./practice --db "$db" problems delete two-sum --yes
     expect_err 'shipped problem is read-only: two-sum'
     step shipped-update-refused 2 ./practice --db "$db" problems update two-sum --title 'Renamed'
@@ -357,7 +357,7 @@ feature_admin() {
     step unguarded-delete-refused 2 ./practice --db "$db" sets delete verify-favorites
     expect_err 'required arguments were not provided'
     step run-metadata-only 2 ./run --db "$db" python verify-pair-sum
-    expect_err 'no active python adapter for problem: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/, then run `practice problems adapter verify-pair-sum python SOLUTION_PATH`'
+    expect_err 'no active python adapter for problem: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/registry.py with cases in python/tests/cases.py, then run `practice problems adapter verify-pair-sum python SOLUTION_PATH`'
     step set-remove 0 ./practice --db "$db" sets remove verify-favorites verify-pair-sum
     step set-delete 0 ./practice --db "$db" sets delete verify-favorites --yes
     step problem-delete 0 ./practice --db "$db" problems delete verify-pair-sum --yes

@@ -392,6 +392,35 @@ fn closed_persisted_enums_reject_unknown_values() {
 }
 
 #[test]
+fn shared_solution_paths_name_the_problem_that_owns_them() {
+    let fixture = Fixture::new();
+    let connection = fixture.connection();
+    add_custom_problem(&connection, &fixture.root);
+    database::create_problem(
+        &connection,
+        &NewProblem {
+            slug: "other",
+            title: "Other",
+            difficulty: Difficulty::Easy,
+            topic: "Graphs",
+            statement_markdown: "",
+            leetcode_id: None,
+            leetcode_url: "",
+            neetcode_url: "",
+            premium: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        database::add_implementation(&connection, "other", "python", "python/custom.py")
+            .unwrap_err(),
+        "solution path is already used by problem: custom; \
+         pass a SOLUTION_PATH no other problem uses"
+    );
+    database::add_implementation(&connection, "custom", "python", "python/custom.py").unwrap();
+}
+
+#[test]
 fn lookup_errors_end_with_a_command_that_lists_valid_choices() {
     let fixture = Fixture::new();
     let connection = fixture.connection();
