@@ -686,8 +686,19 @@ fn history_load(state: &mut AppState, cursor: AttemptCursor) -> Vec<Effect> {
     }]
 }
 
-/// Commands on the History and Attempt screens; `None` falls through to shared browser keys.
+/// Every command on the History and Attempt screens. `None` hands only help, quit, focus
+/// switching, and Progress-pane scrolling to the shared browser handling; everything else is
+/// owned here so no history command reaches the list/detail screen arms.
 fn history_command(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
+    match action {
+        Action::Help | Action::Quit | Action::NextFocus | Action::PreviousFocus => return None,
+        Action::Up | Action::Down if state.focus == Focus::Progress => return None,
+        // With Progress focused, list and attempt navigation keys do nothing.
+        Action::Open | Action::PageOlder | Action::PageNewer if state.focus == Focus::Progress => {
+            return Some(Vec::new());
+        }
+        _ => {}
+    }
     let screen = state.screen;
     let history = state
         .history
@@ -756,20 +767,20 @@ fn history_command(state: &mut AppState, action: &Action) -> Option<Vec<Effect>>
                 .attempt
                 .as_mut()
                 .expect("attempt screen keeps its loaded attempt");
+            // The runtime clamps this to the wrapped row count of the visible area.
             view.scroll = match action {
                 Action::Up => view.scroll.saturating_sub(1),
                 Action::Down => view.scroll.saturating_add(1),
                 Action::PageNewer => view.scroll.saturating_sub(10),
                 _ => view.scroll.saturating_add(10),
-            }
-            .min(view.scroll_max());
+            };
         }
         (Screen::Attempt, Action::Back) => {
             history.attempt = None;
             state.screen = Screen::History;
             state.focus = Focus::Main;
         }
-        _ => return None,
+        _ => {}
     }
     Some(Vec::new())
 }
@@ -1184,7 +1195,6 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
         }
     }
     if matches!(state.screen, Screen::History | Screen::Attempt)
-        && state.focus == Focus::Main
         && let Event::Command(action) = &event
         && let Some(effects) = history_command(state, action)
     {
@@ -1571,6 +1581,10 @@ mod tests {
     }
 
     fn history_operation(effects: &[Effect]) -> (OperationId, AttemptCursor) {
+        history_operation_for(effects, "python")
+    }
+
+    fn history_operation_for(effects: &[Effect], language: &str) -> (OperationId, AttemptCursor) {
         let [
             Effect::LoadHistory {
                 operation,
@@ -1584,7 +1598,7 @@ mod tests {
         };
         assert_eq!(
             (problem_slug.as_str(), language_slug.as_str()),
-            ("two-sum", "python")
+            ("two-sum", language)
         );
         (*operation, *cursor)
     }
@@ -1701,6 +1715,74 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn history_screens_own_every_key_regardless_of_focus() {
+        let mut state = detail_state();
+        state.languages.push(EnabledLanguage {
+            slug: "rust".into(),
+            display_name: "Rust".into(),
+            runner_path: "rust/run".into(),
+        });
+        let (first, _) = history_operation(&reduce(&mut state, Event::Command(Action::History)));
+        let page = crate::database::AttemptPage {
+            rows: vec![summary(5)],
+            has_older: false,
+            has_newer: false,
+        };
+        reduce(&mut state, Event::HistoryLoaded(first, Ok(Box::new(page))));
+        let effects = reduce(&mut state, Event::Command(Action::Open));
+        let [Effect::LoadAttempt { operation, .. }] = effects.as_slice() else {
+            panic!("expected an attempt load");
+        };
+        let record = crate::attempt::AttemptRecord {
+            id: 5,
+            run_at: "2026-10-12T00:00:00Z".into(),
+            problem_slug: "two-sum".into(),
+            language: "python".into(),
+            invoked_set: None,
+            result: crate::database::AttemptOutcome::Fail,
+            duration_ms: 5,
+            test_revision: 1,
+            current_revision: true,
+            output: crate::attempt::RecordedOutput::PredatesCapture,
+        };
+        reduce(
+            &mut state,
+            Event::AttemptLoaded(*operation, Ok(Box::new(record))),
+        );
+        assert_eq!(state.screen, Screen::Attempt);
+        // Keys that only list screens handle must not reach their arms from Attempt.
+        for action in [
+            Action::Open,
+            Action::History,
+            Action::CycleLanguage,
+            Action::Reload,
+        ] {
+            assert!(reduce(&mut state, Event::Command(action)).is_empty());
+            assert_eq!(state.screen, Screen::Attempt);
+        }
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        assert_eq!(state.focus, Focus::Progress);
+        assert!(reduce(&mut state, Event::Command(Action::Open)).is_empty());
+        reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!((state.screen, state.focus), (Screen::History, Focus::Main));
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        let (_, cursor) = history_operation_for(
+            &reduce(&mut state, Event::Command(Action::CycleLanguage)),
+            "rust",
+        );
+        assert_eq!(cursor, AttemptCursor::Newest);
+        assert_eq!(state.language_slug(), Some("rust"));
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(
+            (state.screen, state.focus),
+            (Screen::ProblemDetail, Focus::Main)
+        );
+        assert!(matches!(effects.as_slice(), [Effect::Load { .. }]));
     }
 
     #[test]

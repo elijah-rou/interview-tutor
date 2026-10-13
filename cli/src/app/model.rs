@@ -191,27 +191,20 @@ impl HistoryView {
     }
 }
 
-/// One stored attempt, rendered once on load and bounded like run output.
+/// One stored attempt, rendered once on load. Its size is bounded by
+/// `attempt::MAX_RENDERED_ATTEMPT_BYTES`, so every stored case stays visible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptView {
     pub id: i64,
     pub text: String,
-    pub scroll: u16,
+    /// First visible wrapped row; the runtime clamps it to the rendered area.
+    pub scroll: usize,
 }
 
 impl AttemptView {
     pub fn new(record: &crate::attempt::AttemptRecord) -> Self {
-        const MARKER: &str = "… output truncated …\n";
-        let mut text = crate::attempt::render_record(record);
-        if text.len() > MAX_RUN_OUTPUT_BYTES {
-            let mut end = MAX_RUN_OUTPUT_BYTES - MARKER.len();
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str(MARKER);
-        }
-        assert!(text.len() <= MAX_RUN_OUTPUT_BYTES);
+        let text = crate::attempt::render_record(record);
+        assert!(text.len() <= crate::attempt::MAX_RENDERED_ATTEMPT_BYTES);
         Self {
             id: record.id,
             text,
@@ -219,8 +212,8 @@ impl AttemptView {
         }
     }
 
-    pub fn scroll_max(&self) -> u16 {
-        u16::try_from(self.text.lines().count().saturating_sub(1)).unwrap_or(u16::MAX)
+    pub fn clamp_scroll(&mut self, maximum: usize) {
+        self.scroll = self.scroll.min(maximum);
     }
 }
 

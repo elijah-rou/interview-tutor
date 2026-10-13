@@ -497,7 +497,45 @@ fn history(state: &AppState, area_height: u16) -> Table<'static> {
     .block(block(&title))
 }
 
-fn attempt(state: &AppState) -> Paragraph<'static> {
+/// Hard-wraps stored output by display width, keeping spaces and empty lines exactly.
+fn attempt_rows(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let mut row = String::new();
+        let mut row_width = 0usize;
+        for grapheme in UnicodeSegmentation::graphemes(line, true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if !row.is_empty() && row_width.saturating_add(grapheme_width) > width {
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            row.push_str(grapheme);
+            row_width = row_width.saturating_add(grapheme_width);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+fn attempt_view_area(state: &AppState, width: u16, height: u16) -> Option<Rect> {
+    if state.screen != Screen::Attempt || width < 60 || height < 20 {
+        return None;
+    }
+    let content = frame_areas(Rect::new(0, 0, width, height), state.screen)[1];
+    let (wide, areas) = browser_areas(content);
+    (wide || state.focus == Focus::Main).then_some(areas[if wide { 0 } else { 1 }])
+}
+
+/// Largest first-visible row for the Attempt screen at this terminal size.
+pub(super) fn attempt_scroll_max(state: &AppState, width: u16, height: u16) -> Option<usize> {
+    let inner = block("").inner(attempt_view_area(state, width, height)?);
+    let view = state.history.as_ref()?.attempt.as_ref()?;
+    let rows = attempt_rows(&view.text, inner.width).len();
+    Some(rows.saturating_sub(usize::from(inner.height)))
+}
+
+fn attempt(state: &AppState, area: Rect) -> Paragraph<'static> {
     let view = state
         .history
         .as_ref()
@@ -508,10 +546,19 @@ fn attempt(state: &AppState) -> Paragraph<'static> {
     } else {
         format!("Attempt {}", view.id)
     };
-    Paragraph::new(view.text.clone())
-        .block(block(&title))
-        .wrap(Wrap { trim: false })
-        .scroll((view.scroll, 0))
+    let attempt_block = block(&title);
+    let inner = attempt_block.inner(area);
+    let rows = attempt_rows(&view.text, inner.width);
+    let height = usize::from(inner.height);
+    // Only the visible slice is drawn, so row offsets are not limited by u16 scrolling.
+    let start = view.scroll.min(rows.len().saturating_sub(height));
+    let visible = rows
+        .into_iter()
+        .skip(start)
+        .take(height)
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    Paragraph::new(Text::from(visible)).block(attempt_block)
 }
 
 fn detail(state: &AppState, area_width: u16) -> Paragraph<'static> {
@@ -986,17 +1033,39 @@ pub(super) fn interview_scroll_max(state: &AppState, width: u16, height: u16) ->
     Some(build_solve_interview(state, area).1)
 }
 
-pub fn render(frame: &mut Frame<'_>, state: &AppState) {
-    let area = frame.area();
-    let header_height = if state.screen == Screen::Solve { 2 } else { 1 };
-    let vertical = Layout::default()
+/// Header, content, and footer rows of the whole frame.
+fn frame_areas(area: Rect, screen: Screen) -> std::rc::Rc<[Rect]> {
+    let header_height = if screen == Screen::Solve { 2 } else { 1 };
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
-        .split(area);
+        .split(area)
+}
+
+/// Browser content split: wide layouts return (main, progress); compact ones (tabs, body).
+fn browser_areas(content: Rect) -> (bool, std::rc::Rc<[Rect]>) {
+    if content.width >= 100 && content.height.saturating_add(2) >= 30 {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
+            .split(content);
+        (true, columns)
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(content);
+        (false, chunks)
+    }
+}
+
+pub fn render(frame: &mut Frame<'_>, state: &AppState) {
+    let area = frame.area();
+    let vertical = frame_areas(area, state.screen);
     frame.render_widget(header(state), vertical[0]);
     let footer = if state.screen == Screen::Solve {
         solve_footer_text(state, area.width)
@@ -1024,11 +1093,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         let content = vertical[1];
         if state.screen == Screen::Solve {
             render_solve(frame, state, content);
-        } else if area.width >= 100 && area.height >= 30 {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-                .split(content);
+        } else if let (true, columns) = browser_areas(content) {
             match state.screen {
                 Screen::SetMenu => frame.render_widget(sets(state, columns[0].height), columns[0]),
                 Screen::ProblemList => {
@@ -1040,15 +1105,12 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                 Screen::History => {
                     frame.render_widget(history(state, columns[0].height), columns[0])
                 }
-                Screen::Attempt => frame.render_widget(attempt(state), columns[0]),
+                Screen::Attempt => frame.render_widget(attempt(state, columns[0]), columns[0]),
                 Screen::Solve => unreachable!("solve rendered above"),
             }
             frame.render_widget(progress(state), columns[1]);
         } else {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(1)])
-                .split(content);
+            let (_, chunks) = browser_areas(content);
             let labels: Vec<Line<'static>> = ["Sets", "Problems", "Detail", "Progress"]
                 .into_iter()
                 .map(Line::from)
@@ -1083,7 +1145,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
                     Screen::History => {
                         frame.render_widget(history(state, chunks[1].height), chunks[1])
                     }
-                    Screen::Attempt => frame.render_widget(attempt(state), chunks[1]),
+                    Screen::Attempt => frame.render_widget(attempt(state, chunks[1]), chunks[1]),
                     Screen::Solve => unreachable!("solve rendered above"),
                 }
             }
@@ -1298,6 +1360,50 @@ mod tests {
             rendered_footer(&state, 60),
             "j/k scroll PgUp/PgDn page Esc back ? help q quit"
         );
+    }
+
+    #[test]
+    fn attempt_scrolling_reaches_the_end_of_wrapped_and_very_long_output() {
+        let mut state = AppState::new(Vec::new(), 0);
+        state.screen = Screen::Attempt;
+        let long_line = format!("start{}end-marker", "x".repeat(8_192));
+        state.history = Some(crate::app::model::HistoryView {
+            problem_slug: "two-sum".into(),
+            problem_title: "Two Sum".into(),
+            page: None,
+            selected: 0,
+            attempt: Some(crate::app::model::AttemptView {
+                id: 1,
+                text: format!("header\n{long_line}\n"),
+                scroll: usize::MAX,
+            }),
+        });
+        // 80x24 is compact: the attempt body is 78 columns by 17 rows inside its border.
+        let maximum = attempt_scroll_max(&state, 80, 24).unwrap();
+        let rows = attempt_rows(&format!("header\n{long_line}\n"), 78).len();
+        assert!(rows > 100);
+        assert_eq!(maximum, rows - 17);
+        let screen = rendered(&state, 80, 24);
+        assert!(screen.contains("end-marker"));
+        assert!(!screen.contains("header"));
+
+        let view = state.history.as_mut().unwrap().attempt.as_mut().unwrap();
+        view.text = (0..70_000).map(|index| format!("row-{index}\n")).collect();
+        view.scroll = 69_990;
+        let screen = rendered(&state, 120, 40);
+        assert!(screen.contains("row-69999"));
+        assert!(attempt_scroll_max(&state, 120, 40).unwrap() > usize::from(u16::MAX));
+        state.focus = Focus::Progress;
+        assert_eq!(attempt_scroll_max(&state, 80, 24), None);
+    }
+
+    #[test]
+    fn attempt_rows_keep_spacing_and_split_by_display_width() {
+        assert_eq!(
+            attempt_rows("  a  b\n\nxyz", 2),
+            ["  ", "a ", " b", "", "xy", "z"]
+        );
+        assert_eq!(attempt_rows("日本語", 4), ["日本", "語"]);
     }
 
     #[test]

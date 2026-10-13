@@ -11,6 +11,9 @@ pub const MAX_CASES: usize = 15;
 /// Stored sanitized bytes per stream per step. Truncated text keeps half as head, half as tail.
 pub const MAX_STORED_STREAM_BYTES: usize = 8 * 1024;
 pub const MAX_CASE_NAME_BYTES: usize = 64;
+/// Upper bound on `render_record` output. Indentation can multiply short lines, so this is
+/// derived from the worst case (every stored byte a newline) rather than the stored size.
+pub const MAX_RENDERED_ATTEMPT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Termination {
@@ -722,6 +725,51 @@ mod tests {
         let rendered = render_record(&record);
         assert!(rendered.contains("cancelled after every step below had finished\n"));
         assert!(rendered.contains("case 1/1 example-1 · pass · exit 0 · 1 ms\n"));
+    }
+
+    #[test]
+    fn worst_case_attempt_rendering_fits_its_bound() {
+        let full = || CapturedText::complete("\n".repeat(MAX_STORED_STREAM_BYTES)).unwrap();
+        let truncated = || {
+            let half = "\n".repeat(MAX_STORED_STREAM_BYTES / 2);
+            CapturedText::truncated(half.clone(), u64::MAX, half).unwrap()
+        };
+        let setup = StepRun {
+            termination: Termination::Exited(0),
+            duration_ms: i64::MAX,
+            stdout: full(),
+            stderr: truncated(),
+        };
+        let cases = (0..MAX_CASES)
+            .map(|index| CaseEntry {
+                name: CaseName::parse(&format!("{index:x<64}")).unwrap(),
+                run: CaseRun::Ran(StepRun {
+                    termination: Termination::Signalled(i32::MIN),
+                    duration_ms: i64::MAX,
+                    stdout: truncated(),
+                    stderr: full(),
+                }),
+            })
+            .collect();
+        let record = AttemptRecord {
+            id: i64::MAX,
+            run_at: "2026-10-12T00:00:00Z".into(),
+            problem_slug: "x".repeat(200),
+            language: "x".repeat(200),
+            invoked_set: Some("x".repeat(200)),
+            result: AttemptOutcome::Cancelled,
+            duration_ms: i64::MAX,
+            test_revision: i64::MAX,
+            current_revision: false,
+            output: RecordedOutput::Captured(TestOutput::new(setup, cases).unwrap()),
+        };
+        let rendered = render_record(&record);
+        assert!(rendered.len() > 1024 * 1024, "{}", rendered.len());
+        assert!(
+            rendered.len() <= MAX_RENDERED_ATTEMPT_BYTES,
+            "{}",
+            rendered.len()
+        );
     }
 
     #[test]

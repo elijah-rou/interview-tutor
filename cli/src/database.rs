@@ -146,7 +146,11 @@ CREATE TABLE IF NOT EXISTS attempt_steps (
     CHECK (stdout_omitted_bytes > 0 OR stdout_tail = ''),
     CHECK (stderr_omitted_bytes > 0 OR stderr_tail = ''),
     CHECK (length(CAST(stdout_head AS BLOB)) + length(CAST(stdout_tail AS BLOB)) <= 8192),
-    CHECK (length(CAST(stderr_head AS BLOB)) + length(CAST(stderr_tail AS BLOB)) <= 8192)
+    CHECK (length(CAST(stderr_head AS BLOB)) + length(CAST(stderr_tail AS BLOB)) <= 8192),
+    CHECK (stdout_omitted_bytes = 0 OR (length(CAST(stdout_head AS BLOB)) <= 4096
+        AND length(CAST(stdout_tail AS BLOB)) <= 4096)),
+    CHECK (stderr_omitted_bytes = 0 OR (length(CAST(stderr_head AS BLOB)) <= 4096
+        AND length(CAST(stderr_tail AS BLOB)) <= 4096))
 ) STRICT;
 "#;
 
@@ -2221,9 +2225,12 @@ pub fn list_attempts(
             )
             .map_err(sql_error)
     };
-    let (has_older, has_newer) = match (rows.first(), rows.last()) {
-        (Some(newest), Some(oldest)) => (exists("<", oldest.id)?, exists(">", newest.id)?),
-        _ => (false, false),
+    let (has_older, has_newer) = match (rows.first(), rows.last(), cursor) {
+        (Some(newest), Some(oldest), _) => (exists("<", oldest.id)?, exists(">", newest.id)?),
+        (_, _, AttemptCursor::Newest) => (false, false),
+        // An empty page still reports what lies beyond its cursor.
+        (_, _, AttemptCursor::Before(id)) => (false, exists(">=", id)?),
+        (_, _, AttemptCursor::After(id)) => (exists("<=", id)?, false),
     };
     Ok(AttemptPage {
         rows,

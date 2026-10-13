@@ -1,6 +1,6 @@
 use practice_cli::attempt::{
-    AttemptReport, CapturedText, CaseEntry, CaseName, CaseRun, RecordedOutput, StepRun,
-    Termination, TestOutput,
+    AttemptReport, CapturedText, CaseEntry, CaseName, CaseRun, NotRunReason, RecordedOutput,
+    StepRun, Termination, TestOutput,
 };
 use practice_cli::database::{self, AttemptOutcome, Difficulty, NewProblem, ProgressScope};
 use practice_cli::runner;
@@ -470,4 +470,95 @@ fn stored_steps_reject_out_of_bounds_text() {
         params![attempt],
     );
     assert!(tail_without_omission.is_err());
+}
+
+#[test]
+fn every_step_kind_round_trips_and_corrupt_steps_fail_loudly() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let text = |value: &str| CapturedText::complete(value.to_string()).unwrap();
+    let ran = |termination: Termination, stderr: CapturedText| {
+        CaseRun::Ran(StepRun {
+            termination,
+            duration_ms: 3,
+            stdout: text("out\n"),
+            stderr,
+        })
+    };
+    let case = |name: &str, run: CaseRun| CaseEntry {
+        name: CaseName::parse(name).unwrap(),
+        run,
+    };
+    let setup = StepRun {
+        termination: Termination::Exited(0),
+        duration_ms: 1,
+        stdout: text("a\nb\nc\nd\ne\nf\n"),
+        stderr: text("warning\n"),
+    };
+    let truncated = CapturedText::truncated("h".repeat(4096), 7, "t".repeat(4096)).unwrap();
+    let output = TestOutput::new(
+        setup,
+        vec![
+            case("a", ran(Termination::Signalled(9), truncated)),
+            case("b", ran(Termination::TimedOut, text(""))),
+            case("c", ran(Termination::Cancelled, text(""))),
+            case("d", ran(Termination::Exited(1), text("fail\n"))),
+            case("e", CaseRun::NotRun(NotRunReason::Cancelled)),
+            case("f", CaseRun::NotRun(NotRunReason::DeadlineExceeded)),
+        ],
+    )
+    .unwrap();
+    let report = AttemptReport::new(output.clone(), 9, 0);
+    assert_eq!(report.outcome(), AttemptOutcome::Cancelled);
+    let attempt =
+        database::record_attempt(&connection, "shipped", "python", None, &report).unwrap();
+    let record = database::get_attempt(&connection, attempt).unwrap();
+    assert_eq!(record.result, AttemptOutcome::Cancelled);
+    assert_eq!(record.output, RecordedOutput::Captured(output));
+
+    // Truncated halves are bounded separately, as the domain type requires.
+    let oversized_half = connection.execute(
+        "UPDATE attempt_steps SET stdout_head = ?, stdout_tail = 'x', stdout_omitted_bytes = 5 \
+         WHERE attempt_id = ? AND ordinal = 4",
+        params!["x".repeat(5000), attempt],
+    );
+    assert!(oversized_half.is_err());
+
+    let corruptions = [
+        (
+            "DELETE FROM attempt_steps WHERE attempt_id = ? AND ordinal = 3",
+            "non-contiguous",
+        ),
+        (
+            "DELETE FROM attempt_steps WHERE attempt_id = ? AND ordinal = 0",
+            "non-contiguous",
+        ),
+    ];
+    for (statement, expected) in corruptions {
+        let fixture = Fixture::new();
+        let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+        let attempt =
+            database::record_attempt(&connection, "shipped", "python", None, &report).unwrap();
+        connection.execute(statement, params![attempt]).unwrap();
+        let error = database::get_attempt(&connection, attempt).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn empty_history_pages_still_report_attempts_beyond_their_cursor() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let only =
+        database::record_attempt(&connection, "shipped", "python", None, &report(0)).unwrap();
+    let list = |cursor| {
+        database::list_attempts(&connection, "shipped", Some("python"), cursor, 10).unwrap()
+    };
+    let before = list(database::AttemptCursor::Before(only));
+    assert!(before.rows.is_empty() && before.has_newer && !before.has_older);
+    let after = list(database::AttemptCursor::After(only));
+    assert!(after.rows.is_empty() && after.has_older && !after.has_newer);
+    let newest = list(database::AttemptCursor::Newest);
+    assert_eq!(newest.rows.len(), 1);
+    assert!(!newest.has_older && !newest.has_newer);
 }

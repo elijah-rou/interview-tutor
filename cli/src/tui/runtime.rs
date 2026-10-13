@@ -1908,6 +1908,16 @@ pub fn run(
             {
                 state.interviewer.clamp_scroll(max_scroll);
             }
+            if needs_draw
+                && let Some(max_scroll) =
+                    render::attempt_scroll_max(&state, terminal_size.width, terminal_size.height)
+                && let Some(view) = state
+                    .history
+                    .as_mut()
+                    .and_then(|history| history.attempt.as_mut())
+            {
+                view.clamp_scroll(max_scroll);
+            }
             let expected_grid_size =
                 render::neovim_grid_size(&state, terminal_size.width, terminal_size.height);
             if expected_grid_size != last_neovim_grid_size {
