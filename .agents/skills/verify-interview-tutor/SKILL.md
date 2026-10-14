@@ -89,6 +89,16 @@ For an unattended full pass, `all` runs launch, doctor, the five mapped features
 .agents/skills/verify-interview-tutor/scripts/verify-tutor all
 ```
 
+### Changes only to text
+
+A change that touches only this skill's text, files under `.agents/learning/`, documentation, or comments has no product behavior to drive. Its live check is:
+
+1. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
+2. Run `bash -n` on each changed shell script, and confirm that every changed line in it is a comment.
+3. Parse each changed JSON file.
+
+Record the verdict as `unit-test-verified`, and say in the evidence that agent behavior under the new text was not observed. If a changed script line is not a comment, the change is not text-only: drive the feature that runs it.
+
 ## Evidence
 
 Each run has one evidence directory, `.agents/skills/verify-interview-tutor/evidence/RUN_ID/`. The skill's `.gitignore` ignores it, and Cleanup never removes it. It holds:
