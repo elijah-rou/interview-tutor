@@ -22,7 +22,7 @@ This directory is the maintained source for verifying what users of interview-tu
 ## Proof and skip reporting
 
 - CLI proof is the command, stdout, stderr, and exit code for every step (`NN-step.cmd`, `.out`, `.err`, `.exit`).
-- A judge result is proved by the exit code, the relayed `[stdout]` or `[stderr]` line, and the `attempts` rows read back from the feature's database.
+- A judge result is proved by the exit code, the relayed case lines, and the `attempts` and `attempt_steps` rows read back from the feature's database.
 - A catalog mutation is proved by a second, read-only command that shows the stored value.
 - TUI proof is a screen capture after each action (`NN-label.screen.txt`), the solution file as saved by the TUI, the attempt rows, and the program's exit status.
 - `summary.txt` in each feature's artifacts records the feature ID, the entry points driven, and every passing check.
@@ -32,7 +32,7 @@ This directory is the maintained source for verifying what users of interview-tu
 ## Features
 
 - [Browse the catalog](./catalog.md): set listing, set problem lists, problem detail by slug and by index, global problem and set views, and unknown selectors.
-- [Judge a solution](./judge.md): `./run` and `./practice run` against Python and Rust, with starter, wrong, and correct solutions, and recorded attempts.
+- [Judge a solution](./judge.md): `./run`, `./practice run`, and `python/run` against Python and Rust, with starter, wrong, and correct solutions, recorded attempts, and `./practice attempts` history.
 - [Track progress](./progress.md): set and global stats per language, and the done marker in set lists.
 - [Administer the catalog](./admin.md): custom problems and sets (create, update, order, guarded delete), read-only shipped resources, and adapter refusals.
-- [Solve in the terminal UI](./interview-tui.md): browse to a problem, edit in embedded Neovim, test, submit, go back, and quit.
+- [Solve in the terminal UI](./interview-tui.md): browse to a problem, edit in embedded Neovim, test, submit, go back, read the attempt history, and quit.

@@ -64,7 +64,17 @@ Run a problem directly by global slug, or by set plus slug/1-based index:
 ./run rust blind75 16
 ```
 
-The two-argument form is always `LANGUAGE GLOBAL_SLUG`. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`. A zero exit status means the local suite passed. Direct runs record one attempt after execution; spawn/preflight failures do not.
+The two-argument form is always `LANGUAGE GLOBAL_SLUG`. The three-argument form is always `LANGUAGE SET SLUG_OR_INDEX`. A zero exit status means the local suite passed. Direct runs record one attempt after execution; spawn/preflight failures do not. `python/run SLUG` and `rust/run SLUG` record the same way through `./practice run`.
+
+Each attempt stores every test case's result, stdout, and stderr, up to 8 KiB per stream per case (head and tail are kept when output is longer, with the omitted byte count). Read them back with:
+
+```console
+./practice attempts list two-sum --language python
+./practice attempts show 42
+./practice attempts show 42 --case scenario-1 --stream stderr
+```
+
+In `./interview`, press `a` on problem detail for the same history. Attempts recorded before this version show `output: not recorded`. Stored output is whatever your solution printed and stays in the local database file.
 
 Completion belongs to a global problem and language at the problem's current test revision. Passing a shared problem counts in every set containing it. Set indexes are selectors only; attempt history retains stable problem identity.
 

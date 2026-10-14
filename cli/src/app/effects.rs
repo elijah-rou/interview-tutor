@@ -1,6 +1,7 @@
 use super::model::{AppData, OperationId};
+use crate::attempt::AttemptReport;
 use crate::editor::EditorCommand;
-use crate::runner::{ExecutionPlan, ExecutionResult};
+use crate::runner::ExecutionPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LoadScope {
@@ -21,6 +22,16 @@ pub enum Effect {
         scope: LoadScope,
         problem_id: Option<i64>,
         language_slug: String,
+    },
+    LoadHistory {
+        operation: OperationId,
+        problem_slug: String,
+        language_slug: String,
+        cursor: crate::database::AttemptCursor,
+    },
+    LoadAttempt {
+        operation: OperationId,
+        attempt_id: i64,
     },
     OpenSolve {
         operation: OperationId,
@@ -112,6 +123,9 @@ pub enum Action {
     PreviousFocus,
     CycleLanguage,
     Reload,
+    History,
+    PageOlder,
+    PageNewer,
     Help,
     Quit,
     SaveTest,
@@ -139,6 +153,14 @@ pub enum Event {
     Command(Action),
     OpenSet(String),
     Loaded(OperationId, Result<Box<AppData>, String>),
+    HistoryLoaded(
+        OperationId,
+        Result<Box<crate::database::AttemptPage>, String>,
+    ),
+    AttemptLoaded(
+        OperationId,
+        Result<Box<crate::attempt::AttemptRecord>, String>,
+    ),
     SolveOpened(OperationId, Result<Box<super::model::SolveSession>, String>),
     NeovimStarted(Result<(), String>),
     NeovimDocument(crate::neovim::DocumentUpdate),
@@ -150,7 +172,7 @@ pub enum Event {
         u64,
         RunIntent,
         Option<String>,
-        Result<ExecutionResult, String>,
+        Result<AttemptReport, String>,
     ),
     DraftSaved(OperationId, u64, String, Result<(), String>),
     RunnerLeftSolve(Result<(), String>),

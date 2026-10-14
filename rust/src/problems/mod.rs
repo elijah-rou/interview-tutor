@@ -86,18 +86,31 @@ pub mod word_break;
 pub mod word_search;
 pub mod word_search_ii;
 
+/// Name of the one case each problem declares until its scenario is split into more cases.
+pub const SCENARIO_CASE: &str = "scenario-1";
+
 pub struct Problem {
     pub slug: &'static str,
-    execute: fn(),
+    scenario: fn(),
 }
 
 impl Problem {
-    const fn new(slug: &'static str, execute: fn()) -> Self {
-        Self { slug, execute }
+    const fn new(slug: &'static str, scenario: fn()) -> Self {
+        Self { slug, scenario }
     }
 
-    pub fn execute(&self) {
-        (self.execute)();
+    /// Case names in execution order, as printed by `--cases SLUG`.
+    pub fn case_names(&self) -> &'static [&'static str] {
+        &[SCENARIO_CASE]
+    }
+
+    /// Runs one named case. Assertion failures panic; an unknown name is an error.
+    pub fn run_case(&self, name: &str) -> Result<(), String> {
+        if name != SCENARIO_CASE {
+            return Err(format!("unknown case for {}: {name}", self.slug));
+        }
+        (self.scenario)();
+        Ok(())
     }
 }
 

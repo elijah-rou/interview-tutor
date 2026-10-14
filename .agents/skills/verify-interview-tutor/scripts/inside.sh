@@ -179,6 +179,31 @@ expect_attempts() {
     ok "attempt rows equal '$expected'"
 }
 
+# attempt_steps DB: "attempt ordinal case termination status" per stored step, oldest first.
+steps_query() {
+    python3 -I - "$1" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = connection.execute(
+    """
+    SELECT attempt_id, ordinal, COALESCE(case_name, '-'), termination, COALESCE(status, '-')
+    FROM attempt_steps ORDER BY attempt_id, ordinal
+    """
+)
+for row in rows:
+    print(" ".join(str(value) for value in row))
+PY
+}
+
+expect_steps() {
+    local db=$1 expected=$2
+    step attempt-steps 0 steps_query "$db"
+    local actual
+    actual=$(tr '\n' ';' < "$LAST.out")
+    [[ $actual == "$expected" ]] || fail "attempt steps: got '$actual', expected '$expected'"
+    ok "attempt steps equal '$expected'"
+}
+
 # ---------------------------------------------------------------- serve
 
 serve() {
@@ -267,29 +292,49 @@ feature_catalog() {
 }
 
 feature_judge() {
-    begin_feature judge "./run LANGUAGE SLUG; ./run LANGUAGE SET INDEX; ./practice run"
+    begin_feature judge "./run LANGUAGE SLUG; ./run LANGUAGE SET INDEX; ./practice run; python/run SLUG; ./practice attempts list|show"
     local db=$FEATURE_DIR/progress.db
     trap restore_solutions EXIT
     step python-starter 1 ./run --db "$db" python two-sum
-    expect_err '[stderr] FAIL two-sum: starter is not implemented'
+    expect_err 'case 1/1 scenario-1 · fail · exit 1'
+    expect_err 'FAIL two-sum: starter is not implemented'
     write_python_two_sum wrong
     step python-wrong 1 ./run --db "$db" python two-sum
-    expect_err '[stderr] FAIL two-sum: invalid indices: [0, 0]'
+    expect_err 'FAIL two-sum: invalid indices: [0, 0]'
+    expect_err 'Traceback (most recent call last)'
     write_python_two_sum correct
     step python-correct 0 ./run --db "$db" python two-sum
-    expect_err '[stdout] PASS two-sum'
+    expect_err 'case 1/1 scenario-1 · pass · exit 0'
+    expect_err 'PASS two-sum'
     step python-set-index 0 ./run --db "$db" python blind75 16
-    expect_err '[stdout] PASS two-sum'
+    expect_err 'pass · 1/1 cases passed'
     step practice-run 0 ./practice --db "$db" run python two-sum
-    expect_err '[stdout] PASS two-sum'
+    expect_err 'PASS two-sum'
+    step python-launcher 0 env PRACTICE_DB_PATH="$db" ./python/run two-sum
+    expect_err 'case 1/1 scenario-1 · pass · exit 0'
     step unknown-slug 2 ./run --db "$db" python no-such-problem
     expect_err 'unknown problem: no-such-problem'
     step rust-starter 101 ./run --db "$db" rust two-sum
     expect_err 'not implemented: two-sum'
     write_rust_two_sum_correct
     step rust-correct 0 ./run --db "$db" rust two-sum
-    expect_err '[stdout] PASS two-sum'
-    expect_attempts "$db" 'two-sum python fail 1 -;two-sum python fail 1 -;two-sum python pass 0 -;two-sum python pass 0 blind75;two-sum python pass 0 -;two-sum rust fail 101 -;two-sum rust pass 0 -;'
+    expect_err 'PASS two-sum'
+    expect_attempts "$db" 'two-sum python fail 1 -;two-sum python fail 1 -;two-sum python pass 0 -;two-sum python pass 0 blind75;two-sum python pass 0 -;two-sum python pass 0 -;two-sum rust fail 101 -;two-sum rust pass 0 -;'
+    expect_steps "$db" '1 0 - exited 0;1 1 scenario-1 exited 1;2 0 - exited 0;2 1 scenario-1 exited 1;3 0 - exited 0;3 1 scenario-1 exited 0;4 0 - exited 0;4 1 scenario-1 exited 0;5 0 - exited 0;5 1 scenario-1 exited 0;6 0 - exited 0;6 1 scenario-1 exited 0;7 0 - exited 0;7 1 scenario-1 exited 101;8 0 - exited 0;8 1 scenario-1 exited 0;'
+    step attempts-list 0 ./practice --db "$db" attempts list two-sum --language python
+    grep -E '^2 +[0-9T:Z-]+ +python +fail +0/1 ' "$LAST.out" > /dev/null || fail 'attempt 2 row lacks its fail result and 0/1 case tally'
+    ok 'attempts list shows attempt 2 as fail with 0/1 cases'
+    expect_no_out 'rust'
+    step attempts-show 0 ./practice --db "$db" attempts show 2
+    expect_out 'Attempt 2 · two-sum · python · fail'
+    expect_out 'case 1/1 scenario-1 · fail · exit 1'
+    expect_out 'FAIL two-sum: invalid indices: [0, 0]'
+    step attempts-show-stderr 0 ./practice --db "$db" attempts show 2 --case scenario-1 --stream stderr
+    head -1 "$LAST.out" | grep -qxF 'FAIL two-sum: invalid indices: [0, 0]' || fail 'stored stderr does not start with the failure line'
+    ok 'stored stderr starts with the failure line'
+    step attempts-show-rust 0 ./practice --db "$db" attempts show 7
+    expect_out 'case 1/1 scenario-1 · fail · exit 101'
+    expect_out 'not implemented: two-sum'
     restore_solutions
     trap - EXIT
     assert_pristine
@@ -424,7 +469,7 @@ tui_stop() {
 }
 
 feature_tui() {
-    begin_feature tui "./interview --set blind75 --language python --interviewer none; j/k, Enter, Space t, Space s, Space b, q"
+    begin_feature tui "./interview --set blind75 --language python --interviewer none; j/k, Enter, Space t, Space s, Space b, a, Esc, q"
     local db=$FEATURE_DIR/progress.db
     trap tui_stop EXIT
     tmux new-session -d -s "$TUI_SESSION" -x 120 -y 40 -c "$WORK" \
@@ -442,14 +487,14 @@ feature_tui() {
     tui_wait edited-wrong 'Normal · DIRTY'
     tui_wait edited-wrong-source 'return [0, 0]'
     tui_keys Space t
-    tui_wait test-wrong '[stderr] FAIL two-sum: invalid indices: [0, 0]' 60
-    tui_wait test-wrong-exit 'Exited(1)'
+    tui_wait test-wrong 'FAIL two-sum: invalid indices: [0, 0]' 60
+    tui_wait test-wrong-exit 'case 1/1 scenario-1 · fail · exit 1'
     tui_wait test-wrong-saved 'Normal · SAVED'
     tui_keys ':%s/return \[0, 0\]/return next([i, j] for i in range(len(nums)) for j in range(i + 1, len(nums)) if nums[i] + nums[j] == target)/' Enter
     tui_wait edited-correct 'return next('
     tui_keys Space t
-    tui_wait test-correct '[stdout] PASS two-sum' 60
-    tui_wait test-correct-exit 'Exited(0)'
+    tui_wait test-correct 'case 1/1 scenario-1 · pass · exit 0' 60
+    tui_wait test-correct-exit 'pass · 1/1 cases passed'
     expect_attempts "$db" ''
     tui_keys Space s
     tui_wait submit 'Submit recorded · progress refreshed' 60
@@ -460,6 +505,21 @@ feature_tui() {
     tui_keys Space b
     tui_wait back-to-list 'Problems [active]'
     tui_wait back-to-list-done '✓   Two Sum'
+    tui_keys Enter
+    tui_wait history-detail 'Two Sum · Easy · Arrays & Hashing'
+    tui_keys a
+    tui_wait history 'Attempts · Two Sum · Python [active]'
+    tui_wait history-row '1/1'
+    tui_keys Enter
+    tui_wait attempt 'Attempt 1 [active]'
+    tui_wait attempt-case 'case 1/1 scenario-1 · pass · exit 0'
+    tui_wait attempt-stdout 'PASS two-sum'
+    tui_keys Escape
+    tui_wait attempt-back 'Attempts · Two Sum · Python [active]'
+    tui_keys Escape
+    tui_wait history-back 'Two Sum · Easy · Arrays & Hashing'
+    tui_keys Escape
+    tui_wait detail-back 'Problems [active]'
     tui_keys q
     local deadline=$((SECONDS + 15))
     until [[ $(tmux display-message -p -t "$TUI_SESSION" '#{pane_dead}') == 1 ]]; do

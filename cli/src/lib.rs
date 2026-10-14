@@ -1,4 +1,5 @@
 pub mod app;
+pub mod attempt;
 pub mod catalog;
 pub mod codex;
 pub mod config;

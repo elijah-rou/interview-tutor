@@ -1,5 +1,6 @@
 use crate::app::model::{SolvePane, SolveSession};
 use crate::app::{AppState, Effect, Event, LoadScope, Repository, reduce};
+use crate::attempt::AttemptReport;
 use crate::runner::{self, CancellationToken, ExecutionLimits};
 use crate::signals::{ScopedSignalHandlers, SignalState};
 use crate::source;
@@ -79,11 +80,11 @@ enum WorkerCommand {
     Shutdown,
 }
 type SaveService = dyn Fn(&Path, &Path, &str) -> Result<(), String> + Send + Sync;
-type ExecuteService = dyn Fn(&runner::ExecutionPlan, &CancellationToken) -> Result<runner::ExecutionResult, String>
+type ExecuteService = dyn Fn(&runner::ExecutionPlan, &CancellationToken) -> Result<AttemptReport, String>
     + Send
     + Sync;
 type RecordService =
-    dyn Fn(&runner::ExecutionPlan, &runner::ExecutionResult) -> Result<i64, String> + Send + Sync;
+    dyn Fn(&runner::ExecutionPlan, &AttemptReport) -> Result<i64, String> + Send + Sync;
 type FinalizeCancelledService = dyn Fn(i64, i32) -> Result<(), String> + Send + Sync;
 
 #[derive(Default)]
@@ -960,7 +961,7 @@ impl RunnerWorker {
                                             let mut result =
                                                 (services.execute)(&plan, &cancellation.token)?;
                                             if cancellation.is_cancelled() {
-                                                result.termination = runner::Termination::Cancelled;
+                                                result.mark_cancelled();
                                             }
                                             if intent == crate::app::RunIntent::Submit {
                                                 let attempt_id = (services.record)(&plan, &result)?;
@@ -973,11 +974,10 @@ impl RunnerWorker {
                                                     (services.finalize_cancelled)(
                                                         attempt_id, exit_code,
                                                     )?;
-                                                    result.termination =
-                                                        runner::Termination::Cancelled;
+                                                    result.mark_cancelled();
                                                 }
                                             } else if cancellation.finish().is_some() {
-                                                result.termination = runner::Termination::Cancelled;
+                                                result.mark_cancelled();
                                             }
                                             Ok(result)
                                         })(),
@@ -1219,6 +1219,24 @@ fn apply_effects(
                     .load(set, problem_id, &language_slug)
                     .map(Box::new);
                 effects.extend(reduce(state, Event::Loaded(operation, result)));
+            }
+            Effect::LoadHistory {
+                operation,
+                problem_slug,
+                language_slug,
+                cursor,
+            } => {
+                let result = repository
+                    .history(&problem_slug, &language_slug, cursor)
+                    .map(Box::new);
+                effects.extend(reduce(state, Event::HistoryLoaded(operation, result)));
+            }
+            Effect::LoadAttempt {
+                operation,
+                attempt_id,
+            } => {
+                let result = repository.attempt(attempt_id).map(Box::new);
+                effects.extend(reduce(state, Event::AttemptLoaded(operation, result)));
             }
             Effect::OpenSolve {
                 operation,
@@ -1890,6 +1908,16 @@ pub fn run(
             {
                 state.interviewer.clamp_scroll(max_scroll);
             }
+            if needs_draw
+                && let Some(max_scroll) =
+                    render::attempt_scroll_max(&state, terminal_size.width, terminal_size.height)
+                && let Some(view) = state
+                    .history
+                    .as_mut()
+                    .and_then(|history| history.attempt.as_mut())
+            {
+                view.clamp_scroll(max_scroll);
+            }
             let expected_grid_size =
                 render::neovim_grid_size(&state, terminal_size.width, terminal_size.height);
             if expected_grid_size != last_neovim_grid_size {
@@ -2083,7 +2111,9 @@ mod tests {
     use super::*;
     use crate::app::RunIntent;
     use crate::app::model::OperationId;
-    use crate::runner::{ExecutionPlan, ExecutionResult, Termination};
+    use crate::attempt::Termination;
+    use crate::database::AttemptOutcome;
+    use crate::runner::ExecutionPlan;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
@@ -2380,7 +2410,7 @@ mod tests {
         RunnerServices {
             save: Arc::new(|_, _, _| Ok(())),
             execute: Arc::new(move |_, _| {
-                Ok(ExecutionResult::test_result(termination.clone(), "result"))
+                Ok(AttemptReport::test_report(termination.clone(), "result"))
             }),
             record: Arc::new(move |_, _| {
                 records.fetch_add(1, Ordering::SeqCst);
@@ -2663,7 +2693,7 @@ mod tests {
             0,
             RunIntent::Test,
             Some("source".into()),
-            Ok(ExecutionResult::test_result(Termination::Exited(0), "pass")),
+            Ok(AttemptReport::test_report(Termination::Exited(0), "pass")),
         );
         assert_eq!(
             matching_save_acknowledgement(&state, &stale_operation),
@@ -2674,7 +2704,7 @@ mod tests {
             0,
             RunIntent::Test,
             Some("other".into()),
-            Ok(ExecutionResult::test_result(Termination::Exited(0), "pass")),
+            Ok(AttemptReport::test_report(Termination::Exited(0), "pass")),
         );
         assert_eq!(matching_save_acknowledgement(&state, &wrong_source), None);
     }
@@ -2768,7 +2798,7 @@ mod tests {
             let services = RunnerServices {
                 save: Arc::new(|_, _, _| Ok(())),
                 execute: Arc::new(|_, _| {
-                    Ok(ExecutionResult::test_result(Termination::Exited(0), "pass"))
+                    Ok(AttemptReport::test_report(Termination::Exited(0), "pass"))
                 }),
                 record: Arc::new(move |_, _| {
                     record_started.send(()).unwrap();
@@ -2815,11 +2845,8 @@ mod tests {
                     4,
                     RunIntent::Submit,
                     Some(_),
-                    Ok(ExecutionResult {
-                        termination: Termination::Cancelled,
-                        ..
-                    })
-                )
+                    Ok(report)
+                ) if report.outcome() == AttemptOutcome::Cancelled
             ));
             assert_eq!(records.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -2851,7 +2878,7 @@ mod tests {
         let record_failure = RunnerServices {
             save: Arc::new(|_, _, _| Ok(())),
             execute: Arc::new(|_, _| {
-                Ok(ExecutionResult::test_result(Termination::Exited(0), "pass"))
+                Ok(AttemptReport::test_report(Termination::Exited(0), "pass"))
             }),
             record: Arc::new(|_, _| Err("record failed".into())),
             finalize_cancelled: Arc::new(|_, _| panic!("finalize must not run")),
@@ -3256,7 +3283,7 @@ mod tests {
                         thread::yield_now();
                     }
                 }
-                Ok(ExecutionResult::test_result(
+                Ok(AttemptReport::test_report(
                     Termination::Cancelled,
                     "cancelled",
                 ))
@@ -3335,7 +3362,7 @@ mod tests {
                     thread::yield_now();
                 }
                 observed.store(true, Ordering::SeqCst);
-                Ok(ExecutionResult::test_result(
+                Ok(AttemptReport::test_report(
                     Termination::Cancelled,
                     "cancelled",
                 ))

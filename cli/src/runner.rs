@@ -1,10 +1,14 @@
+use crate::attempt::{
+    AttemptReport, CapturedText, CaseEntry, CaseName, CaseRun, MAX_CASES, MAX_STORED_STREAM_BYTES,
+    NotRunReason, StepRun, Termination, TestOutput,
+};
 use crate::database;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::Pid;
 use rusqlite::Connection;
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
@@ -22,8 +26,8 @@ use vte::{Parser, Perform};
 const MIN_WALL_TIMEOUT: Duration = Duration::from_millis(10);
 const MAX_WALL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_TERM_GRACE: Duration = Duration::from_secs(10);
-const MIN_DISPLAY_OUTPUT_BYTES: usize = 64;
-const MAX_DISPLAY_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MIN_DISCOVERY_OUTPUT_BYTES: usize = 64;
+const MAX_DISCOVERY_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MIN_READ_CHUNK_BYTES: usize = 256;
 const MAX_READ_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_EVENT_QUEUE_CAPACITY: usize = 1024;
@@ -34,7 +38,9 @@ const FINAL_DRAIN_LIMIT: Duration = Duration::from_millis(100);
 pub struct ExecutionLimits {
     pub wall_timeout: Duration,
     pub term_grace: Duration,
-    pub display_output_bytes: usize,
+    /// Retained bytes per stream for `--list` discovery. Attempt steps always retain
+    /// `attempt::MAX_STORED_STREAM_BYTES` per stream.
+    pub discovery_output_bytes: usize,
     pub read_chunk_bytes: usize,
     pub event_queue_capacity: usize,
 }
@@ -44,7 +50,7 @@ impl Default for ExecutionLimits {
         Self {
             wall_timeout: Duration::from_secs(30),
             term_grace: Duration::from_millis(250),
-            display_output_bytes: 256 * 1024,
+            discovery_output_bytes: 64 * 1024,
             read_chunk_bytes: 8 * 1024,
             event_queue_capacity: 64,
         }
@@ -59,10 +65,10 @@ impl ExecutionLimits {
         if self.term_grace > MAX_TERM_GRACE {
             return Err("TERM grace must not exceed 10s".to_string());
         }
-        if !(MIN_DISPLAY_OUTPUT_BYTES..=MAX_DISPLAY_OUTPUT_BYTES)
-            .contains(&self.display_output_bytes)
+        if !(MIN_DISCOVERY_OUTPUT_BYTES..=MAX_DISCOVERY_OUTPUT_BYTES)
+            .contains(&self.discovery_output_bytes)
         {
-            return Err("display output limit must be between 64 bytes and 16 MiB".to_string());
+            return Err("discovery output limit must be between 64 bytes and 16 MiB".to_string());
         }
         if !(MIN_READ_CHUNK_BYTES..=MAX_READ_CHUNK_BYTES).contains(&self.read_chunk_bytes) {
             return Err("read chunk size must be between 256 bytes and 64 KiB".to_string());
@@ -121,14 +127,6 @@ pub enum ExecutionEvent {
     Stderr(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Termination {
-    Exited(i32),
-    Cancelled,
-    TimedOut,
-    Signalled(i32),
-}
-
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
     pub root: PathBuf,
@@ -137,59 +135,6 @@ pub struct ExecutionPlan {
     pub set_slug: Option<String>,
     pub runner_path: PathBuf,
     pub solution_path: PathBuf,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExecutionResult {
-    pub termination: Termination,
-    pub display_output: String,
-    pub omitted_bytes: usize,
-    pub dropped_events: usize,
-    pub duration_ms: i64,
-    discovery_stdout: Option<String>,
-    discovery_stderr: Option<String>,
-    discovery_stdout_truncated: bool,
-}
-
-impl ExecutionResult {
-    #[cfg(test)]
-    pub(crate) fn test_result(termination: Termination, output: &str) -> Self {
-        Self {
-            termination,
-            display_output: output.to_string(),
-            omitted_bytes: 0,
-            dropped_events: 0,
-            duration_ms: 1,
-            discovery_stdout: None,
-            discovery_stderr: None,
-            discovery_stdout_truncated: false,
-        }
-    }
-
-    pub fn exit_code(&self) -> Option<i32> {
-        match self.termination {
-            Termination::Exited(code) => Some(code),
-            Termination::Cancelled | Termination::TimedOut | Termination::Signalled(_) => None,
-        }
-    }
-
-    pub fn status_code(&self) -> i32 {
-        match self.termination {
-            Termination::Exited(code) => code,
-            Termination::Cancelled => 130,
-            Termination::TimedOut | Termination::Signalled(_) => 2,
-        }
-    }
-
-    pub fn outcome(&self) -> database::AttemptOutcome {
-        match self.termination {
-            Termination::Exited(0) => database::AttemptOutcome::Pass,
-            Termination::Exited(2) => database::AttemptOutcome::Error,
-            Termination::Exited(_) => database::AttemptOutcome::Fail,
-            Termination::Cancelled => database::AttemptOutcome::Cancelled,
-            Termination::TimedOut | Termination::Signalled(_) => database::AttemptOutcome::Error,
-        }
-    }
 }
 
 pub fn plan_execution(
@@ -256,102 +201,81 @@ enum ReaderMessage {
     Finished(Stream, io::Result<()>),
 }
 
-struct OutputRetention {
+/// Sanitized text from one stream: the first `limit` bytes plus a rolling tail of the last
+/// `limit / 2` bytes, so a truncated stream keeps both its beginning and its end.
+struct StreamRetention {
     limit: usize,
-    raw_bytes: usize,
-    sanitized_bytes: usize,
-    initial: Vec<SanitizedEvent>,
-    initial_bytes: usize,
-    tail: VecDeque<SanitizedEvent>,
-    tail_bytes: usize,
+    total_bytes: u64,
+    head: String,
+    tail: String,
 }
 
-#[derive(Clone, Debug)]
-struct SanitizedEvent {
-    stream: Stream,
-    text: String,
+enum RetainedText {
+    Complete(String),
+    Truncated {
+        head: String,
+        omitted_bytes: u64,
+        tail: String,
+    },
 }
 
-impl OutputRetention {
+impl StreamRetention {
     fn new(limit: usize) -> Self {
-        assert!(limit >= MIN_DISPLAY_OUTPUT_BYTES);
+        assert!(limit >= MIN_DISCOVERY_OUTPUT_BYTES);
         Self {
             limit,
-            raw_bytes: 0,
-            sanitized_bytes: 0,
-            initial: Vec::new(),
-            initial_bytes: 0,
-            tail: VecDeque::new(),
-            tail_bytes: 0,
+            total_bytes: 0,
+            head: String::new(),
+            tail: String::new(),
         }
     }
 
-    fn push_raw(&mut self, count: usize) {
-        self.raw_bytes = self.raw_bytes.saturating_add(count);
-    }
-
-    fn push_sanitized(&mut self, stream: Stream, text: &str) {
+    fn push(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        self.sanitized_bytes = self.sanitized_bytes.saturating_add(text.len());
-        if self.initial_bytes < self.limit {
-            let end = floor_char_boundary(text, (self.limit - self.initial_bytes).min(text.len()));
-            push_sanitized_event(&mut self.initial, stream, &text[..end]);
-            self.initial_bytes += end;
+        self.total_bytes = self.total_bytes.saturating_add(text.len() as u64);
+        if self.head.len() < self.limit {
+            let end = floor_char_boundary(text, self.limit - self.head.len());
+            self.head.push_str(&text[..end]);
         }
-
         let tail_limit = self.limit / 2;
-        push_sanitized_event_deque(&mut self.tail, stream, text);
-        self.tail_bytes += text.len();
-        while self.tail_bytes > tail_limit {
-            let excess = self.tail_bytes - tail_limit;
-            let front = self
-                .tail
-                .front_mut()
-                .expect("tail byte count implies a chunk");
-            if excess < front.text.len() {
-                let removed = ceil_char_boundary(&front.text, excess);
-                front.text.drain(..removed);
-                self.tail_bytes -= removed;
-                break;
-            }
-            let removed = self.tail.pop_front().expect("tail contains front chunk");
-            self.tail_bytes -= removed.text.len();
+        self.tail.push_str(text);
+        if self.tail.len() > tail_limit {
+            let excess = ceil_char_boundary(&self.tail, self.tail.len() - tail_limit);
+            self.tail.drain(..excess);
         }
-        assert!(self.initial_bytes <= self.limit);
-        assert!(self.tail_bytes <= tail_limit);
+        assert!(self.head.len() <= self.limit);
+        assert!(self.tail.len() <= tail_limit);
     }
 
-    fn finish(self, tagged: bool) -> (String, usize, bool) {
-        let all = render_events(&self.initial, tagged);
-        let omitted_bytes = self.raw_bytes.saturating_sub(self.limit);
-        let truncated = omitted_bytes != 0
-            || self.sanitized_bytes > self.initial_bytes
-            || all.len() > self.limit;
-        if !truncated {
-            return (all, 0, false);
+    fn finish(mut self) -> RetainedText {
+        if self.total_bytes <= self.head.len() as u64 {
+            return RetainedText::Complete(self.head);
         }
+        let head_end = floor_char_boundary(&self.head, self.limit / 2);
+        self.head.truncate(head_end);
+        let retained = (self.head.len() + self.tail.len()) as u64;
+        assert!(self.total_bytes > retained);
+        RetainedText::Truncated {
+            head: self.head,
+            omitted_bytes: self.total_bytes - retained,
+            tail: self.tail,
+        }
+    }
+}
 
-        let tail: Vec<SanitizedEvent> = self.tail.into_iter().collect();
-        let available = self.initial_bytes.min(self.limit);
-        let mut low = 0_usize;
-        let mut high = available;
-        let mut best = render_truncated(&self.initial, &tail, 0, omitted_bytes, tagged);
-        while low <= high {
-            let budget = low + (high - low) / 2;
-            let rendered = render_truncated(&self.initial, &tail, budget, omitted_bytes, tagged);
-            if rendered.len() <= self.limit {
-                best = rendered;
-                low = budget.saturating_add(1);
-            } else if budget == 0 {
-                break;
-            } else {
-                high = budget - 1;
-            }
+impl RetainedText {
+    fn into_captured(self) -> CapturedText {
+        match self {
+            Self::Complete(text) => CapturedText::complete(text),
+            Self::Truncated {
+                head,
+                omitted_bytes,
+                tail,
+            } => CapturedText::truncated(head, omitted_bytes, tail),
         }
-        assert!(best.len() <= self.limit);
-        (best, omitted_bytes, true)
+        .expect("attempt step retention uses the stored stream bound")
     }
 }
 
@@ -369,79 +293,6 @@ fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
         index += 1;
     }
     index
-}
-
-fn push_sanitized_event(events: &mut Vec<SanitizedEvent>, stream: Stream, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(last) = events.last_mut().filter(|last| last.stream == stream) {
-        last.text.push_str(text);
-    } else {
-        events.push(SanitizedEvent {
-            stream,
-            text: text.to_string(),
-        });
-    }
-}
-
-fn push_sanitized_event_deque(events: &mut VecDeque<SanitizedEvent>, stream: Stream, text: &str) {
-    if let Some(last) = events.back_mut().filter(|last| last.stream == stream) {
-        last.text.push_str(text);
-    } else {
-        events.push_back(SanitizedEvent {
-            stream,
-            text: text.to_string(),
-        });
-    }
-}
-
-fn take_prefix(events: &[SanitizedEvent], count: usize) -> Vec<SanitizedEvent> {
-    let mut result = Vec::new();
-    let mut remaining = count;
-    for event in events {
-        let taken = floor_char_boundary(&event.text, event.text.len().min(remaining));
-        push_sanitized_event(&mut result, event.stream, &event.text[..taken]);
-        remaining = remaining.saturating_sub(taken);
-        if remaining == 0 {
-            break;
-        }
-    }
-    result
-}
-
-fn take_tail(events: &[SanitizedEvent], count: usize) -> Vec<SanitizedEvent> {
-    let mut reversed = Vec::new();
-    let mut remaining = count;
-    for event in events.iter().rev() {
-        let start = ceil_char_boundary(&event.text, event.text.len().saturating_sub(remaining));
-        reversed.push(SanitizedEvent {
-            stream: event.stream,
-            text: event.text[start..].to_string(),
-        });
-        remaining = remaining.saturating_sub(event.text.len() - start);
-        if remaining == 0 {
-            break;
-        }
-    }
-    reversed.reverse();
-    reversed
-}
-
-fn render_truncated(
-    prefix_source: &[SanitizedEvent],
-    tail_source: &[SanitizedEvent],
-    budget: usize,
-    omitted_bytes: usize,
-    tagged: bool,
-) -> String {
-    let prefix = take_prefix(prefix_source, budget.div_ceil(2));
-    let tail = take_tail(tail_source, budget / 2);
-    format!(
-        "{}\n[... {omitted_bytes} bytes omitted ...]\n{}",
-        render_events(&prefix, tagged),
-        render_events(&tail, tagged)
-    )
 }
 
 #[derive(Default)]
@@ -467,20 +318,6 @@ fn sanitize_chunk(parser: &mut Parser, output: &mut SanitizedText, bytes: &[u8])
     assert!(output.text.is_empty());
     parser.advance(output, bytes);
     std::mem::take(&mut output.text)
-}
-
-fn render_events(events: &[SanitizedEvent], tagged: bool) -> String {
-    let mut result = String::new();
-    for event in events {
-        if tagged {
-            result.push_str(match event.stream {
-                Stream::Stdout => "[stdout] ",
-                Stream::Stderr => "[stderr] ",
-            });
-        }
-        result.push_str(&event.text);
-    }
-    result
 }
 
 fn set_nonblocking<R: AsRawFd>(reader: &R) -> io::Result<()> {
@@ -650,36 +487,35 @@ fn deliver_event(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct StreamCapture {
+    retention: StreamRetention,
+    parser: Parser,
+    sanitized: SanitizedText,
+}
+
+impl StreamCapture {
+    fn new(limit: usize) -> Self {
+        Self {
+            retention: StreamRetention::new(limit),
+            parser: Parser::new(),
+            sanitized: SanitizedText::default(),
+        }
+    }
+}
+
 fn retain_and_deliver(
     event: RawEvent,
-    retention: &mut OutputRetention,
-    discovery_stdout: &mut Option<OutputRetention>,
-    discovery_stderr: &mut Option<OutputRetention>,
-    stdout_parser: &mut Parser,
-    stderr_parser: &mut Parser,
-    stdout: &mut SanitizedText,
-    stderr: &mut SanitizedText,
+    stdout: &mut StreamCapture,
+    stderr: &mut StreamCapture,
     event_sender: Option<&SyncSender<ExecutionEvent>>,
     dropped_events: &mut usize,
 ) {
-    retention.push_raw(event.bytes.len());
-    let stream_retention = match event.stream {
-        Stream::Stdout => discovery_stdout,
-        Stream::Stderr => discovery_stderr,
+    let capture = match event.stream {
+        Stream::Stdout => stdout,
+        Stream::Stderr => stderr,
     };
-    if let Some(stream_retention) = stream_retention {
-        stream_retention.push_raw(event.bytes.len());
-    }
-    let (parser, output) = match event.stream {
-        Stream::Stdout => (stdout_parser, stdout),
-        Stream::Stderr => (stderr_parser, stderr),
-    };
-    let text = sanitize_chunk(parser, output, &event.bytes);
-    retention.push_sanitized(event.stream, &text);
-    if let Some(stream_retention) = stream_retention {
-        stream_retention.push_sanitized(event.stream, &text);
-    }
+    let text = sanitize_chunk(&mut capture.parser, &mut capture.sanitized, &event.bytes);
+    capture.retention.push(&text);
     if !text.is_empty() {
         deliver_event(event_sender, event.stream, text, dropped_events);
     }
@@ -690,8 +526,16 @@ struct CommandSpec<'a> {
     arguments: &'a [&'a str],
     current_dir: &'a Path,
     database_path: Option<&'a Path>,
-    tagged_output: bool,
-    capture_discovery_streams: bool,
+    stream_limit: usize,
+    timeout: Duration,
+}
+
+struct CommandCapture {
+    termination: Termination,
+    duration_ms: i64,
+    stdout: RetainedText,
+    stderr: RetainedText,
+    dropped_events: usize,
 }
 
 fn execute_command(
@@ -699,8 +543,9 @@ fn execute_command(
     limits: &ExecutionLimits,
     cancellation: &CancellationToken,
     event_sender: Option<&SyncSender<ExecutionEvent>>,
-) -> Result<ExecutionResult, String> {
+) -> Result<CommandCapture, String> {
     limits.validate()?;
+    assert!(spec.timeout >= MIN_WALL_TIMEOUT);
     validate_runner(spec.executable)?;
     let mut command = Command::new(spec.executable);
     command
@@ -783,31 +628,20 @@ fn execute_command(
     }
     drop(sender);
 
-    let mut retention = OutputRetention::new(limits.display_output_bytes);
-    let mut discovery_stdout = spec
-        .capture_discovery_streams
-        .then(|| OutputRetention::new(limits.display_output_bytes));
-    let mut discovery_stderr = spec
-        .capture_discovery_streams
-        .then(|| OutputRetention::new(limits.display_output_bytes));
-    let mut event_stdout_parser = Parser::new();
-    let mut event_stderr_parser = Parser::new();
-    let mut event_stdout = SanitizedText::default();
-    let mut event_stderr = SanitizedText::default();
+    let mut stdout = StreamCapture::new(spec.stream_limit);
+    let mut stderr = StreamCapture::new(spec.stream_limit);
     let mut dropped_events = 0_usize;
     let mut observed_exit = false;
     let mut requested_termination = None;
     let mut finished_readers = 0_usize;
 
     while pending_error.is_none() && requested_termination.is_none() && !observed_exit {
-        if let Some(termination) = priority_termination(cancellation, started, limits.wall_timeout)
-        {
+        if let Some(termination) = priority_termination(cancellation, started, spec.timeout) {
             requested_termination = Some(termination);
             break;
         }
         let status_observation = child_has_exited(process_group);
-        if let Some(termination) = priority_termination(cancellation, started, limits.wall_timeout)
-        {
+        if let Some(termination) = priority_termination(cancellation, started, spec.timeout) {
             requested_termination = Some(termination);
         } else {
             match status_observation {
@@ -821,20 +655,14 @@ fn execute_command(
         }
         match receiver.recv_timeout(POLL_INTERVAL) {
             Ok(ReaderMessage::Output(event)) => {
-                if let Some(termination) =
-                    priority_termination(cancellation, started, limits.wall_timeout)
+                if let Some(termination) = priority_termination(cancellation, started, spec.timeout)
                 {
                     requested_termination = Some(termination);
                 }
                 retain_and_deliver(
                     event,
-                    &mut retention,
-                    &mut discovery_stdout,
-                    &mut discovery_stderr,
-                    &mut event_stdout_parser,
-                    &mut event_stderr_parser,
-                    &mut event_stdout,
-                    &mut event_stderr,
+                    &mut stdout,
+                    &mut stderr,
                     event_sender,
                     &mut dropped_events,
                 );
@@ -844,8 +672,7 @@ fn execute_command(
             }
             Ok(ReaderMessage::Finished(stream, result)) => {
                 finished_readers += 1;
-                if let Some(termination) =
-                    priority_termination(cancellation, started, limits.wall_timeout)
+                if let Some(termination) = priority_termination(cancellation, started, spec.timeout)
                 {
                     requested_termination = Some(termination);
                 } else if let Err(error) = result {
@@ -855,8 +682,7 @@ fn execute_command(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 let status_observation = child_has_exited(process_group);
-                if let Some(termination) =
-                    priority_termination(cancellation, started, limits.wall_timeout)
+                if let Some(termination) = priority_termination(cancellation, started, spec.timeout)
                 {
                     requested_termination = Some(termination);
                 } else {
@@ -892,13 +718,8 @@ fn execute_command(
         ) {
             Ok(ReaderMessage::Output(event)) => retain_and_deliver(
                 event,
-                &mut retention,
-                &mut discovery_stdout,
-                &mut discovery_stderr,
-                &mut event_stdout_parser,
-                &mut event_stderr_parser,
-                &mut event_stdout,
-                &mut event_stderr,
+                &mut stdout,
+                &mut stderr,
                 event_sender,
                 &mut dropped_events,
             ),
@@ -918,13 +739,8 @@ fn execute_command(
         match message {
             ReaderMessage::Output(event) => retain_and_deliver(
                 event,
-                &mut retention,
-                &mut discovery_stdout,
-                &mut discovery_stderr,
-                &mut event_stdout_parser,
-                &mut event_stderr_parser,
-                &mut event_stdout,
-                &mut event_stderr,
+                &mut stdout,
+                &mut stderr,
                 event_sender,
                 &mut dropped_events,
             ),
@@ -962,36 +778,29 @@ fn execute_command(
         })?)?
     };
     let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let (display_output, omitted_bytes, _display_truncated) = retention.finish(spec.tagged_output);
-    let (discovery_stdout, discovery_stdout_truncated) = discovery_stdout
-        .map(|retention| retention.finish(false))
-        .map_or((None, false), |(output, _, truncated)| {
-            (Some(output), truncated)
-        });
-    let discovery_stderr = discovery_stderr.map(|retention| retention.finish(false).0);
-    assert!(display_output.len() <= limits.display_output_bytes);
     if cancellation.is_cancelled() {
         termination = Termination::Cancelled;
     }
-    Ok(ExecutionResult {
+    Ok(CommandCapture {
         termination,
-        display_output,
-        omitted_bytes,
-        dropped_events,
         duration_ms,
-        discovery_stdout,
-        discovery_stderr,
-        discovery_stdout_truncated,
+        stdout: stdout.retention.finish(),
+        stderr: stderr.retention.finish(),
+        dropped_events,
     })
 }
 
+/// Runs one attempt: the setup step lists the problem's cases, then each case runs in its own
+/// process, all against one wall deadline. A case failure does not stop later cases;
+/// cancellation and the deadline mark the remaining cases as not run.
 pub fn execute(
     plan: &ExecutionPlan,
     database_path: &Path,
     limits: &ExecutionLimits,
     cancellation: &CancellationToken,
     event_sender: Option<&SyncSender<ExecutionEvent>>,
-) -> Result<ExecutionResult, String> {
+) -> Result<AttemptReport, String> {
+    limits.validate()?;
     if !plan.root.is_dir() {
         return Err(format!(
             "project root does not exist: {}",
@@ -1002,19 +811,84 @@ pub fn execute(
         .runner_path
         .parent()
         .ok_or_else(|| "language runner has no parent directory".to_string())?;
-    execute_command(
-        CommandSpec {
-            executable: &plan.runner_path,
-            arguments: &["--problem", &plan.problem_slug],
-            current_dir: parent,
-            database_path: Some(database_path),
-            tagged_output: true,
-            capture_discovery_streams: false,
-        },
-        limits,
-        cancellation,
-        event_sender,
-    )
+    let started = Instant::now();
+    let deadline = started + limits.wall_timeout;
+    let mut dropped_events = 0_usize;
+    let mut run_step = |arguments: &[&str], timeout: Duration| {
+        execute_command(
+            CommandSpec {
+                executable: &plan.runner_path,
+                arguments,
+                current_dir: parent,
+                database_path: Some(database_path),
+                stream_limit: MAX_STORED_STREAM_BYTES,
+                timeout,
+            },
+            limits,
+            cancellation,
+            event_sender,
+        )
+        .map(|capture| {
+            dropped_events = dropped_events.saturating_add(capture.dropped_events);
+            StepRun {
+                termination: capture.termination,
+                duration_ms: capture.duration_ms,
+                stdout: capture.stdout.into_captured(),
+                stderr: capture.stderr.into_captured(),
+            }
+        })
+    };
+
+    let setup = run_step(&["--cases", &plan.problem_slug], limits.wall_timeout)?;
+    let names = if setup.termination == Termination::Exited(0) {
+        parse_case_names(&setup.stdout)
+            .map_err(|error| format!("language runner case list is invalid: {error}"))?
+    } else {
+        Vec::new()
+    };
+    let mut cases = Vec::with_capacity(names.len());
+    for name in names {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let run = if cancellation.is_cancelled() {
+            CaseRun::NotRun(NotRunReason::Cancelled)
+        } else if remaining < MIN_WALL_TIMEOUT {
+            CaseRun::NotRun(NotRunReason::DeadlineExceeded)
+        } else {
+            CaseRun::Ran(run_step(
+                &["--problem", &plan.problem_slug, "--case", name.as_str()],
+                remaining,
+            )?)
+        };
+        cases.push(CaseEntry { name, run });
+    }
+    let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let mut report =
+        AttemptReport::new(TestOutput::new(setup, cases)?, duration_ms, dropped_events);
+    if cancellation.is_cancelled() {
+        report.mark_cancelled();
+    }
+    Ok(report)
+}
+
+fn parse_case_names(stdout: &CapturedText) -> Result<Vec<CaseName>, String> {
+    let CapturedText::Complete(text) = stdout else {
+        return Err("output was truncated".to_string());
+    };
+    let names = text
+        .lines()
+        .map(CaseName::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(1..=MAX_CASES).contains(&names.len()) {
+        return Err(format!(
+            "expected 1 to {MAX_CASES} case names, got {}",
+            names.len()
+        ));
+    }
+    let mut seen = HashSet::with_capacity(names.len());
+    if let Some(duplicate) = names.iter().find(|name| !seen.insert(*name)) {
+        return Err(format!("duplicate case name {:?}", duplicate.as_str()));
+    }
+    Ok(names)
 }
 
 pub fn discover_adapters(
@@ -1031,34 +905,30 @@ pub fn discover_adapters(
             arguments: &["--list"],
             current_dir: parent,
             database_path: None,
-            tagged_output: false,
-            capture_discovery_streams: true,
+            stream_limit: limits.discovery_output_bytes,
+            timeout: limits.wall_timeout,
         },
         limits,
         cancellation,
         None,
     )?;
-    let stdout = result
-        .discovery_stdout
-        .as_deref()
-        .expect("discovery execution captures stdout");
-    let stderr = result
-        .discovery_stderr
-        .as_deref()
-        .expect("discovery execution captures stderr");
     if result.termination != Termination::Exited(0) {
+        let stderr = match result.stderr {
+            RetainedText::Complete(text) => text,
+            RetainedText::Truncated { head, tail, .. } => format!("{head}\n{tail}"),
+        };
         return Err(format!(
             "language runner discovery failed: {:?}: {}",
             result.termination,
             stderr.trim()
         ));
     }
-    if result.discovery_stdout_truncated {
+    let RetainedText::Complete(stdout) = result.stdout else {
         return Err(format!(
             "language runner discovery exceeded {} output bytes",
-            limits.display_output_bytes
+            limits.discovery_output_bytes
         ));
-    }
+    };
     Ok(stdout
         .lines()
         .map(str::trim)
@@ -1070,15 +940,13 @@ pub fn discover_adapters(
 pub fn record_execution(
     connection: &Connection,
     plan: &ExecutionPlan,
-    result: &ExecutionResult,
+    report: &AttemptReport,
 ) -> Result<i64, String> {
     database::record_attempt(
         connection,
         &plan.problem_slug,
         &plan.language,
-        result.outcome(),
-        result.duration_ms,
-        result.exit_code(),
         plan.set_slug.as_deref(),
+        report,
     )
 }

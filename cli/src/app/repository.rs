@@ -1,4 +1,4 @@
-use super::model::{AppData, MAX_ROWS, ProblemDetail, ProblemRow, SetRow};
+use super::model::{AppData, HISTORY_PAGE_ROWS, MAX_ROWS, ProblemDetail, ProblemRow, SetRow};
 use crate::database::{
     self, MAX_DESCRIPTION_LENGTH, MAX_STATEMENT_LENGTH, MAX_TITLE_LENGTH, MAX_TOPIC_LENGTH,
     ProgressScope, RowLimit,
@@ -43,6 +43,25 @@ pub struct Repository {
 impl Repository {
     pub fn new(connection: Connection) -> Self {
         Self { connection }
+    }
+
+    pub fn history(
+        &self,
+        problem_slug: &str,
+        language_slug: &str,
+        cursor: database::AttemptCursor,
+    ) -> Result<database::AttemptPage, String> {
+        database::list_attempts(
+            &self.connection,
+            problem_slug,
+            Some(language_slug),
+            cursor,
+            HISTORY_PAGE_ROWS,
+        )
+    }
+
+    pub fn attempt(&self, attempt_id: i64) -> Result<crate::attempt::AttemptRecord, String> {
+        database::get_attempt(&self.connection, attempt_id)
     }
 
     pub fn prepare_execution(
@@ -200,7 +219,8 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{self, AttemptOutcome};
+    use crate::attempt::{AttemptReport, Termination};
+    use crate::database;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -244,20 +264,16 @@ mod tests {
             &connection,
             &members[0].problem.slug,
             "python",
-            AttemptOutcome::Pass,
-            1,
-            Some(0),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(0), ""),
         )
         .unwrap();
         database::record_attempt(
             &connection,
             &members[1].problem.slug,
             "python",
-            AttemptOutcome::Pass,
-            1,
-            Some(0),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(0), ""),
         )
         .unwrap();
         connection
@@ -270,10 +286,8 @@ mod tests {
             &connection,
             &members[2].problem.slug,
             "python",
-            AttemptOutcome::Fail,
-            1,
-            Some(1),
             Some(&set_slug),
+            &AttemptReport::test_report(Termination::Exited(1), ""),
         )
         .unwrap();
 

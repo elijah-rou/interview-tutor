@@ -1,8 +1,10 @@
 use super::effects::{Action, EditorAction, Effect, Event, LoadScope, RunIntent};
 use super::model::{
-    AppState, DiscardAction, DiscardConfirmation, EditorRuntimeStatus, Focus, InterviewerStatus,
-    MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId, RecordedSubmissionReview, Screen, SolvePane,
+    AppState, AttemptView, DiscardAction, DiscardConfirmation, EditorRuntimeStatus, Focus,
+    HistoryView, InterviewerStatus, MAX_COMPOSER_BYTES, MAX_SCROLL, OperationId,
+    RecordedSubmissionReview, Screen, SolvePane,
 };
+use crate::database::AttemptCursor;
 use crate::editor::{EditorCommand, Mode};
 use crate::interviewer::{GuidanceMode, Mode as InterviewerMode};
 
@@ -15,8 +17,11 @@ fn load_effect(state: &mut AppState) -> Vec<Effect> {
     };
     let scope = match state.screen {
         Screen::SetMenu => LoadScope::Global,
-        Screen::ProblemList | Screen::ProblemDetail | Screen::Solve => match &state.selected_set_id
-        {
+        Screen::ProblemList
+        | Screen::ProblemDetail
+        | Screen::History
+        | Screen::Attempt
+        | Screen::Solve => match &state.selected_set_id {
             Some(slug) => LoadScope::ProblemSet(slug.clone()),
             None => LoadScope::Global,
         },
@@ -32,9 +37,12 @@ fn load_effect(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::Load {
         operation,
         scope,
-        problem_id: matches!(state.screen, Screen::ProblemDetail | Screen::Solve)
-            .then_some(state.selected_problem_id)
-            .flatten(),
+        problem_id: matches!(
+            state.screen,
+            Screen::ProblemDetail | Screen::History | Screen::Attempt | Screen::Solve
+        )
+        .then_some(state.selected_problem_id)
+        .flatten(),
         language_slug,
     }]
 }
@@ -655,6 +663,128 @@ fn start_pending_test(state: &mut AppState) -> Vec<Effect> {
     }]
 }
 
+fn history_load(state: &mut AppState, cursor: AttemptCursor) -> Vec<Effect> {
+    let Some(language_slug) = state.language_slug().map(str::to_string) else {
+        state.error = Some("no enabled languages".to_string());
+        return Vec::new();
+    };
+    let problem_slug = state
+        .history
+        .as_ref()
+        .expect("history load requires history state")
+        .problem_slug
+        .clone();
+    let operation = next_operation(state);
+    state.active_operation = Some(operation);
+    state.status = "Loading attempts…".into();
+    state.error = None;
+    vec![Effect::LoadHistory {
+        operation,
+        problem_slug,
+        language_slug,
+        cursor,
+    }]
+}
+
+/// Every command on the History and Attempt screens. `None` hands only help, quit, focus
+/// switching, and Progress-pane scrolling to the shared browser handling; everything else is
+/// owned here so no history command reaches the list/detail screen arms.
+fn history_command(state: &mut AppState, action: &Action) -> Option<Vec<Effect>> {
+    match action {
+        Action::Help | Action::Quit | Action::NextFocus | Action::PreviousFocus => return None,
+        Action::Up | Action::Down if state.focus == Focus::Progress => return None,
+        // With Progress focused, list and attempt navigation keys do nothing.
+        Action::Open | Action::PageOlder | Action::PageNewer if state.focus == Focus::Progress => {
+            return Some(Vec::new());
+        }
+        _ => {}
+    }
+    let screen = state.screen;
+    let history = state
+        .history
+        .as_mut()
+        .expect("history screens keep history state");
+    let rows = history.page.as_ref().map_or(0, |page| page.rows.len());
+    match (screen, action) {
+        (Screen::History, Action::Up) => history.selected = history.selected.saturating_sub(1),
+        (Screen::History, Action::Down) => {
+            history.selected = (history.selected + 1).min(rows.saturating_sub(1));
+        }
+        (Screen::History, Action::Open) => {
+            let Some(attempt_id) = history.selected_attempt_id() else {
+                return Some(Vec::new());
+            };
+            let operation = next_operation(state);
+            state.active_operation = Some(operation);
+            state.status = "Loading attempt…".into();
+            state.error = None;
+            return Some(vec![Effect::LoadAttempt {
+                operation,
+                attempt_id,
+            }]);
+        }
+        (Screen::History, Action::PageOlder | Action::PageNewer) => {
+            let page = history.page.as_ref();
+            let cursor = match action {
+                Action::PageOlder => page
+                    .filter(|page| page.has_older)
+                    .and_then(|page| page.rows.last())
+                    .map(|row| AttemptCursor::Before(row.id)),
+                _ => page
+                    .filter(|page| page.has_newer)
+                    .and_then(|page| page.rows.first())
+                    .map(|row| AttemptCursor::After(row.id)),
+            };
+            let Some(cursor) = cursor else {
+                state.status = if matches!(action, Action::PageOlder) {
+                    "No older attempts"
+                } else {
+                    "No newer attempts"
+                }
+                .into();
+                return Some(Vec::new());
+            };
+            return Some(history_load(state, cursor));
+        }
+        (Screen::History, Action::Reload) => {
+            return Some(history_load(state, AttemptCursor::Newest));
+        }
+        (Screen::History, Action::CycleLanguage) => {
+            if !state.languages.is_empty() {
+                state.language_index = (state.language_index + 1) % state.languages.len();
+                return Some(history_load(state, AttemptCursor::Newest));
+            }
+        }
+        (Screen::History, Action::Back) => {
+            state.history = None;
+            state.screen = Screen::ProblemDetail;
+            state.focus = Focus::Main;
+            // The language may have changed while browsing history.
+            return Some(load_effect(state));
+        }
+        (Screen::Attempt, Action::Up | Action::Down | Action::PageOlder | Action::PageNewer) => {
+            let view = history
+                .attempt
+                .as_mut()
+                .expect("attempt screen keeps its loaded attempt");
+            // The runtime clamps this to the wrapped row count of the visible area.
+            view.scroll = match action {
+                Action::Up => view.scroll.saturating_sub(1),
+                Action::Down => view.scroll.saturating_add(1),
+                Action::PageNewer => view.scroll.saturating_sub(10),
+                _ => view.scroll.saturating_add(10),
+            };
+        }
+        (Screen::Attempt, Action::Back) => {
+            history.attempt = None;
+            state.screen = Screen::History;
+            state.focus = Focus::Main;
+        }
+        _ => {}
+    }
+    Some(Vec::new())
+}
+
 pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
     if state.show_help {
         match &event {
@@ -917,11 +1047,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 match result {
                     Ok(result) => {
                         solve.bounded_output(format!(
-                            "{:?} ({} ms){}\n{}",
-                            result.termination,
-                            result.duration_ms,
-                            if solve.stale { " · STALE" } else { "" },
-                            result.display_output
+                            "{}{}",
+                            if solve.stale { "STALE\n" } else { "" },
+                            crate::attempt::render_report(&result)
                         ));
                         state.status = if solve.stale {
                             "Run complete · stale"
@@ -1060,8 +1188,17 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 }
                 return start_pending_test(state);
             }
-            Event::SolveOpened(_, _) | Event::OpenSet(_) => return Vec::new(),
+            Event::SolveOpened(_, _)
+            | Event::OpenSet(_)
+            | Event::HistoryLoaded(_, _)
+            | Event::AttemptLoaded(_, _) => return Vec::new(),
         }
+    }
+    if matches!(state.screen, Screen::History | Screen::Attempt)
+        && let Event::Command(action) = &event
+        && let Some(effects) = history_command(state, action)
+    {
+        return effects;
     }
     match event {
         Event::Command(Action::Up) if state.focus == Focus::Progress => {
@@ -1088,6 +1225,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .map(|row| row.id);
             }
             Screen::ProblemDetail => state.detail_scroll = state.detail_scroll.saturating_sub(1),
+            Screen::History | Screen::Attempt => unreachable!("history commands handled above"),
             Screen::Solve => unreachable!("solve events handled above"),
         },
         Event::Command(Action::Down) => match state.screen {
@@ -1112,6 +1250,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             Screen::ProblemDetail => {
                 state.detail_scroll = state.detail_scroll.checked_add(1).unwrap_or(MAX_SCROLL);
             }
+            Screen::History | Screen::Attempt => unreachable!("history commands handled above"),
             Screen::Solve => unreachable!("solve events handled above"),
         },
         Event::Command(Action::Open) if state.focus == Focus::Progress => {}
@@ -1153,8 +1292,72 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     language_slug: state.language_slug().unwrap_or("").to_string(),
                 }];
             }
+            Screen::History | Screen::Attempt => unreachable!("history commands handled above"),
             Screen::Solve => unreachable!("solve events handled above"),
         },
+        Event::Command(Action::History) => {
+            if state.screen != Screen::ProblemDetail || state.focus != Focus::Main {
+                return Vec::new();
+            }
+            let Some(detail) = state.data.detail.as_ref() else {
+                state.error = Some("problem detail is unavailable".into());
+                return Vec::new();
+            };
+            state.history = Some(HistoryView {
+                problem_slug: detail.slug.clone(),
+                problem_title: detail.title.clone(),
+                page: None,
+                selected: 0,
+                attempt: None,
+            });
+            state.screen = Screen::History;
+            return history_load(state, AttemptCursor::Newest);
+        }
+        Event::HistoryLoaded(operation, result) => {
+            if state.active_operation != Some(operation) {
+                return Vec::new();
+            }
+            state.active_operation = None;
+            let Some(history) = state.history.as_mut() else {
+                return Vec::new();
+            };
+            match result {
+                Ok(page) => {
+                    state.status = if page.rows.is_empty() {
+                        "No attempts recorded"
+                    } else {
+                        "Ready"
+                    }
+                    .into();
+                    history.page = Some(*page);
+                    history.selected = 0;
+                }
+                Err(error) => {
+                    state.status = "History load failed".into();
+                    state.error = Some(error);
+                }
+            }
+        }
+        Event::AttemptLoaded(operation, result) => {
+            if state.active_operation != Some(operation) {
+                return Vec::new();
+            }
+            state.active_operation = None;
+            let Some(history) = state.history.as_mut() else {
+                return Vec::new();
+            };
+            match result {
+                Ok(record) => {
+                    history.attempt = Some(AttemptView::new(&record));
+                    state.screen = Screen::Attempt;
+                    state.status = "Ready".into();
+                }
+                Err(error) => {
+                    state.status = "Attempt load failed".into();
+                    state.error = Some(error);
+                }
+            }
+        }
         Event::InterviewerFinished(operation, revision, mode, guidance, _) => {
             return vec![Effect::FinalizeInterviewerTurn {
                 operation,
@@ -1192,6 +1395,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     return load_effect(state);
                 }
                 Screen::SetMenu => {}
+                Screen::History | Screen::Attempt => unreachable!("history commands handled above"),
                 Screen::Solve => unreachable!("solve events handled above"),
             }
         }
@@ -1221,7 +1425,9 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             return vec![Effect::ResetInterviewer];
         }
         Event::Command(
-            Action::SaveTest
+            Action::PageOlder
+            | Action::PageNewer
+            | Action::SaveTest
             | Action::Submit
             | Action::Cancel
             | Action::InterviewFocus
@@ -1342,6 +1548,249 @@ mod tests {
             panic!("expected load effect")
         };
         scope
+    }
+
+    fn summary(id: i64) -> crate::attempt::AttemptSummary {
+        crate::attempt::AttemptSummary {
+            id,
+            run_at: "2026-10-12T00:00:00Z".into(),
+            language: "python".into(),
+            result: crate::database::AttemptOutcome::Fail,
+            duration_ms: 5,
+            test_revision: 1,
+            current_revision: true,
+            cases: Some((0, 1)),
+        }
+    }
+
+    fn detail_state() -> AppState {
+        let mut state = state();
+        state.screen = Screen::ProblemDetail;
+        state.selected_set_id = Some("a".into());
+        state.selected_problem_id = Some(1);
+        state.data.detail = Some(crate::app::model::ProblemDetail {
+            id: 1,
+            slug: "two-sum".into(),
+            title: "Two Sum".into(),
+            difficulty: Difficulty::Easy,
+            topic: "Arrays".into(),
+            statement_markdown: String::new(),
+            implementations: Vec::new(),
+        });
+        state
+    }
+
+    fn history_operation(effects: &[Effect]) -> (OperationId, AttemptCursor) {
+        history_operation_for(effects, "python")
+    }
+
+    fn history_operation_for(effects: &[Effect], language: &str) -> (OperationId, AttemptCursor) {
+        let [
+            Effect::LoadHistory {
+                operation,
+                problem_slug,
+                language_slug,
+                cursor,
+            },
+        ] = effects
+        else {
+            panic!("expected one history load");
+        };
+        assert_eq!(
+            (problem_slug.as_str(), language_slug.as_str()),
+            ("two-sum", language)
+        );
+        (*operation, *cursor)
+    }
+
+    #[test]
+    fn history_pages_opens_attempts_and_returns_to_detail() {
+        let mut state = detail_state();
+        let (first, cursor) =
+            history_operation(&reduce(&mut state, Event::Command(Action::History)));
+        assert_eq!(
+            (state.screen, cursor),
+            (Screen::History, AttemptCursor::Newest)
+        );
+        let page = crate::database::AttemptPage {
+            rows: vec![summary(5), summary(3)],
+            has_older: true,
+            has_newer: false,
+        };
+        assert!(reduce(&mut state, Event::HistoryLoaded(first, Ok(Box::new(page)))).is_empty());
+        assert_eq!(state.status, "Ready");
+
+        reduce(&mut state, Event::Command(Action::Down));
+        reduce(&mut state, Event::Command(Action::Down));
+        let effects = reduce(&mut state, Event::Command(Action::Open));
+        let [
+            Effect::LoadAttempt {
+                operation,
+                attempt_id: 3,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected attempt 3 to load, got {} effects", effects.len());
+        };
+        let record = crate::attempt::AttemptRecord {
+            id: 3,
+            run_at: "2026-10-12T00:00:00Z".into(),
+            problem_slug: "two-sum".into(),
+            language: "python".into(),
+            invoked_set: None,
+            result: crate::database::AttemptOutcome::Fail,
+            duration_ms: 5,
+            test_revision: 1,
+            current_revision: true,
+            output: crate::attempt::RecordedOutput::Captured(
+                crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(1),
+                    "line\n".repeat(30).as_str(),
+                )
+                .output,
+            ),
+        };
+        reduce(
+            &mut state,
+            Event::AttemptLoaded(*operation, Ok(Box::new(record))),
+        );
+        assert_eq!(state.screen, Screen::Attempt);
+        let view = state.history.as_ref().unwrap().attempt.as_ref().unwrap();
+        assert!(view.text.starts_with("Attempt 3 · two-sum · python · fail"));
+        assert!(view.text.contains("case 1/1 example-1 · fail · exit 1"));
+        reduce(&mut state, Event::Command(Action::PageOlder));
+        reduce(&mut state, Event::Command(Action::Down));
+        assert_eq!(
+            state
+                .history
+                .as_ref()
+                .unwrap()
+                .attempt
+                .as_ref()
+                .unwrap()
+                .scroll,
+            11
+        );
+        reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(state.screen, Screen::History);
+        assert!(state.history.as_ref().unwrap().attempt.is_none());
+
+        let (older, cursor) =
+            history_operation(&reduce(&mut state, Event::Command(Action::PageOlder)));
+        assert_eq!(cursor, AttemptCursor::Before(3));
+        assert!(reduce(&mut state, Event::Command(Action::PageNewer)).is_empty());
+        assert_eq!(state.status, "No newer attempts");
+        // A superseded page load is ignored.
+        let stale = crate::database::AttemptPage {
+            rows: Vec::new(),
+            has_older: false,
+            has_newer: true,
+        };
+        reduce(
+            &mut state,
+            Event::HistoryLoaded(first, Ok(Box::new(stale.clone()))),
+        );
+        assert_eq!(
+            state
+                .history
+                .as_ref()
+                .unwrap()
+                .page
+                .as_ref()
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        reduce(&mut state, Event::HistoryLoaded(older, Ok(Box::new(stale))));
+        assert_eq!(state.status, "No attempts recorded");
+
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(state.screen, Screen::ProblemDetail);
+        assert!(state.history.is_none());
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Load {
+                problem_id: Some(1),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn history_screens_own_every_key_regardless_of_focus() {
+        let mut state = detail_state();
+        state.languages.push(EnabledLanguage {
+            slug: "rust".into(),
+            display_name: "Rust".into(),
+            runner_path: "rust/run".into(),
+        });
+        let (first, _) = history_operation(&reduce(&mut state, Event::Command(Action::History)));
+        let page = crate::database::AttemptPage {
+            rows: vec![summary(5)],
+            has_older: false,
+            has_newer: false,
+        };
+        reduce(&mut state, Event::HistoryLoaded(first, Ok(Box::new(page))));
+        let effects = reduce(&mut state, Event::Command(Action::Open));
+        let [Effect::LoadAttempt { operation, .. }] = effects.as_slice() else {
+            panic!("expected an attempt load");
+        };
+        let record = crate::attempt::AttemptRecord {
+            id: 5,
+            run_at: "2026-10-12T00:00:00Z".into(),
+            problem_slug: "two-sum".into(),
+            language: "python".into(),
+            invoked_set: None,
+            result: crate::database::AttemptOutcome::Fail,
+            duration_ms: 5,
+            test_revision: 1,
+            current_revision: true,
+            output: crate::attempt::RecordedOutput::PredatesCapture,
+        };
+        reduce(
+            &mut state,
+            Event::AttemptLoaded(*operation, Ok(Box::new(record))),
+        );
+        assert_eq!(state.screen, Screen::Attempt);
+        // Keys that only list screens handle must not reach their arms from Attempt.
+        for action in [
+            Action::Open,
+            Action::History,
+            Action::CycleLanguage,
+            Action::Reload,
+        ] {
+            assert!(reduce(&mut state, Event::Command(action)).is_empty());
+            assert_eq!(state.screen, Screen::Attempt);
+        }
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        assert_eq!(state.focus, Focus::Progress);
+        assert!(reduce(&mut state, Event::Command(Action::Open)).is_empty());
+        reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!((state.screen, state.focus), (Screen::History, Focus::Main));
+
+        reduce(&mut state, Event::Command(Action::NextFocus));
+        let (_, cursor) = history_operation_for(
+            &reduce(&mut state, Event::Command(Action::CycleLanguage)),
+            "rust",
+        );
+        assert_eq!(cursor, AttemptCursor::Newest);
+        assert_eq!(state.language_slug(), Some("rust"));
+        let effects = reduce(&mut state, Event::Command(Action::Back));
+        assert_eq!(
+            (state.screen, state.focus),
+            (Screen::ProblemDetail, Focus::Main)
+        );
+        assert!(matches!(effects.as_slice(), [Effect::Load { .. }]));
+    }
+
+    #[test]
+    fn history_key_only_opens_from_problem_detail() {
+        let mut state = state();
+        assert!(reduce(&mut state, Event::Command(Action::History)).is_empty());
+        assert_eq!(state.screen, Screen::SetMenu);
+        assert!(state.history.is_none());
     }
 
     #[test]
@@ -1629,8 +2078,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "output",
                 )),
             ),
@@ -2111,8 +2560,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     output,
                 )),
             ),
@@ -2179,8 +2628,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2295,8 +2744,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "ignored",
                 )),
             ),
@@ -2309,8 +2758,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2367,8 +2816,8 @@ mod tests {
             revision + 1,
             RunIntent::Test,
             Some("wrong".into()),
-            Ok(crate::runner::ExecutionResult::test_result(
-                crate::runner::Termination::Exited(0),
+            Ok(crate::attempt::AttemptReport::test_report(
+                crate::attempt::Termination::Exited(0),
                 "wrong",
             )),
         );
@@ -2382,8 +2831,8 @@ mod tests {
             revision,
             RunIntent::Submit,
             Some("wrong".into()),
-            Ok(crate::runner::ExecutionResult::test_result(
-                crate::runner::Termination::Exited(0),
+            Ok(crate::attempt::AttemptReport::test_report(
+                crate::attempt::Termination::Exited(0),
                 "wrong",
             )),
         );
@@ -2466,8 +2915,8 @@ mod tests {
                 revision,
                 RunIntent::Test,
                 Some(source),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2512,8 +2961,8 @@ mod tests {
                 first_revision,
                 RunIntent::Test,
                 Some("print(1)".into()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),
@@ -2732,8 +3181,8 @@ mod tests {
                 revision,
                 RunIntent::Submit,
                 Some(submitted_source.clone()),
-                Ok(crate::runner::ExecutionResult::test_result(
-                    crate::runner::Termination::Exited(0),
+                Ok(crate::attempt::AttemptReport::test_report(
+                    crate::attempt::Termination::Exited(0),
                     "PASS",
                 )),
             ),

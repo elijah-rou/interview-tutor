@@ -11,6 +11,7 @@ pub const MAX_ROWS: usize = 10_000;
 pub const MAX_RENDERED_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_SCROLL: u16 = u16::MAX;
 pub const MAX_RUN_OUTPUT_BYTES: usize = 256 * 1024;
+pub const HISTORY_PAGE_ROWS: usize = 100;
 pub const MAX_COMPOSER_BYTES: usize = 16 * 1024;
 pub const MAX_VISIBLE_TRANSCRIPT_ENTRIES: usize = 512;
 pub const MAX_VISIBLE_TRANSCRIPT_BYTES: usize = 1024 * 1024;
@@ -165,7 +166,55 @@ pub enum Screen {
     SetMenu,
     ProblemList,
     ProblemDetail,
+    History,
+    Attempt,
     Solve,
+}
+
+/// Recorded attempts of one problem in the selected language, one keyset page at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryView {
+    pub problem_slug: String,
+    pub problem_title: String,
+    /// `None` until the first page loads.
+    pub page: Option<crate::database::AttemptPage>,
+    pub selected: usize,
+    pub attempt: Option<AttemptView>,
+}
+
+impl HistoryView {
+    pub fn selected_attempt_id(&self) -> Option<i64> {
+        self.page
+            .as_ref()
+            .and_then(|page| page.rows.get(self.selected))
+            .map(|row| row.id)
+    }
+}
+
+/// One stored attempt, rendered once on load. Its size is bounded by
+/// `attempt::MAX_RENDERED_ATTEMPT_BYTES`, so every stored case stays visible.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptView {
+    pub id: i64,
+    pub text: String,
+    /// First visible wrapped row; the runtime clamps it to the rendered area.
+    pub scroll: usize,
+}
+
+impl AttemptView {
+    pub fn new(record: &crate::attempt::AttemptRecord) -> Self {
+        let text = crate::attempt::render_record(record);
+        assert!(text.len() <= crate::attempt::MAX_RENDERED_ATTEMPT_BYTES);
+        Self {
+            id: record.id,
+            text,
+            scroll: 0,
+        }
+    }
+
+    pub fn clamp_scroll(&mut self, maximum: usize) {
+        self.scroll = self.scroll.min(maximum);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,6 +487,7 @@ pub struct AppState {
     pub progress_scroll: u16,
     pub data: AppData,
     pub solve: Option<SolveSession>,
+    pub history: Option<HistoryView>,
     pub active_operation: Option<OperationId>,
     pub next_operation: u64,
     pub status: String,
@@ -473,6 +523,7 @@ impl AppState {
             progress_scroll: 0,
             data: AppData::empty(),
             solve: None,
+            history: None,
             active_operation: None,
             next_operation: 1,
             status: "Ready".to_string(),

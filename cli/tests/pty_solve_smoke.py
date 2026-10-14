@@ -192,7 +192,13 @@ def main() -> int:
         shutil.copytree(repository_root / "python", root / "python")
         shutil.copytree(repository_root / "rust", root / "rust")
         fake_runner = root / "python" / "run"
-        fake_runner.write_text("#!/bin/sh\nif [ \"${1:-}\" = --list ]; then printf 'smoke-problem\\n'; else printf 'PASS\\n'; fi\n")
+        fake_runner.write_text(
+            "#!/bin/sh\ncase \"${1:-}\" in\n"
+            "  --list) printf 'smoke-problem\\n' ;;\n"
+            "  --cases) printf 'main\\n' ;;\n"
+            "  *) printf 'PASS\\n' ;;\n"
+            "esac\n"
+        )
         fake_runner.chmod(0o755)
         solution = root / "python" / "smoke.py"
         recorded_source = "print('initial')\n"

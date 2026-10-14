@@ -11,11 +11,16 @@ The set list, problem list, and detail screens use:
 - Esc or Backspace: go back
 - `l`: cycle the enabled language
 - `r`: reload catalog/progress data
+- `a`: from problem detail, open Attempts for that problem in the selected language
 - Tab/Shift-Tab: cycle the browser's main and progress focus
 - `?`: open help; Esc closes it
 - `q`: quit outside solve mode
 
 The status line reports the selected language and current operation. Errors remain visible rather than silently changing screens.
+
+## Attempt history
+
+Attempts lists the problem's recorded attempts newest first, 100 per page, with run time, result, passed/total cases, duration, and whether the attempt's test revision is current. `j`/`k` move, PageDown/PageUp load older/newer pages (the title shows `PgDn older` or `PgUp newer` when they exist), `l` cycles the language, `r` reloads, Enter opens the selected attempt, and Esc returns to problem detail. The Attempt screen shows the header and every case's result with its stdout and stderr; `j`/`k` scroll by row, PageDown/PageUp by ten, and Esc returns to Attempts. Attempts recorded before output capture show `output: not recorded`. Test runs (`Space t`) are never listed because they record nothing.
 
 ## Solve panes and keys
 
@@ -57,7 +62,7 @@ F9, `Space s`, and `:TutorSubmit` save, run, then record exactly one attempt aft
 
 Edits are allowed during any run. Revisions increase monotonically across accepted Neovim source snapshots, while dirty state compares exact bytes against the last saved bytes. Source-consuming Tutor mappings are delivered after preceding Neovim input and bind the run to that accepted snapshot.
 
-Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, interviewer errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
+Output shows one line per case (`case 1/1 scenario-1 · fail · exit 1 · 58 ms`), that case's stdout and stderr indented below it, and a summary line such as `fail · 0/1 cases passed · 676 ms`. Output is bounded and sanitized. `STALE` appears only when displayed output belongs to an older editor revision; edits before the first run are not stale. Save errors, runner errors, interviewer errors, and status such as testing, submitting, cancellation, or stale completion stay visible in the status/error and Output panes.
 
 ## Layout
 
@@ -71,7 +76,7 @@ Resizing preserves the editor buffer, cursor state, operations, focused pane, ea
 
 Source loading and saving are Linux-specific. The application anchors the canonical repository root and target parent with directory descriptors, then uses `openat2` beneath/no-symlink/no-magic-link resolution. Only the catalog-planned regular file is accepted. Root escapes, symlinks, FIFOs, invalid UTF-8, oversized files, and oversized documents are rejected. Saves create an exclusive same-directory temporary file, preserve mode through file descriptors, sync data, rename within the anchored parent, then sync the parent directory.
 
-The local runner starts one direct child in a new process group with no shell. Defaults are a 30-second wall timeout, 250-ms TERM grace, 256-KiB displayed output, 8-KiB pipe reads, and 64 queued events. Timeout, cancellation, and cleanup failures send TERM and then KILL to the group; the direct child is reaped and reader threads have bounded drains and joins. A descendant that deliberately calls `setsid` escapes process-group containment and may continue after its pipes are closed. The PTY fixture records, kills, and reaps that escaped PID; this is a tested boundary, not a containment claim.
+The local runner starts one direct child in a new process group with no shell. Defaults are a 30-second wall timeout shared by setup and every case, 250-ms TERM grace, 8 KiB retained per stream per step, 8-KiB pipe reads, and 64 queued events. Timeout, cancellation, and cleanup failures send TERM and then KILL to the group; the direct child is reaped and reader threads have bounded drains and joins. A descendant that deliberately calls `setsid` escapes process-group containment and may continue after its pipes are closed. The PTY fixture records, kills, and reaps that escaped PID; this is a tested boundary, not a containment claim.
 
 ## Interviewer interaction
 

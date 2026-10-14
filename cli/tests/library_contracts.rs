@@ -1,3 +1,7 @@
+use practice_cli::attempt::{
+    AttemptReport, CapturedText, CaseEntry, CaseName, CaseRun, NotRunReason, RecordedOutput,
+    StepRun, Termination, TestOutput,
+};
 use practice_cli::database::{self, AttemptOutcome, Difficulty, NewProblem, ProgressScope};
 use practice_cli::runner;
 use rusqlite::params;
@@ -8,6 +12,27 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+/// One passing setup step and a single case that ended with `exit_code`.
+fn report(exit_code: i32) -> AttemptReport {
+    let text = |value: &str| CapturedText::complete(value.to_string()).unwrap();
+    let setup = StepRun {
+        termination: Termination::Exited(0),
+        duration_ms: 0,
+        stdout: text("main\n"),
+        stderr: text(""),
+    };
+    let case = CaseEntry {
+        name: CaseName::parse("main").unwrap(),
+        run: CaseRun::Ran(StepRun {
+            termination: Termination::Exited(exit_code),
+            duration_ms: 1,
+            stdout: text(""),
+            stderr: text(""),
+        }),
+    };
+    AttemptReport::new(TestOutput::new(setup, vec![case]).unwrap(), 1, 0)
+}
 
 struct Fixture {
     root: PathBuf,
@@ -249,33 +274,20 @@ fn progress_summary_honors_scope_language_revision_and_outcome() {
         &connection,
         "shipped",
         "python",
-        AttemptOutcome::Fail,
-        1,
-        Some(1),
         Some("shipped-set"),
+        &report(1),
     )
     .unwrap();
     database::record_attempt(
         &connection,
         "shipped",
         "rust",
-        AttemptOutcome::Pass,
-        1,
-        Some(0),
         Some("alternate"),
+        &report(0),
     )
     .unwrap();
     for problem in ["second", "custom"] {
-        database::record_attempt(
-            &connection,
-            problem,
-            "python",
-            AttemptOutcome::Pass,
-            1,
-            Some(0),
-            None,
-        )
-        .unwrap();
+        database::record_attempt(&connection, problem, "python", None, &report(0)).unwrap();
     }
 
     let set_any =
@@ -381,4 +393,172 @@ fn closed_persisted_enums_reject_unknown_values() {
         .unwrap();
     let error = database::resolve_problem(&connection, "shipped", None).unwrap_err();
     assert!(error.contains("unknown persisted difficulty: Extreme"));
+}
+
+#[test]
+fn v2_database_migrates_to_v3_keeping_attempts_without_output() {
+    let fixture = Fixture::new();
+    {
+        let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+        // Recreate the v2 shape: no step table, no id index, version 2.
+        connection
+            .execute_batch(
+                "DROP TABLE attempt_steps;
+                 DROP INDEX attempts_problem_language_id;
+                 PRAGMA user_version = 2;
+                 INSERT INTO attempts(problem_id, language_id, result, test_revision, duration_ms, exit_code, run_at)
+                 SELECT p.id, l.id, 'fail', 2, 7, 1, '2025-01-01T00:00:00Z'
+                 FROM problems AS p, languages AS l WHERE p.slug = 'shipped' AND l.slug = 'python';",
+            )
+            .unwrap();
+    }
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let legacy_id: i64 = connection
+        .query_row("SELECT id FROM attempts", [], |row| row.get(0))
+        .unwrap();
+    let legacy = database::get_attempt(&connection, legacy_id).unwrap();
+    assert_eq!(legacy.result, AttemptOutcome::Fail);
+    assert_eq!(legacy.output, RecordedOutput::PredatesCapture);
+    assert!(
+        practice_cli::attempt::render_record(&legacy)
+            .contains("output: not recorded (attempt predates output capture)")
+    );
+
+    let recorded =
+        database::record_attempt(&connection, "shipped", "python", None, &report(0)).unwrap();
+    let page = database::list_attempts(
+        &connection,
+        "shipped",
+        Some("python"),
+        database::AttemptCursor::Newest,
+        10,
+    )
+    .unwrap();
+    let tallies: Vec<_> = page.rows.iter().map(|row| (row.id, row.cases)).collect();
+    assert_eq!(tallies, [(recorded, Some((1, 1))), (legacy_id, None)]);
+    drop(connection);
+
+    // Reopening a v3 database is a no-op for existing rows.
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let steps: i64 = connection
+        .query_row("SELECT COUNT(*) FROM attempt_steps", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(steps, 2);
+    connection.execute_batch("PRAGMA user_version = 4").unwrap();
+    drop(connection);
+    let error = database::open_database(&fixture.database, &fixture.root).unwrap_err();
+    assert!(error.contains("unsupported database schema version: 4"));
+}
+
+#[test]
+fn stored_steps_reject_out_of_bounds_text() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let attempt =
+        database::record_attempt(&connection, "shipped", "python", None, &report(0)).unwrap();
+    let oversized = connection.execute(
+        "UPDATE attempt_steps SET stdout_head = ? WHERE attempt_id = ? AND ordinal = 1",
+        params!["x".repeat(8193), attempt],
+    );
+    assert!(oversized.is_err());
+    let tail_without_omission = connection.execute(
+        "UPDATE attempt_steps SET stdout_tail = 'tail' WHERE attempt_id = ? AND ordinal = 1",
+        params![attempt],
+    );
+    assert!(tail_without_omission.is_err());
+}
+
+#[test]
+fn every_step_kind_round_trips_and_corrupt_steps_fail_loudly() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let text = |value: &str| CapturedText::complete(value.to_string()).unwrap();
+    let ran = |termination: Termination, stderr: CapturedText| {
+        CaseRun::Ran(StepRun {
+            termination,
+            duration_ms: 3,
+            stdout: text("out\n"),
+            stderr,
+        })
+    };
+    let case = |name: &str, run: CaseRun| CaseEntry {
+        name: CaseName::parse(name).unwrap(),
+        run,
+    };
+    let setup = StepRun {
+        termination: Termination::Exited(0),
+        duration_ms: 1,
+        stdout: text("a\nb\nc\nd\ne\nf\n"),
+        stderr: text("warning\n"),
+    };
+    let truncated = CapturedText::truncated("h".repeat(4096), 7, "t".repeat(4096)).unwrap();
+    let output = TestOutput::new(
+        setup,
+        vec![
+            case("a", ran(Termination::Signalled(9), truncated)),
+            case("b", ran(Termination::TimedOut, text(""))),
+            case("c", ran(Termination::Cancelled, text(""))),
+            case("d", ran(Termination::Exited(1), text("fail\n"))),
+            case("e", CaseRun::NotRun(NotRunReason::Cancelled)),
+            case("f", CaseRun::NotRun(NotRunReason::DeadlineExceeded)),
+        ],
+    )
+    .unwrap();
+    let report = AttemptReport::new(output.clone(), 9, 0);
+    assert_eq!(report.outcome(), AttemptOutcome::Cancelled);
+    let attempt =
+        database::record_attempt(&connection, "shipped", "python", None, &report).unwrap();
+    let record = database::get_attempt(&connection, attempt).unwrap();
+    assert_eq!(record.result, AttemptOutcome::Cancelled);
+    assert_eq!(record.output, RecordedOutput::Captured(output));
+
+    // Truncated halves are bounded separately, as the domain type requires.
+    let oversized_half = connection.execute(
+        "UPDATE attempt_steps SET stdout_head = ?, stdout_tail = 'x', stdout_omitted_bytes = 5 \
+         WHERE attempt_id = ? AND ordinal = 4",
+        params!["x".repeat(5000), attempt],
+    );
+    assert!(oversized_half.is_err());
+
+    let corruptions = [
+        (
+            "DELETE FROM attempt_steps WHERE attempt_id = ? AND ordinal = 3",
+            "non-contiguous",
+        ),
+        (
+            "DELETE FROM attempt_steps WHERE attempt_id = ? AND ordinal = 0",
+            "non-contiguous",
+        ),
+    ];
+    for (statement, expected) in corruptions {
+        let fixture = Fixture::new();
+        let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+        let attempt =
+            database::record_attempt(&connection, "shipped", "python", None, &report).unwrap();
+        connection.execute(statement, params![attempt]).unwrap();
+        let error = database::get_attempt(&connection, attempt).unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn empty_history_pages_still_report_attempts_beyond_their_cursor() {
+    let fixture = Fixture::new();
+    let connection = database::open_database(&fixture.database, &fixture.root).unwrap();
+    let only =
+        database::record_attempt(&connection, "shipped", "python", None, &report(0)).unwrap();
+    let list = |cursor| {
+        database::list_attempts(&connection, "shipped", Some("python"), cursor, 10).unwrap()
+    };
+    let before = list(database::AttemptCursor::Before(only));
+    assert!(before.rows.is_empty() && before.has_newer && !before.has_older);
+    let after = list(database::AttemptCursor::After(only));
+    assert!(after.rows.is_empty() && after.has_older && !after.has_newer);
+    let newest = list(database::AttemptCursor::Newest);
+    assert_eq!(newest.rows.len(), 1);
+    assert!(!newest.has_older && !newest.has_newer);
 }

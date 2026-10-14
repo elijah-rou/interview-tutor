@@ -22,6 +22,6 @@ Codex compatibility retains its empty cwd, bounded environment, ephemeral thread
 
 ## Local solution privacy
 
-Local catalog browsing, source editing, runner execution, SQLite progress, and attempts remain on the machine. Files are loaded/saved only at the catalog-planned regular source beneath the canonical project root. A local runner or custom adapter is executable code and should be reviewed before use.
+Local catalog browsing, source editing, runner execution, SQLite progress, and attempts remain on the machine. Each recorded attempt stores up to 8 KiB per stream per test case of whatever the solution printed in the local progress database, which keeps its default file permissions; avoid printing secrets from solutions. Files are loaded/saved only at the catalog-planned regular source beneath the canonical project root. A local runner or custom adapter is executable code and should be reviewed before use.
 
 After explicit backend-aware disclosure consent, the selected statement, current source, bounded latest test output, bounded memory-only transcript, and question are supplied to the configured process and may be sent to Pi's selected model provider or OpenAI through Codex under the user's account controls. Interview Tutor writes no transcript log and clears transcript state on reset, solve exit, and process exit. See [interviewer privacy details](docs/codex-compatibility.md) for exact transport, outbound, and readable-path boundaries.

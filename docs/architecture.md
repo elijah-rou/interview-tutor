@@ -8,13 +8,13 @@ Interview Tutor separates a small control plane from bounded local data and proc
 2. **SQLite repository:** `.turso/progress.db` by default stores global/custom problems, set membership, languages, implementations, attempts, and derived progress inputs. It is authoritative for custom CRUD. Shipped rows are managed/read-only through local CRUD; a later catalog revision may retire omitted managed rows but never deletes custom resources or attempt history.
 3. **Execution planning:** `database::resolve_problem` and `runner::plan_execution` turn stable language/problem/set selectors into an explicit project root, runner, source path, and invoked-set context. Neither the TUI nor the root launchers infer an adapter from display text.
 4. **Source/editor:** `source` performs Linux-anchored load/save of exactly the planned regular file. `editor` owns bounded Unicode-grapheme text, modes, revision/dirty state, and highlighting.
-5. **Local runner:** `runner` executes the selected language adapter without a shell, sanitizes/bounds output, controls the process group, and returns one authoritative result. Recording is a separate explicit database operation.
+5. **Local runner:** `runner` executes the selected language adapter without a shell: one setup step that lists the problem's cases, then one process per case. It sanitizes and bounds each stream, controls each process group, and returns one authoritative `AttemptReport`. Recording is a separate explicit database operation.
 6. **Application/TUI:** `app` is the state/reducer/effect boundary. `tui` owns terminal entry/restoration, input/rendering, the repository connection on the main thread, and bounded Neovim, runner, and interviewer workers.
 7. **Interviewer boundary:** `interviewer` owns backend-neutral prompts, response validation, and the memory-only transcript. Pi is the default transport; `pi` runs a fresh no-session RPC process per turn, while `codex` is an explicit exact-version app-server compatibility transport. Neither can alter runner results or progress directly.
 
 ## Catalog and database model
 
-SQLite schema v2 uses durable integer keys internally:
+SQLite schema v3 uses durable integer keys internally:
 
 - `problems`: global metadata, local statement Markdown, test revision, managed/archive state
 - `problem_sets`: named collections
@@ -22,10 +22,19 @@ SQLite schema v2 uses durable integer keys internally:
 - `languages`: installed runner commands
 - `problem_implementations`: per-problem source paths and adapter availability
 - `attempts`: problem/language outcome and optional invoked-set context
+- `attempt_steps`: per attempt, the setup step (ordinal 0) and each case in run order, with termination, duration, and bounded stdout/stderr
 
 Completion is derived from a passing attempt whose revision matches the problem's current test revision. It is not stored per set. Removing/reordering membership cannot remove learning history. Retiring a managed set clears only its optional attempt context through `ON DELETE SET NULL`.
 
-Database open validates the catalog before use, enables a 5-second SQLite busy timeout and WAL journaling, performs schema migration/seed reconciliation transactionally, re-enables foreign keys, and verifies them. A TUI submit opens a separate repository connection only after execution returns. Each accepted submit records one attempt atomically; signal finalization may update that exact attempt to Cancelled before completion is published.
+Database open validates the catalog before use, enables a 5-second SQLite busy timeout and WAL journaling, performs schema migration/seed reconciliation transactionally, re-enables foreign keys, and verifies them. A TUI submit opens a separate repository connection only after execution returns. Each accepted submit records one attempt and all of its steps in one transaction; signal finalization may update that exact attempt's outcome to Cancelled before completion is published, leaving its steps as they ran.
+
+## Judge protocol and attempt output
+
+A language runner implements three invocations. `RUNNER --list` prints adapter slugs. `RUNNER --cases SLUG` is the setup step: it prints 1 to 15 case names, one per line, matching `[a-z0-9][a-z0-9-]{0,63}`, and prints nothing else to stdout. Python lists names from its registry without importing the solution; Rust builds the judge here, so compiler diagnostics land in setup stderr. `RUNNER --problem SLUG --case NAME` runs exactly one case; its stdout and stderr are free-form and its exit code is the case result under the same mapping as before (0 pass, 2 error, other exit fail). Each problem currently declares one case: `example-1` for a `SIMPLE_CASES` tuple and `scenario-1` for a custom Python test or a Rust `run_case`. Splitting a scenario into more cases is test content work and bumps `test_revision` only when assertions change.
+
+`runner::execute` runs setup and then every case in order against one wall deadline. A failing case does not stop later cases. After cancellation or the deadline, the remaining cases are recorded as not run. A setup step that fails is recorded with its output and no cases; a setup step that exits 0 with an invalid case list is a preflight error and records nothing. The attempt outcome folds the steps (cancelled over error over fail over pass) and is stored in `attempts.result`; the exit code is that of the first step with the folded outcome.
+
+An attempt with no `attempt_steps` rows predates schema v3 and reads as "output not recorded". Every newer attempt has at least its setup row. `practice attempts list PROBLEM` and `practice attempts show ID` read history; the TUI History and Attempt screens read the same queries on the main-thread connection. Program output is now durable local data in the progress database; it stays on the machine and is never sent to an interviewer.
 
 ## Control plane and data plane
 
@@ -47,9 +56,9 @@ Worker events carry operation/revision/role/guidance identity. A selected-backen
 
 Catalog/TUI queries are capped at 10,000 rows. Statements accept at most 1,000,000 characters and rendered Markdown at most 100,000 characters. The editor accepts at most 1 MiB, 100,000 lines, 32 undo snapshots, and a 256-byte command. TUI local output is capped at 256 KiB and the composer at 16 KiB.
 
-The local executor defaults to a 30-second wall timeout, 250-ms TERM grace, 256-KiB display cap, 8-KiB reads, and 64 reader/progress events. Configurable limits are validated: wall time 10 ms to 1 hour, TERM grace at most 10 seconds, display output 64 bytes to 16 MiB, reads 256 bytes to 64 KiB, and event capacity at most 1024.
+The local executor defaults to a 30-second wall timeout shared by every step of an attempt, 250-ms TERM grace, 8-KiB reads, and 64 reader/progress events. Each step retains at most 8 KiB of sanitized text per stream; an attempt has at most 16 steps (setup plus 15 cases), so its stored text stays within 256 KiB. Discovery retains up to 64 KiB per stream. Configurable limits are validated: wall time 10 ms to 1 hour, TERM grace at most 10 seconds, discovery output 64 bytes to 16 MiB, reads 256 bytes to 64 KiB, and event capacity at most 1024.
 
-Persistent per-stream VTE parsers decode arbitrary UTF-8 chunk boundaries and remove CSI, OSC, and dangerous controls while retaining newlines/tabs. Sanitized prefix/tail retention emits one deterministic omission marker. The final UTF-8 display never exceeds its cap; raw accounting reports exact omitted bytes. Normal execution retains at most 1.5 times the display cap in sanitized text. Discovery can retain separate stdout/stderr and has a 4.5-times aggregate maximum; it parses stdout only and rejects truncation.
+Persistent per-stream VTE parsers decode arbitrary UTF-8 chunk boundaries and remove CSI, OSC, and dangerous controls while retaining newlines/tabs. Each stream keeps its first bytes and a rolling tail. A stream that exceeds its cap is stored as a 4-KiB head, a 4-KiB tail, and the exact count of omitted sanitized bytes; the omission is a stored field, never a marker inside the text, and renderers print one omission line. Retention never exceeds 1.5 times the cap per stream. Discovery parses stdout only and rejects truncation.
 
 Codex bounds are a 10-second version probe/startup, 120-second turn, 2-second interrupt/shutdown acknowledgement, 1-second kill/reap, 250-ms reader drain, 64-KiB version output, 1-MiB stderr ring, 2-MiB protocol line, 64-KiB assistant response, 16-KiB question, 128 model-context transcript entries, and 256-KiB model-context transcript. The separate display history retains at most 512 messages and 1 MiB, reports omitted earlier messages, and is never added to model context. TUI prompt output includes only the most recent 16 KiB. Hints stop at three per source revision.
 
