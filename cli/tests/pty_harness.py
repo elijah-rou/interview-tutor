@@ -106,7 +106,15 @@ class CursorRequest(NamedTuple):
 
 
 class Screen:
-    """Enough VT state for crossterm/ratatui marker and cursor assertions."""
+    """Enough VT state for crossterm/ratatui marker and cursor assertions.
+
+    A resize opens a transient: the application may still be writing a frame it
+    sized before the resize, and ratatui ends that transient by clearing the whole
+    display (ED 2) on its first draw at the new size. Until that clear, a cursor
+    request that fits the pre-resize size is held as `stale_cursor_request`; the
+    clear supersedes it, as a real terminal's repaint would. A held request that no
+    clear ever supersedes still counts as a violation.
+    """
 
     def __init__(self, columns: int, rows: int) -> None:
         assert columns > 0
@@ -121,15 +129,30 @@ class Screen:
         self.osc_event_count = 0
         self.cursor_requests: deque[CursorRequest] = deque(maxlen=MAX_CURSOR_REQUESTS)
         self.invalid_cursor_request: CursorRequest | None = None
+        self.stale_cursor_request: CursorRequest | None = None
+        self.size_before_resize: tuple[int, int] | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._state = "text"
         self._csi = ""
         self._osc = ""
         self._osc_overflow = False
 
+    @property
+    def cursor_violation(self) -> CursorRequest | None:
+        """The first invalid request, else a stale one no full clear superseded."""
+        if self.invalid_cursor_request is not None:
+            return self.invalid_cursor_request
+        return self.stale_cursor_request
+
     def resize(self, columns: int, rows: int) -> None:
         assert columns > 0
         assert rows > 0
+        assert self.size_before_resize is None, (
+            "the previous resize has not been cleared by a repaint; with two "
+            "resizes outstanding a clear cannot be attributed to either"
+        )
+        if (columns, rows) != (self.columns, self.rows):
+            self.size_before_resize = (self.columns, self.rows)
         resized = [[" " for _ in range(columns)] for _ in range(rows)]
         for row in range(min(rows, self.rows)):
             for column in range(min(columns, self.columns)):
@@ -230,9 +253,15 @@ class Screen:
             rows=self.rows,
         )
         self.cursor_requests.append(request)
-        if self.invalid_cursor_request is None and not (
-            0 <= x < self.columns and 0 <= y < self.rows
-        ):
+        if 0 <= x < self.columns and 0 <= y < self.rows:
+            return
+        if self.size_before_resize is not None:
+            old_columns, old_rows = self.size_before_resize
+            if 0 <= x < old_columns and 0 <= y < old_rows:
+                if self.stale_cursor_request is None:
+                    self.stale_cursor_request = request
+                return
+        if self.invalid_cursor_request is None:
             self.invalid_cursor_request = request
 
     def _apply_csi(self, sequence: str) -> None:
@@ -273,6 +302,9 @@ class Screen:
             self._request_cursor(self.x, requested_y, sequence)
             self.y = min(self.rows - 1, requested_y)
         elif final == "J":
+            if first == 2:
+                self.size_before_resize = None
+                self.stale_cursor_request = None
             if first in {2, 3}:
                 self.cells = [
                     [" " for _ in range(self.columns)] for _ in range(self.rows)
@@ -463,6 +495,10 @@ class PtySession:
     def resize(self, columns: int, rows: int) -> None:
         assert columns > 0
         assert rows > 0
+        self.wait_predicate(
+            "full clear repainting after the previous resize",
+            lambda: self.screen.size_before_resize is None,
+        )
         self.screen.resize(columns, rows)
         fcntl.ioctl(
             self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0)
@@ -472,8 +508,8 @@ class PtySession:
     def settle(self, debounce: float = 0.075) -> None:
         assert 0 < debounce <= 0.1
         end = min(self.deadline, time.monotonic() + debounce)
-        while time.monotonic() < end:
-            self.drain(min(POLL_SECONDS, end - time.monotonic()))
+        while (remaining := end - time.monotonic()) > 0:
+            self.drain(min(POLL_SECONDS, remaining))
 
     def wait_exit(self, expected_status: int, timeout: float | None = None) -> float:
         deadline = (
