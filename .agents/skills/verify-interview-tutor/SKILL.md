@@ -96,13 +96,13 @@ A change is text-only only when every changed path is in this list:
 - the body of this `SKILL.md`, below its frontmatter;
 - `.agents/learning/sessions/*.json`;
 - Markdown files under `docs/`;
-- comment lines in this skill's shell scripts under `scripts/`, other than line 1.
+- standalone comment lines in this skill's shell scripts under `scripts/`, other than line 1.
 
 Anything else is not text-only, including this file's frontmatter, `features/`, HTML, the Dockerfile, `.gitignore`, and comments in any other source file. Drive the features such a change touches. For a text-only change, the live check is:
 
-1. Run `git diff --name-only <base> HEAD` and confirm every path is in the list above.
+1. Take the merge base (`git merge-base origin/main HEAD`) as `<base>`. Run `git diff --name-only <base> HEAD`, and confirm every path is in this list as it reads at the base (`git show <base>:.agents/skills/verify-interview-tutor/SKILL.md`). If the base has no such list, the change is not text-only. A change to this subsection is never text-only.
 2. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
-3. For each changed shell script, run `bash -n`. Then confirm with `git diff -U0 <base> HEAD -- <script>` that every removed and every added line is a comment, that line 1 is unchanged, and that no changed line falls inside a heredoc.
+3. For each changed shell script, run `bash -n`, then read the `<base>` and head files around every changed line, not just the diff. Every removed and every added line must be a comment. Line 1 must be unchanged. The line before each changed line must not end in a backslash. No changed line may sit inside a heredoc or a multi-line quoted string.
 4. Parse each changed JSON file.
 
 Write the evidence to a file outside the repository and pass it to `agentic verify record --evidence`. Record the verdict as `unit-test-verified`, and say in the evidence that agent behavior under the new text was not observed.
