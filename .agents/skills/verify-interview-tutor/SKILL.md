@@ -91,7 +91,7 @@ For an unattended full pass, `all` runs launch, doctor, the five mapped features
 
 ### Changes only to text
 
-A change is text-only only when every changed path is in this list:
+Run this check as it reads at the merge base, not at the head: run `git fetch origin`, take `git merge-base origin/main HEAD` as `<base>`, and read and apply this whole subsection from `git show <base>:.agents/skills/verify-interview-tutor/SKILL.md`. If the base has no such subsection, the change is not text-only. A change is text-only only when every changed path is in this list:
 
 - the body of this `SKILL.md`, below its frontmatter;
 - `.agents/learning/sessions/*.json`;
@@ -100,7 +100,7 @@ A change is text-only only when every changed path is in this list:
 
 Anything else is not text-only, including this file's frontmatter, `features/`, HTML, the Dockerfile, `.gitignore`, and comments in any other source file. Drive the features such a change touches. For a text-only change, the live check is:
 
-1. Take the merge base (`git merge-base origin/main HEAD`) as `<base>`. Run `git diff --name-only <base> HEAD`, and confirm every path is in this list as it reads at the base (`git show <base>:.agents/skills/verify-interview-tutor/SKILL.md`). If the base has no such list, the change is not text-only. A change to this subsection is never text-only.
+1. Run `git diff --name-only <base> HEAD`, and confirm every path is in the list. A change that adds, removes, or alters text anywhere in this `SKILL.md` about which changes are text-only or what verdict they get, including this subsection and its heading, is never text-only.
 2. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
 3. For each changed shell script, run `bash -n`, then read the `<base>` and head files around every changed line, not just the diff. Every removed and every added line must be a comment. Line 1 must be unchanged. The line before each changed line must not end in a backslash. No changed line may sit inside a heredoc or a multi-line quoted string.
 4. Parse each changed JSON file.
