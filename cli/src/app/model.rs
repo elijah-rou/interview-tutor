@@ -2,7 +2,7 @@ use super::effects::RunIntent;
 use crate::database::{
     Difficulty, EnabledLanguage, MAX_STATEMENT_LENGTH, ProblemImplementation, ProgressSummary,
 };
-use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES};
+use crate::editor::{EditorDocument, MAX_DOCUMENT_BYTES, Mode};
 use crate::interviewer::{GuidanceMode, Mode as InterviewerMode};
 use crate::runner::{CancellationToken, ExecutionPlan};
 use std::sync::Arc;
@@ -492,6 +492,60 @@ impl AppState {
 
     pub fn disable_interviewer(&mut self) {
         self.interviewer.disable();
+    }
+
+    /// Keys that leave a failed Solve editor and reopen its problem with a fresh Neovim from the
+    /// current focus. After a failure, Tab always cycles panes, the host leader works in
+    /// accessory panes and in a Normal-mode Editor, and a focused composer captures Space.
+    pub fn neovim_restart_step(&self) -> &'static str {
+        const FROM_LEADER: &str = "press Space b, then Enter twice to restart Neovim";
+        let Some(solve) = self.solve.as_ref() else {
+            return FROM_LEADER;
+        };
+        match solve.pane {
+            SolvePane::Editor if solve.editor.mode != Mode::Normal => {
+                "press Tab, then Space b, then Enter twice to restart Neovim"
+            }
+            SolvePane::Interview if self.interviewer.composer_focused => {
+                "press Esc, then Space b, then Enter twice to restart Neovim"
+            }
+            SolvePane::Editor | SolvePane::Problem | SolvePane::Output | SolvePane::Interview => {
+                FROM_LEADER
+            }
+        }
+    }
+
+    /// `press <keys>`, preceded by the key that makes the host Space leader reachable from the
+    /// current focus: Neovim and the composer receive Space as text outside Editor Normal mode.
+    pub fn leader_step(&self, keys: &str) -> String {
+        let prefix = match self.solve.as_ref() {
+            Some(solve) if solve.pane == SolvePane::Editor && solve.editor.mode != Mode::Normal => {
+                if solve.editor_status == EditorRuntimeStatus::Failed {
+                    "Tab, then "
+                } else {
+                    "Esc, then "
+                }
+            }
+            Some(solve)
+                if solve.pane == SolvePane::Interview && self.interviewer.composer_focused =>
+            {
+                "Esc, then "
+            }
+            _ => "",
+        };
+        format!("press {prefix}{keys}")
+    }
+
+    /// Keys that reconnect a disconnected Interviewer: `i` outside the Editor focuses the
+    /// Interview composer and reconnects, unless the composer already has focus.
+    pub fn interviewer_reconnect_step(&self) -> &'static str {
+        if self.screen != Screen::Solve {
+            "open a problem, then press i outside the Editor to reconnect"
+        } else if self.interviewer.composer_focused {
+            "press Esc, then i to reconnect"
+        } else {
+            "press i outside the Editor to reconnect"
+        }
     }
 }
 

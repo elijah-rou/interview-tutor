@@ -1166,7 +1166,9 @@ def config_case(fixture: MatrixFixture) -> str:
     invalid_db = run_checked(
         [binary, "--db", "", "--no-codex"], environment, expected_status=1
     )
-    assert "database path must not be empty" in invalid_db.stderr
+    assert (
+        "database path must not be empty; pass --db with a file path" in invalid_db.stderr
+    )
     valid_db = run_checked(
         [binary, "--db", str(database), "--no-codex"],
         environment,
@@ -1178,7 +1180,10 @@ def config_case(fixture: MatrixFixture) -> str:
         environment,
         expected_status=1,
     )
-    assert "unknown problem set" in invalid_set.stderr
+    assert (
+        "unknown problem set: missing; run `practice sets list` to see IDs"
+        in invalid_set.stderr
+    )
     valid_set = run_checked(
         [binary, "--db", str(database), "--set", "a00-matrix", "--no-codex"],
         environment,
@@ -1190,7 +1195,10 @@ def config_case(fixture: MatrixFixture) -> str:
         environment,
         expected_status=1,
     )
-    assert "unknown or disabled language" in invalid_language.stderr
+    assert (
+        "unknown or disabled language: brainfry; pass --language python or rust"
+        in invalid_language.stderr
+    )
     valid_language = run_checked(
         [binary, "--db", str(database), "--language", "python", "--no-codex"],
         environment,

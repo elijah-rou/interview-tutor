@@ -611,7 +611,7 @@ fn build_solve_interview(state: &AppState, area: Rect) -> (Paragraph<'static>, u
         crate::app::model::InterviewerStatus::AuthRequired => {
             lines.push(Line::from(match state.interviewer.backend {
                 crate::interviewer::Backend::Pi => {
-                    "Authentication required. Configure Pi provider credentials and retry."
+                    "Authentication required. Exit, set up Pi credentials, then restart."
                 }
                 crate::interviewer::Backend::Codex => {
                     "Authentication required. Exit and run: codex login"

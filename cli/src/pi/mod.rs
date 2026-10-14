@@ -1,5 +1,6 @@
 pub mod process;
 
+use crate::interviewer::error::{CLEAR_SESSION_STEP, RECONNECT_STEP};
 use crate::interviewer::{Backend, InterviewerError, Mode, Transport};
 use crate::runner::CancellationToken;
 use process::{PiProcess, ValidatedExecutable};
@@ -45,10 +46,12 @@ impl Transport for PiTransport {
             ));
         }
         if self.process.is_some() {
+            // Reconnecting reuses this transport; only a reset drops the retained process.
             return Err(InterviewerError::protocol(
                 Backend::Pi,
                 "Pi retained a process outside its correction turn",
-            ));
+            )
+            .with_step(CLEAR_SESSION_STEP));
         }
         Ok(())
     }
@@ -68,6 +71,7 @@ impl Transport for PiTransport {
         );
         let output_schema = serde_json::to_string(&output_schema).map_err(|_| {
             InterviewerError::configuration(Backend::Pi, "cannot encode Pi output schema")
+                .with_step(RECONNECT_STEP)
         })?;
         input.push_str("\nOUTPUT_SCHEMA_JSON:");
         input.push_str(&output_schema);

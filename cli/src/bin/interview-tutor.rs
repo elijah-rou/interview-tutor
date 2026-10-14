@@ -50,13 +50,20 @@ fn run() -> Result<ExitCode, String> {
         database::RowLimit::new(practice_cli::app::model::MAX_ROWS)?,
     )?;
     if languages.is_empty() {
-        return Err("no enabled languages".to_string());
+        return Err("no enabled languages; check the database file or pass --db PATH".to_string());
     }
     let language_index = match cli.language {
         Some(requested) => languages
             .iter()
             .position(|item| item.slug == requested)
-            .ok_or_else(|| format!("unknown or disabled language: {requested}"))?,
+            .ok_or_else(|| {
+                let available = languages
+                    .iter()
+                    .map(|item| item.slug.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                format!("unknown or disabled language: {requested}; pass --language {available}")
+            })?,
         None => languages
             .iter()
             .position(|item| item.slug == "python")

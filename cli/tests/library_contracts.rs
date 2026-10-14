@@ -116,6 +116,10 @@ fn shipped_catalog_rejects_blank_statements_without_restricting_custom_problems(
 
     let error = database::open_database(&fixture.database, &fixture.root).unwrap_err();
     assert!(error.contains("problem statement must not be blank"));
+    assert!(
+        error.ends_with(&format!("; fix {}", catalog_path.display())),
+        "{error}"
+    );
 
     fs::write(&catalog_path, catalog).unwrap();
     let connection = fixture.connection();
@@ -163,6 +167,10 @@ fn set_members_have_positive_typed_ordinals_and_optional_sections() {
         .unwrap();
     let error = database::list_set_members(&connection, "shipped-set").unwrap_err();
     assert!(error.contains("invalid persisted problem-set ordinal: 0"));
+    assert!(
+        error.ends_with("; check the database file or pass --db PATH"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -381,4 +389,60 @@ fn closed_persisted_enums_reject_unknown_values() {
         .unwrap();
     let error = database::resolve_problem(&connection, "shipped", None).unwrap_err();
     assert!(error.contains("unknown persisted difficulty: Extreme"));
+}
+
+#[test]
+fn shared_solution_paths_name_the_problem_that_owns_them() {
+    let fixture = Fixture::new();
+    let connection = fixture.connection();
+    add_custom_problem(&connection, &fixture.root);
+    database::create_problem(
+        &connection,
+        &NewProblem {
+            slug: "other",
+            title: "Other",
+            difficulty: Difficulty::Easy,
+            topic: "Graphs",
+            statement_markdown: "",
+            leetcode_id: None,
+            leetcode_url: "",
+            neetcode_url: "",
+            premium: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        database::add_implementation(&connection, "other", "python", "python/custom.py")
+            .unwrap_err(),
+        "solution path is already used by problem: custom; \
+         pass a SOLUTION_PATH no other problem uses"
+    );
+    database::add_implementation(&connection, "custom", "python", "python/custom.py").unwrap();
+}
+
+#[test]
+fn lookup_errors_end_with_a_command_that_lists_valid_choices() {
+    let fixture = Fixture::new();
+    let connection = fixture.connection();
+    assert_eq!(
+        database::get_problem_set(&connection, "missing-set").unwrap_err(),
+        "unknown problem set: missing-set; run `practice sets list` to see IDs"
+    );
+    assert_eq!(
+        database::resolve_problem(&connection, "missing", None).unwrap_err(),
+        "unknown problem: missing; run `practice problems list` to see slugs"
+    );
+    assert_eq!(
+        database::resolve_problem(&connection, "missing", Some("shipped-set")).unwrap_err(),
+        "unknown problem: missing; run `practice --set shipped-set list` to see slugs"
+    );
+    assert_eq!(
+        database::resolve_problem(&connection, "2", Some("shipped-set")).unwrap_err(),
+        "problem index out of range for shipped-set: 2; \
+         run `practice --set shipped-set list` to see indexes"
+    );
+    assert_eq!(
+        database::resolve_problem(&connection, "1", None).unwrap_err(),
+        "a numeric problem selector requires a problem set; use the problem slug instead"
+    );
 }

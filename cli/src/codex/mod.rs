@@ -3,6 +3,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod session;
 
+use crate::interviewer::error::RESTART_STEP;
 use crate::interviewer::{Backend, InterviewerError, Mode, Transport};
 use crate::runner::CancellationToken;
 use process::CodexProcess;
@@ -95,10 +96,12 @@ impl CodexTransport {
             ));
         }
         if !self.restart_remaining {
+            // Reset keeps a transport that requires restart, so only a new process recovers.
             return Err(InterviewerError::transport(
                 Backend::Codex,
                 "Codex session restart limit reached",
-            ));
+            )
+            .with_step(RESTART_STEP));
         }
         self.restart_remaining = false;
         let (process, interviewer_thread, hinter_thread) = establish(
@@ -291,9 +294,10 @@ fn establish(
     control_pid: Arc<AtomicI32>,
     cancellation: &CancellationToken,
 ) -> Result<(CodexProcess, String, String), InterviewerError> {
-    let mut process =
-        CodexProcess::start_executable(executable.to_path_buf(), control_pid, cancellation)
-            .map_err(|error| InterviewerError::transport(Backend::Codex, error))?;
+    let executable = process::ValidatedExecutable::verified(executable, cancellation)
+        .map_err(|error| InterviewerError::configuration(Backend::Codex, error))?;
+    let mut process = CodexProcess::start_verified(&executable, control_pid, cancellation)
+        .map_err(|error| InterviewerError::transport(Backend::Codex, error))?;
     let account_ready = match process.account_ready_with_cancellation(cancellation) {
         Ok(account_ready) => account_ready,
         Err(primary) => {
@@ -306,10 +310,7 @@ fn establish(
     if !account_ready {
         return Err(InterviewerError::authentication(
             Backend::Codex,
-            shutdown_after_failure(
-                &mut process,
-                "Codex authentication required; run `codex login`".into(),
-            ),
+            shutdown_after_failure(&mut process, "Codex authentication required".into()),
         ));
     }
     let interviewer_thread = match process.start_thread_with_cancellation(cancellation) {

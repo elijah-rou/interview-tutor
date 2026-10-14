@@ -110,6 +110,17 @@ Submission review starts only after local attempt recording succeeds and uses th
 
 Version probes have a 10-second wall bound and combined 64-KiB output capture. Startup/state requests have 10-second bounds, turns 120 seconds, abort/interrupt acknowledgement 2 seconds, and shutdown 2 seconds followed by bounded kill/reap and reader drains. Temporary cwd removal failures are reported during explicit cleanup.
 
-Authentication, executable, protocol, timeout, cancellation, and transport failures are typed rather than classified from message text. The UI shows backend-aware recovery guidance. Press `i` to reconnect for a later distinct operation, select `none`, or continue using local solve functions.
+Authentication, executable, protocol, timeout, cancellation, and transport failures are typed rather than classified from message text. Each error ends with one next step derived from its backend and kind:
+
+| Failure | Next step shown |
+| --- | --- |
+| Pi authentication | set up a model and credentials in `pi`, then restart `./interview` |
+| Codex authentication | run `codex login`, then restart `./interview` |
+| Pi executable or version | install Pi 0.84.4 or set `INTERVIEW_TUTOR_PI_EXECUTABLE` |
+| Codex executable or version | install Codex 0.147.0 or set `INTERVIEW_TUTOR_CODEX_EXECUTABLE` |
+| protocol, timeout, cancellation, transport | press `i` outside the Editor to reconnect (Esc first if the composer is open) |
+| Codex replacement limit reached | restart `./interview` to reconnect |
+
+`i` does not reconnect from the authentication-required state. You can also select `none` or keep using local solve functions.
 
 Automated tests use checked-in fake Pi RPC and Codex app-server executables and never invoke a live model or provider credentials.

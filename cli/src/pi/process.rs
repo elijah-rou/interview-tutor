@@ -1,3 +1,4 @@
+use crate::interviewer::error::{RECONNECT_STEP, SHORTEN_PROMPT_STEP};
 use crate::interviewer::{Backend, InterviewerError};
 use crate::runner::CancellationToken;
 use serde_json::{Map, Value, json};
@@ -30,7 +31,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-const SUPPORTED_PI_VERSION: &str = "0.84.4";
+pub(crate) const SUPPORTED_PI_VERSION: &str = "0.84.4";
 const _: () = assert!(PROTOCOL_QUEUE_CAPACITY >= 1);
 const _: () = assert!(MAX_PROTOCOL_AGGREGATE_BYTES >= MAX_JSON_RECORD_BYTES);
 
@@ -177,10 +178,10 @@ impl PiProcess {
         timeout: Duration,
     ) -> Result<String, InterviewerError> {
         if input.len() > MAX_JSON_RECORD_BYTES / 2 {
-            return Err(InterviewerError::configuration(
-                Backend::Pi,
-                "Pi prompt exceeds bound",
-            ));
+            return Err(
+                InterviewerError::configuration(Backend::Pi, "Pi prompt exceeds bound")
+                    .with_step(SHORTEN_PROMPT_STEP),
+            );
         }
         if self.provider.is_none() {
             self.load_state(cancellation)?;
@@ -432,7 +433,7 @@ impl PiProcess {
             let Some(model) = data.get("model") else {
                 return self.fail(InterviewerError::authentication(
                     Backend::Pi,
-                    "Pi authentication required; select a model and configure its provider credentials",
+                    "Pi authentication required: no model selected",
                 ));
             };
             let Some(provider) = model.get("provider").and_then(Value::as_str) else {
@@ -538,13 +539,15 @@ impl PiProcess {
         );
         let mut bytes = serde_json::to_vec(&command).map_err(|_| {
             InterviewerError::configuration(Backend::Pi, "cannot encode Pi RPC command")
+                .with_step(RECONNECT_STEP)
         })?;
         bytes.push(b'\n');
         if bytes.len() > MAX_JSON_RECORD_BYTES {
             return Err(InterviewerError::configuration(
                 Backend::Pi,
                 "Pi RPC command exceeds 2 MiB",
-            ));
+            )
+            .with_step(SHORTEN_PROMPT_STEP));
         }
         let result = self
             .input
@@ -606,11 +609,7 @@ impl PiProcess {
     fn fail<T>(&mut self, primary: InterviewerError) -> Result<T, InterviewerError> {
         match self.shutdown() {
             Ok(()) => Err(primary),
-            Err(cleanup) => Err(InterviewerError::new(
-                Backend::Pi,
-                primary.kind(),
-                format!("{primary}; cleanup failed: {cleanup}"),
-            )),
+            Err(cleanup) => Err(primary.with_cleanup_failure(cleanup.message())),
         }
     }
 
@@ -1329,7 +1328,7 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, String> {
         let selected = std::env::split_paths(&paths)
             .map(|base| base.join(path))
             .find(|candidate| candidate.is_file())
-            .ok_or("Pi CLI not found; local solve remains available")?;
+            .ok_or("Pi CLI not found")?;
         fs::canonicalize(selected)
             .map_err(|error| format!("cannot resolve Pi executable: {error}"))?
     };
@@ -1487,9 +1486,7 @@ fn validate_validated_version_with_timeout(
     if version != SUPPORTED_PI_VERSION {
         return Err(InterviewerError::configuration(
             Backend::Pi,
-            format!(
-                "unsupported Pi CLI {version}; install verified version {SUPPORTED_PI_VERSION}"
-            ),
+            format!("unsupported Pi CLI {version}"),
         ));
     }
     Ok(())
@@ -1628,11 +1625,7 @@ fn bounded_version_capture(
         let primary = outcome.err().unwrap_or_else(|| {
             InterviewerError::transport(Backend::Pi, "cannot clean up Pi version probe")
         });
-        return Err(InterviewerError::new(
-            Backend::Pi,
-            primary.kind(),
-            format!("{primary}; cleanup failed: {}", cleanup_errors.join("; ")),
-        ));
+        return Err(primary.with_cleanup_failure(&cleanup_errors.join("; ")));
     }
     Ok(VersionCapture {
         status: outcome?,
@@ -2103,10 +2096,11 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         validate_version(&executable, &CancellationToken::new()).unwrap();
         fs::write(&executable, "#!/bin/sh\necho 0.84.3\n").unwrap();
-        assert!(
-            validate_version(&executable, &CancellationToken::new())
-                .unwrap_err()
-                .contains("0.84.4")
+        let error = validate_version(&executable, &CancellationToken::new()).unwrap_err();
+        assert_eq!(error.kind(), crate::interviewer::ErrorKind::Configuration);
+        assert_eq!(
+            error.to_string(),
+            "unsupported Pi CLI 0.84.3; install Pi 0.84.4 or set INTERVIEW_TUTOR_PI_EXECUTABLE"
         );
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o720)).unwrap();
         assert!(
@@ -2420,12 +2414,13 @@ mod tests {
     fn omitted_model_is_authentication_and_persisted_session_is_protocol() {
         {
             let (_environment, mut process) = fake_process("auth");
+            let error = process
+                .turn("prompt".into(), &CancellationToken::new())
+                .unwrap_err();
+            assert_eq!(error.kind(), crate::interviewer::ErrorKind::Authentication);
             assert_eq!(
-                process
-                    .turn("prompt".into(), &CancellationToken::new())
-                    .unwrap_err()
-                    .kind(),
-                crate::interviewer::ErrorKind::Authentication
+                error.to_string(),
+                "Pi authentication required: no model selected; set up a model and credentials in `pi`, then restart ./interview"
             );
         }
         let (_environment, mut process) = fake_process("persisted-session");
@@ -2434,6 +2429,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), crate::interviewer::ErrorKind::Protocol);
         assert!(error.contains("persisted session"));
+        assert!(
+            error
+                .to_string()
+                .ends_with("; press i in the Interview pane to reconnect"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -201,17 +201,19 @@ fn collect_json_paths(
         })
 }
 
-pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
-    let catalog_path = root.join("catalog/problems.json");
-    let raw: RawCatalog = serde_json::from_slice(
-        &fs::read(&catalog_path)
-            .map_err(|error| format!("cannot read {}: {error}", catalog_path.display()))?,
-    )
-    .map_err(|error| format!("invalid {}: {error}", catalog_path.display()))?;
+const JSON_STEP: &str = "fix the file at the reported line";
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path, read_step: &str) -> Result<T, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("cannot read {}: {error}; {read_step}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid {}: {error}; {JSON_STEP}", path.display()))
+}
+
+fn validate_problems(root: &Path, raw: &RawCatalog) -> Result<HashSet<String>, String> {
     if raw.schema_version != 2 || raw.catalog_revision == 0 {
         return Err("unsupported problem catalog schema or revision".to_string());
     }
-
     let mut problem_slugs = HashSet::with_capacity(raw.problems.len());
     let mut leetcode_ids = HashSet::with_capacity(raw.problems.len());
     for problem in &raw.problems {
@@ -262,66 +264,92 @@ pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
             }
         }
     }
+    Ok(problem_slugs)
+}
+
+fn validate_problem_set(
+    path: &Path,
+    raw_set: &RawProblemSet,
+    problem_slugs: &HashSet<String>,
+    set_ids: &mut HashSet<String>,
+) -> Result<(), String> {
+    if raw_set.schema_version != 2 {
+        return Err(format!(
+            "unsupported problem-set schema version: {}",
+            raw_set.schema_version
+        ));
+    }
+    validate_identifier(&raw_set.id, "problem-set id", false)?;
+    validate_non_blank(&raw_set.name, "problem-set name", MAX_TITLE_LENGTH)?;
+    if raw_set.description.chars().count() > MAX_DESCRIPTION_LENGTH {
+        return Err(format!(
+            "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters: {}",
+            raw_set.id
+        ));
+    }
+    if path.file_stem().and_then(|stem| stem.to_str()) != Some(raw_set.id.as_str()) {
+        return Err(format!(
+            "problem-set id does not match filename: {}",
+            raw_set.id
+        ));
+    }
+    if !set_ids.insert(raw_set.id.clone()) {
+        return Err(format!("duplicate problem-set id: {}", raw_set.id));
+    }
+    let mut member_slugs = HashSet::with_capacity(raw_set.members.len());
+    for (index, member) in raw_set.members.iter().enumerate() {
+        if member.ordinal != (index + 1) as i64 {
+            return Err(format!(
+                "non-contiguous membership order in: {}",
+                raw_set.id
+            ));
+        }
+        if !problem_slugs.contains(&member.problem_slug) {
+            return Err(format!(
+                "unknown problem {} in set {}",
+                member.problem_slug, raw_set.id
+            ));
+        }
+        if !member_slugs.insert(member.problem_slug.clone()) {
+            return Err(format!(
+                "duplicate problem {} in set {}",
+                member.problem_slug, raw_set.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Loads the checked-in catalog. Every validation error names the file the user must fix.
+pub fn load_seed_catalog(root: &Path) -> Result<SeedCatalog, String> {
+    let catalog_path = root.join("catalog/problems.json");
+    let raw: RawCatalog = read_json(
+        &catalog_path,
+        "restore it with `git checkout -- catalog/problems.json` or fix its permissions",
+    )?;
+    let problem_slugs = validate_problems(root, &raw)
+        .map_err(|error| format!("{error}; fix {}", catalog_path.display()))?;
 
     let sets_directory = root.join("problem_sets");
     let mut set_paths = collect_json_paths(
         fs::read_dir(&sets_directory)
-            .map_err(|error| format!("cannot read {}: {error}", sets_directory.display()))?
+            .map_err(|error| {
+                format!(
+                    "cannot read {}: {error}; restore it with `git checkout -- problem_sets` or fix its permissions",
+                    sets_directory.display()
+                )
+            })?
             .map(|entry| entry.map(|entry| entry.path())),
         &sets_directory,
-    )?;
+    )
+    .map_err(|error| format!("{error}; check that directory's permissions"))?;
     set_paths.sort();
     let mut problem_sets = Vec::with_capacity(set_paths.len());
     let mut set_ids = HashSet::with_capacity(set_paths.len());
     for path in set_paths {
-        let raw_set: RawProblemSet = serde_json::from_slice(
-            &fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?,
-        )
-        .map_err(|error| format!("invalid {}: {error}", path.display()))?;
-        if raw_set.schema_version != 2 {
-            return Err(format!(
-                "unsupported problem-set schema: {}",
-                path.display()
-            ));
-        }
-        validate_identifier(&raw_set.id, "problem-set id", false)?;
-        validate_non_blank(&raw_set.name, "problem-set name", MAX_TITLE_LENGTH)?;
-        if raw_set.description.chars().count() > MAX_DESCRIPTION_LENGTH {
-            return Err(format!(
-                "problem-set description exceeds {MAX_DESCRIPTION_LENGTH} characters: {}",
-                raw_set.id
-            ));
-        }
-        if path.file_stem().and_then(|stem| stem.to_str()) != Some(raw_set.id.as_str()) {
-            return Err(format!(
-                "problem-set id does not match filename: {}",
-                path.display()
-            ));
-        }
-        if !set_ids.insert(raw_set.id.clone()) {
-            return Err(format!("duplicate problem-set id: {}", raw_set.id));
-        }
-        let mut member_slugs = HashSet::with_capacity(raw_set.members.len());
-        for (index, member) in raw_set.members.iter().enumerate() {
-            if member.ordinal != (index + 1) as i64 {
-                return Err(format!(
-                    "non-contiguous membership order in: {}",
-                    raw_set.id
-                ));
-            }
-            if !problem_slugs.contains(&member.problem_slug) {
-                return Err(format!(
-                    "unknown problem {} in set {}",
-                    member.problem_slug, raw_set.id
-                ));
-            }
-            if !member_slugs.insert(member.problem_slug.clone()) {
-                return Err(format!(
-                    "duplicate problem {} in set {}",
-                    member.problem_slug, raw_set.id
-                ));
-            }
-        }
+        let raw_set: RawProblemSet = read_json(&path, "check that file's permissions")?;
+        validate_problem_set(&path, &raw_set, &problem_slugs, &mut set_ids)
+            .map_err(|error| format!("{error}; fix {}", path.display()))?;
         problem_sets.push(ProblemSetSeed {
             id: raw_set.id,
             name: raw_set.name,

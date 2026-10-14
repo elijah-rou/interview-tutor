@@ -288,6 +288,10 @@ class GeneralizedCliTests(unittest.TestCase):
             if index in (7, 8, 9):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("no active python adapter", result.stderr)
+                self.assertIn(
+                    f"it has no tests to run, so read it with `practice problems show {slug}`",
+                    result.stderr,
+                )
             elif index == 5:
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(f"FAIL {slug}:", result.stderr)
@@ -418,7 +422,7 @@ class GeneralizedCliTests(unittest.TestCase):
     def test_explicit_empty_database_flag_is_rejected(self) -> None:
         result = self.run_command(str(ROOT / "practice"), "--db", "", "db")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("database path must not be empty", result.stderr)
+        self.assertIn("database path must not be empty; pass --db with a file path", result.stderr)
 
     def test_shipped_resources_are_read_only_through_local_crud(self) -> None:
         moved = self.run_command(
@@ -464,6 +468,8 @@ class GeneralizedCliTests(unittest.TestCase):
         self.assertIn("read-only", moved.stderr)
         self.assertIn("read-only", updated.stderr)
         self.assertIn("read-only", adapter.stderr)
+        self.assertIn("create your own with `practice sets create", moved.stderr)
+        self.assertIn("add your own with `practice problems add`", updated.stderr)
         self.assertFalse(discovery_marker.exists())
         with sqlite3.connect(self.database) as connection:
             solution_path = connection.execute(
@@ -695,6 +701,27 @@ class GeneralizedCliTests(unittest.TestCase):
         result = self.run_command(str(ROOT / "run"), "python", "metadata-only")
         self.assertEqual(result.returncode, 2)
         self.assertIn("no active python adapter", result.stderr)
+        self.assertIn(
+            "add a metadata-only adapter in python/local_judge/registry.py with cases in "
+            "python/tests/cases.py, then run "
+            "`practice problems adapter metadata-only python SOLUTION_PATH`",
+            result.stderr,
+        )
+        registered = self.run_command(
+            str(ROOT / "practice"),
+            "problems",
+            "adapter",
+            "metadata-only",
+            "python",
+            "python/problems/easy/contains_duplicate.py",
+        )
+        self.assertEqual(registered.returncode, 2)
+        self.assertIn(
+            "python runner does not expose problem adapter: metadata-only; "
+            "add a metadata-only adapter in python/local_judge/registry.py with cases in "
+            "python/tests/cases.py, then rerun this command",
+            registered.stderr,
+        )
 
 
 if __name__ == "__main__":

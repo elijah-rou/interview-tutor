@@ -85,6 +85,21 @@ fn start_interviewer_connect(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::ConnectInterviewer { operation }]
 }
 
+fn interviewer_error_text(
+    state: &AppState,
+    error: &crate::interviewer::InterviewerError,
+) -> String {
+    if error.reconnects() {
+        format!(
+            "{}; {}",
+            error.message(),
+            state.interviewer_reconnect_step()
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 fn interviewer_output_tail(output: &str) -> String {
     const MAX_INTERVIEWER_OUTPUT_BYTES: usize = 16 * 1024;
     if output.len() <= MAX_INTERVIEWER_OUTPUT_BYTES {
@@ -316,7 +331,10 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                     state.interviewer.hint_count = 0;
                 }
                 if state.interviewer.hint_count >= 3 {
-                    state.error = Some("maximum three hints reached for this revision".into());
+                    state.error = Some(
+                        "maximum three hints reached for this revision; edit the source to get more hints"
+                            .into(),
+                    );
                     return Vec::new();
                 }
                 state.interviewer.hint_count + 1
@@ -358,7 +376,8 @@ fn solve_command(state: &mut AppState, action: Action) -> Vec<Effect> {
                         Some((solve.editor.revision, solve.editor.text().to_string()));
                     state.status = "Running · newest test pending".into();
                 } else {
-                    state.error = Some("a run is already active".into());
+                    state.error =
+                        Some("a run is already active; submit again after it finishes".into());
                 }
                 return Vec::new();
             }
@@ -701,6 +720,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 return Vec::new();
             }
             Event::NeovimDocument(update) => {
+                let restart_step = state.neovim_restart_step();
                 let solve = state.solve.as_mut().expect("solve exists");
                 let revision_before = solve.editor.revision;
                 if let Err(error) = solve.editor.install_neovim_snapshot(
@@ -709,7 +729,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     update.changedtick,
                 ) {
                     solve.editor_status = EditorRuntimeStatus::Failed;
-                    state.error = Some(error);
+                    state.error = Some(format!("{error}; {restart_step}"));
                 } else if solve.editor.revision != revision_before {
                     solve.discard_confirmation = None;
                     solve.stale = solve
@@ -752,11 +772,11 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     Err(error) if error.kind() == crate::interviewer::ErrorKind::Authentication => {
                         state.interviewer.status = InterviewerStatus::AuthRequired;
                         state.interviewer.pending_submission_review = None;
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                     }
                     Err(error) => {
                         state.interviewer.status = InterviewerStatus::Disconnected;
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                     }
                 }
                 return Vec::new();
@@ -781,7 +801,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                             } else {
                                 InterviewerStatus::ProtocolError
                             };
-                        state.error = Some(error.to_string());
+                        state.error = Some(interviewer_error_text(state, &error));
                         return vec![Effect::FinalizeInterviewerTurn {
                             operation,
                             revision,
@@ -798,10 +818,23 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                     } else {
                         InterviewerStatus::Ready
                     };
-                    state.error = Some(
-                        "Interviewer response ignored because the source changed during the turn"
-                            .into(),
-                    );
+                    let step = match mode {
+                        InterviewerMode::Hint(_) => {
+                            format!("{} for a new hint", state.leader_step("Space h"))
+                        }
+                        InterviewerMode::Interviewer if state.interviewer.composer_focused => {
+                            "retype the question and press Enter".to_string()
+                        }
+                        InterviewerMode::Interviewer => {
+                            "press i outside the Editor to ask again".to_string()
+                        }
+                        InterviewerMode::SubmissionReview => {
+                            unreachable!("submission review keeps its recorded revision")
+                        }
+                    };
+                    state.error = Some(format!(
+                        "Interviewer response ignored because the source changed during the turn; {step}"
+                    ));
                     return finalize_interviewer_turn_and_dispatch_review(
                         state, operation, revision, mode, guidance, false,
                     );
@@ -834,7 +867,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.interviewer.active = None;
                 state.interviewer.composer_focused = false;
                 state.interviewer.status = InterviewerStatus::Disconnected;
-                state.error = Some(error);
+                state.error = Some(format!("{error}; {}", state.interviewer_reconnect_step()));
                 return Vec::new();
             }
             Event::RunnerLeftSolve(result) => match result {
@@ -843,7 +876,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                         solve.pending_draft_save = None;
                     }
                     state.status = "Runner cancellation failed · still in Solve".into();
-                    state.error = Some(error);
+                    state.error = Some(format!("{error}; retry Space-b"));
                     return Vec::new();
                 }
                 Ok(())
@@ -1140,7 +1173,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
                 let Some(problem_slug) =
                     state.data.detail.as_ref().map(|detail| detail.slug.clone())
                 else {
-                    state.error = Some("problem detail is unavailable".into());
+                    state.error = Some("problem detail is unavailable; press r to reload".into());
                     return Vec::new();
                 };
                 let operation = next_operation(state);
@@ -1169,7 +1202,7 @@ pub fn reduce(state: &mut AppState, event: Event) -> Vec<Effect> {
             state.interviewer.active = None;
             state.interviewer.composer_focused = false;
             state.interviewer.status = InterviewerStatus::Disconnected;
-            state.error = Some(error);
+            state.error = Some(format!("{error}; {}", state.interviewer_reconnect_step()));
         }
         Event::InterviewerConnected(_, _) => {}
         Event::OpenSet(slug) => {
@@ -1976,6 +2009,120 @@ mod tests {
     }
 
     #[test]
+    fn leader_steps_first_leave_text_input() {
+        let mut state = solve_state();
+        assert_eq!(state.leader_step("Space h"), "press Space h");
+        state.solve.as_mut().unwrap().editor.update_neovim_mode("i");
+        assert_eq!(state.leader_step("Space h"), "press Esc, then Space h");
+        state.solve.as_mut().unwrap().editor_status = EditorRuntimeStatus::Failed;
+        assert_eq!(state.leader_step("Space h"), "press Tab, then Space h");
+        state.solve.as_mut().unwrap().pane = SolvePane::Output;
+        assert_eq!(state.leader_step("Space h"), "press Space h");
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.composer_focused = true;
+        assert_eq!(state.leader_step("Space h"), "press Esc, then Space h");
+    }
+
+    #[test]
+    fn neovim_failures_end_with_the_restart_keys_for_the_current_focus() {
+        let restart = "press Space b, then Enter twice to restart Neovim";
+        let mut state = solve_state();
+        assert_eq!(state.neovim_restart_step(), restart);
+
+        state.solve.as_mut().unwrap().editor.update_neovim_mode("i");
+        assert_eq!(
+            state.neovim_restart_step(),
+            "press Tab, then Space b, then Enter twice to restart Neovim"
+        );
+        state.solve.as_mut().unwrap().pane = SolvePane::Problem;
+        assert_eq!(state.neovim_restart_step(), restart);
+        state.solve.as_mut().unwrap().pane = SolvePane::Interview;
+        state.interviewer.composer_focused = true;
+        assert_eq!(
+            state.neovim_restart_step(),
+            "press Esc, then Space b, then Enter twice to restart Neovim"
+        );
+
+        let mut oversized = solve_state();
+        reduce(
+            &mut oversized,
+            Event::NeovimDocument(crate::neovim::DocumentUpdate {
+                text: "\n".repeat(crate::editor::MAX_DOCUMENT_LINES + 1),
+                mode: "n".into(),
+                changedtick: 2,
+            }),
+        );
+        assert_eq!(
+            oversized.solve.as_ref().unwrap().editor_status,
+            EditorRuntimeStatus::Failed
+        );
+        assert_eq!(
+            oversized.error.as_deref(),
+            Some(
+                "document exceeds 100000 lines; press Space b, then Enter twice to restart Neovim"
+            )
+        );
+    }
+
+    #[test]
+    fn interviewer_disconnect_and_runner_release_errors_end_with_a_step() {
+        let mut solve = solve_state();
+        solve.interviewer.composer_focused = true;
+        reduce(
+            &mut solve,
+            Event::InterviewerDisconnected("Interviewer worker disconnected".into()),
+        );
+        assert_eq!(solve.interviewer.status, InterviewerStatus::Disconnected);
+        assert_eq!(
+            solve.error.as_deref(),
+            Some("Interviewer worker disconnected; press i outside the Editor to reconnect")
+        );
+
+        let mut browser = state();
+        reduce(
+            &mut browser,
+            Event::InterviewerDisconnected("Interviewer worker disconnected".into()),
+        );
+        assert_eq!(
+            browser.error.as_deref(),
+            Some(
+                "Interviewer worker disconnected; open a problem, then press i outside the Editor to reconnect"
+            )
+        );
+
+        let mut connecting = solve_state();
+        connecting.interviewer.composer_focused = true;
+        connecting.interviewer.connecting = Some(OperationId(7));
+        reduce(
+            &mut connecting,
+            Event::InterviewerConnected(
+                OperationId(7),
+                Err(crate::interviewer::InterviewerError::transport(
+                    crate::interviewer::Backend::Pi,
+                    "Pi closed stdout",
+                )),
+            ),
+        );
+        assert_eq!(
+            connecting.error.as_deref(),
+            Some("Pi closed stdout; press Esc, then i to reconnect")
+        );
+
+        let mut leaving = solve_state();
+        reduce(
+            &mut leaving,
+            Event::RunnerLeftSolve(Err(
+                "runner cancellation timed out; draft was not saved".into()
+            )),
+        );
+        assert_eq!(leaving.screen, Screen::Solve);
+        assert_eq!(
+            leaving.error.as_deref(),
+            Some("runner cancellation timed out; draft was not saved; retry Space-b")
+        );
+    }
+
+    #[test]
     fn draft_save_failure_or_newer_edit_stays_dirty_in_solve() {
         let mut failed = solve_state();
         reduce(
@@ -2707,7 +2854,12 @@ mod tests {
                 .iter()
                 .any(|(_, text)| text == "stale response")
         );
-        assert!(state.error.as_deref().unwrap().contains("source changed"));
+        assert_eq!(
+            state.error.as_deref(),
+            Some(
+                "Interviewer response ignored because the source changed during the turn; press i outside the Editor to ask again"
+            )
+        );
     }
 
     #[test]
@@ -3143,12 +3295,11 @@ mod tests {
             ));
         }
         assert!(reduce(&mut state, Event::Command(Action::Hint)).is_empty());
-        assert!(
-            state
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("maximum three hints")
+        assert_eq!(
+            state.error.as_deref(),
+            Some(
+                "maximum three hints reached for this revision; edit the source to get more hints"
+            )
         );
 
         reduce(

@@ -259,9 +259,9 @@ feature_catalog() {
     step db-path 0 ./practice --db "$db" db
     expect_out "$db"
     step unknown-set 2 ./practice --db "$db" --set no-such-set list
-    expect_err 'unknown problem set: no-such-set'
+    expect_err 'unknown problem set: no-such-set; run `practice sets list` to see IDs'
     step unknown-problem 2 ./practice --db "$db" --set blind75 show no-such-problem
-    expect_err 'unknown problem: no-such-problem'
+    expect_err 'unknown problem: no-such-problem; run `practice --set blind75 list` to see slugs'
     expect_attempts "$db" ''
     assert_pristine
 }
@@ -283,7 +283,7 @@ feature_judge() {
     step practice-run 0 ./practice --db "$db" run python two-sum
     expect_err '[stdout] PASS two-sum'
     step unknown-slug 2 ./run --db "$db" python no-such-problem
-    expect_err 'unknown problem: no-such-problem'
+    expect_err 'unknown problem: no-such-problem; run `practice problems list` to see slugs'
     step rust-starter 101 ./run --db "$db" rust two-sum
     expect_err 'not implemented: two-sum'
     write_rust_two_sum_correct
@@ -347,17 +347,17 @@ feature_admin() {
     step adapter-missing-file 2 ./practice --db "$db" problems adapter verify-pair-sum python python/problems/easy/verify_pair_sum.py
     expect_err 'solution file does not exist'
     step adapter-unregistered 2 ./practice --db "$db" problems adapter verify-pair-sum python python/problems/easy/contains_duplicate.py
-    expect_err 'python runner does not expose problem adapter: verify-pair-sum'
+    expect_err 'python runner does not expose problem adapter: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/registry.py with cases in python/tests/cases.py, then rerun this command'
     step shipped-delete-refused 2 ./practice --db "$db" problems delete two-sum --yes
     expect_err 'shipped problem is read-only: two-sum'
     step shipped-update-refused 2 ./practice --db "$db" problems update two-sum --title 'Renamed'
     expect_err 'shipped problem is read-only: two-sum'
     step shipped-set-delete-refused 2 ./practice --db "$db" sets delete blind75 --yes
-    expect_err 'shipped problem set is read-only: blind75'
+    expect_err 'shipped problem set is read-only: blind75; create your own with `practice sets create ID --name NAME`'
     step unguarded-delete-refused 2 ./practice --db "$db" sets delete verify-favorites
     expect_err 'required arguments were not provided'
     step run-metadata-only 2 ./run --db "$db" python verify-pair-sum
-    expect_err 'no active python adapter for problem: verify-pair-sum'
+    expect_err 'no active python adapter for problem: verify-pair-sum; add a verify-pair-sum adapter in python/local_judge/registry.py with cases in python/tests/cases.py, then run `practice problems adapter verify-pair-sum python SOLUTION_PATH`'
     step set-remove 0 ./practice --db "$db" sets remove verify-favorites verify-pair-sum
     step set-delete 0 ./practice --db "$db" sets delete verify-favorites --yes
     step problem-delete 0 ./practice --db "$db" problems delete verify-pair-sum --yes
