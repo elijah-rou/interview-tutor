@@ -1,6 +1,6 @@
 # Testing
 
-All repository gates are Linux-first and deterministic. Install stable Rust with rustfmt/Clippy, Python 3.12+, GNU Make/coreutils, compatible Neovim 0.9 through 1.x, and the pinned CI formatter/linter when reproducing CI:
+All repository gates are Linux-first and use deterministic inputs. The PTY gates drive real processes and can still fail intermittently on timing, so one failing run does not by itself show that a change broke them. Install stable Rust with rustfmt/Clippy, Python 3.12+, GNU Make/coreutils, compatible Neovim 0.9 through 1.x, and the pinned CI formatter/linter when reproducing CI:
 
 ```console
 python3 -m pip install ruff==0.14.10

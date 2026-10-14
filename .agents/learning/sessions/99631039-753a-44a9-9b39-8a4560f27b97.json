@@ -1,0 +1,29 @@
+[
+  {
+    "kind": "repo",
+    "text": "The PTY matrix fails non-deterministically in the verify-interview-tutor image (`make test-pty` and the `race` drive's PTY cases), and `make test-pty` has also failed intermittently in CI, so judge a failure only against a baseline from the unchanged tree (new runs, which reuse the image unless the base changed the Dockerfile or a Cargo manifest or lockfile, launched from a worktree of the base revision, since each run drives a feature once), report how many runs each tree had and where each stopped, and report failures the baseline also shows to the user as possible product or harness races rather than noise.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": false
+  },
+  {
+    "kind": "repo",
+    "text": "`cli/tests/*.py` sits outside the Makefile ruff gate and its files are formatted at mixed widths, so pick one width, reformat the directory, and then enforce it by adding `cli/tests` to the gate, with a nested `cli/tests/ruff.toml` that sets `extend` to the root config only if the chosen width differs from the root's.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": true
+  },
+  {
+    "kind": "repo",
+    "text": "The verify-interview-tutor image should run the Neovim release CI pins, enforced by pinning it in `scripts/Dockerfile` and a `verify-tutor doctor` check against `.github/workflows/ci.yml`, with the skill's Neovim notes updated when the pin lands.",
+    "evidence": {
+      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
+      "date": "2026-10-12"
+    },
+    "enforceable": true
+  }
+]

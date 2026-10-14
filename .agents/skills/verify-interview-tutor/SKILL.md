@@ -77,7 +77,7 @@ To run one user command by hand in the same container (for example, while you di
 docker exec -w /work CONTAINER_ID ./practice --db /tmp/manual.db sets list
 ```
 
-The repository's deterministic cancellation gate is the `race` drive. It runs `make test-race`: 20 PTY cases (runner cancellation and fake-Codex interrupts) and then 10 fail-fast iterations of the two Rust race tests. It takes about 3 minutes and builds into `/work/cli/target`:
+The repository's cancellation gate is the `race` drive. It runs `make test-race`: 20 PTY cases (runner cancellation and fake-Codex interrupts) and then 10 fail-fast iterations of the two Rust race tests. It takes about 3 minutes and builds into `/work/cli/target`:
 
 ```sh
 .agents/skills/verify-interview-tutor/scripts/verify-tutor drive RUN_ID race
@@ -88,6 +88,24 @@ For an unattended full pass, `all` runs launch, doctor, the five mapped features
 ```sh
 .agents/skills/verify-interview-tutor/scripts/verify-tutor all
 ```
+
+### Changes only to text
+
+Run this check as it reads at the merge base, not at the head: run `git fetch origin`, take `git merge-base origin/main HEAD` as `<base>`, and read and apply this whole subsection from `git show <base>:.agents/skills/verify-interview-tutor/SKILL.md`. If the base has no such subsection, the change is not text-only. A change is text-only only when every changed path is in this list:
+
+- the body of this `SKILL.md`, below its frontmatter;
+- `.agents/learning/sessions/*.json`;
+- Markdown files under `docs/`;
+- standalone comment lines in this skill's shell scripts under `scripts/`, other than line 1.
+
+Anything else is not text-only, including this file's frontmatter, `features/`, HTML, the Dockerfile, `.gitignore`, and comments in any other source file. Drive the features such a change touches. For a text-only change, the live check is:
+
+1. Run `git diff --name-only <base> HEAD`, and confirm every path is in the list. A change that adds, removes, or alters text anywhere in this `SKILL.md` about which changes are text-only or what verdict they get, including this subsection and its heading, is never text-only.
+2. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
+3. For each changed shell script, run `bash -n`, then read the `<base>` and head files around every changed line, not just the diff. Every removed and every added line must be a comment. Line 1 must be unchanged. The line before each changed line must not end in a backslash. No changed line may sit inside a heredoc or a multi-line quoted string.
+4. Parse each changed JSON file.
+
+Write the evidence to a file outside the repository and pass it to `agentic verify record --evidence`. Record the verdict as `unit-test-verified`, and say in the evidence that agent behavior under the new text was not observed.
 
 ## Evidence
 
@@ -130,6 +148,7 @@ agentic feature-map-lint .agents/skills/verify-interview-tutor/features
 
 ## Systems notes
 
-- Runs are deterministic: the network is `none`, the crates are locked, the toolchain is pinned, each feature gets a fresh database, the inputs are fixed, the solution files are restored, and the terminal is a fixed 120x40 `xterm-256color`. The product has no seeded randomness; durations and timestamps in output and attempt rows vary and are never asserted.
+- Inputs are deterministic: the network is `none`, the crates are locked, the toolchain is pinned, each feature gets a fresh database, the inputs are fixed, the solution files are restored, and the terminal is a fixed 120x40 `xterm-256color`. The product has no seeded randomness; durations and timestamps in output and attempt rows vary and are never asserted.
+- The PTY matrix (`cli/tests/pty_matrix.py`) is not deterministic in this image. This covers `make test-pty` and the PTY cases of the `race` drive. The matrix stops at its first failing case, and that case changes from run to run. `make test-pty` has also failed intermittently in CI's `Test serial PTY matrix` step, so a single run in either place does not prove that a change broke or fixed it. This image also differs from CI: it runs on the host's architecture (aarch64 on Apple Silicon) with Ubuntu's packaged Neovim, while CI runs x86_64 with the Neovim release pinned in `.github/workflows/ci.yml`. Before attributing a matrix failure to a change, get a baseline from the unchanged tree: check out the base revision in a second worktree that Docker can mount (on macOS, under your home directory), then launch and drive runs with that worktree's own `verify-tutor`, which reuses the image unless the base changed the Dockerfile or a Cargo manifest or lockfile. Each run drives a feature once, so every repeat is a new launch. Compare only the cases both trees reached, and report how many runs each tree had and which case each run stopped at. Report a failure the unchanged tree also shows to the user as a possible product or harness race under the concurrency-model note below, not as a slow VM or noise.
 - Changes to the runner, signals, cancellation, or the TUI worker threads need the `race` drive as well as the features. The core data structures (database schema, catalog identity, attempt recording) and the concurrency model (runner process groups, cancellation, worker channels) stay with the user: show them the evidence and get their decision before changing either.
 - Use `maintain-verification` when commands, keys, screen text, or catalog contents change.
