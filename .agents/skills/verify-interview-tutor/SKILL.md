@@ -91,13 +91,21 @@ For an unattended full pass, `all` runs launch, doctor, the five mapped features
 
 ### Changes only to text
 
-A change that touches only this skill's text, files under `.agents/learning/`, documentation, or comments has no product behavior to drive. Its live check is:
+A change is text-only only when every changed path is in this list:
 
-1. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
-2. Run `bash -n` on each changed shell script, and confirm that every changed line in it is a comment.
-3. Parse each changed JSON file.
+- the body of this `SKILL.md`, below its frontmatter;
+- `.agents/learning/sessions/*.json`;
+- Markdown files under `docs/`;
+- comment lines in this skill's shell scripts under `scripts/`, other than line 1.
 
-Record the verdict as `unit-test-verified`, and say in the evidence that agent behavior under the new text was not observed. If a changed script line is not a comment, the change is not text-only: drive the feature that runs it.
+Anything else is not text-only, including this file's frontmatter, `features/`, HTML, the Dockerfile, `.gitignore`, and comments in any other source file. Drive the features such a change touches. For a text-only change, the live check is:
+
+1. Run `git diff --name-only <base> HEAD` and confirm every path is in the list above.
+2. Read each changed passage against the pull request's stated intent, and check every fact it cites against the repository: paths, line references, commands, versions, and step names.
+3. For each changed shell script, run `bash -n`. Then confirm with `git diff -U0 <base> HEAD -- <script>` that every removed and every added line is a comment, that line 1 is unchanged, and that no changed line falls inside a heredoc.
+4. Parse each changed JSON file.
+
+Write the evidence to a file outside the repository and pass it to `agentic verify record --evidence`. Record the verdict as `unit-test-verified`, and say in the evidence that agent behavior under the new text was not observed.
 
 ## Evidence
 

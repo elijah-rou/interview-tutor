@@ -1,21 +1,12 @@
 [
   {
     "kind": "repo",
-    "text": "The PTY matrix fails non-deterministically in the verify-interview-tutor image (`make test-pty` and the `race` drive's PTY cases), and `make test-pty` has also failed intermittently in CI, so judge a failure only against a baseline from the unchanged tree (new runs on the same image, launched from a worktree of the base revision, since each run drives a feature once), report how many runs each tree had and where each stopped, and report failures the baseline also shows to the user as possible product or harness races rather than noise.",
+    "text": "The PTY matrix fails non-deterministically in the verify-interview-tutor image (`make test-pty` and the `race` drive's PTY cases), and `make test-pty` has also failed intermittently in CI, so judge a failure only against a baseline from the unchanged tree (new runs, which reuse the image unless the base changed the Dockerfile or a Cargo manifest or lockfile, launched from a worktree of the base revision, since each run drives a feature once), report how many runs each tree had and where each stopped, and report failures the baseline also shows to the user as possible product or harness races rather than noise.",
     "evidence": {
       "session": "99631039-753a-44a9-9b39-8a4560f27b97",
       "date": "2026-10-12"
     },
     "enforceable": false
-  },
-  {
-    "kind": "global",
-    "text": "Write a pull request's testing notes after its adversarial review returns, recording that the review ran, the reviewer model, and any findings left open, enforced by a hook on `gh pr create` and `gh pr edit` that refuses a body without that record.",
-    "evidence": {
-      "session": "99631039-753a-44a9-9b39-8a4560f27b97",
-      "date": "2026-10-12"
-    },
-    "enforceable": true
   },
   {
     "kind": "repo",
