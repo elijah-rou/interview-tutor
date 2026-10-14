@@ -4,8 +4,9 @@ mod msgpack;
 mod process;
 
 use grid::GridSnapshot;
-use process::{OriginEvent, RpcProcess, Snapshot, SnapshotOverflow};
+use process::{NotifiedSnapshot, OriginEvent, RpcProcess, Snapshot, SnapshotOverflow};
 use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -556,14 +557,8 @@ fn run_and_sync(
         );
         return;
     }
-    let candidate = current.snapshot();
-    if let Some((document, _recovered, publish)) =
-        handle_snapshot(executable, process, config, shared, candidate)
-        && publish
-        && let Some(generation) = config.as_ref().map(|config| config.generation)
-    {
-        push_session_event(shared, generation, WorkerEvent::Document(document));
-    }
+    // Drain the reader afterwards even if the snapshot restarted Neovim: the fresh reader is current.
+    let _ = sync_live_snapshot(executable, process, config, shared);
     sync_reader_state(executable, process, config, shared);
 }
 
@@ -737,13 +732,38 @@ fn sync_reader_state(
         }
     }
     let events = events.into_iter().collect::<Vec<_>>();
-    let mut reader_replaced = false;
     for (index, event) in events.iter().cloned().enumerate() {
-        let event_tick = event_changedtick(&event);
-        if let OriginEvent::Dirty { buffer, .. } = &event {
+        let superseded = events[index + 1..]
+            .iter()
+            .any(|later| event_changedtick(later) >= event_changedtick(&event));
+        if sync_origin_event(executable, process, config, shared, event, superseded).is_break() {
+            return;
+        }
+    }
+    if let Some(error) = error {
+        fail_process(
+            process,
+            shared,
+            config.as_ref().map(|config| config.generation),
+            error,
+        );
+    }
+}
+
+/// Breaks when the session failed or overflow recovery replaced the reader that queued the event.
+fn sync_origin_event(
+    executable: &Path,
+    process: &mut Option<RpcProcess>,
+    config: &mut Option<SessionConfig>,
+    shared: &Arc<Mutex<WorkerShared>>,
+    event: OriginEvent,
+    dirty_superseded: bool,
+) -> ControlFlow<()> {
+    match event {
+        OriginEvent::Dirty { buffer, .. } => {
             let valid_buffer = process
                 .as_ref()
-                .is_some_and(|process| process.is_solution_buffer(buffer));
+                .is_some_and(|process| process.is_solution_buffer(&buffer));
             if !valid_buffer {
                 fail_process(
                     process,
@@ -751,76 +771,126 @@ fn sync_reader_state(
                     config.as_ref().map(|config| config.generation),
                     "Neovim dirty event targeted a non-solution buffer".into(),
                 );
-                return;
+                return ControlFlow::Break(());
             }
-            if events[index + 1..]
-                .iter()
-                .any(|later| event_changedtick(later) >= event_tick)
-            {
-                continue;
+            if dirty_superseded {
+                return ControlFlow::Continue(());
             }
+            sync_live_snapshot(executable, process, config, shared)
         }
-        let candidate = match event.clone() {
-            OriginEvent::Dirty { .. } => process
-                .as_mut()
-                .ok_or_else(|| "Neovim session is unavailable".to_string())
-                .and_then(RpcProcess::snapshot),
-            OriginEvent::Action { snapshot, .. } | OriginEvent::Barrier { snapshot, .. } => process
-                .as_mut()
-                .ok_or_else(|| "Neovim session is unavailable".to_string())
-                .and_then(|process| process.resolve_notified_snapshot(snapshot)),
-        };
-        let Some((document, recovered, publish)) =
-            handle_snapshot(executable, process, config, shared, candidate)
-        else {
-            return;
-        };
-        let Some(generation) = config.as_ref().map(|config| config.generation) else {
-            return;
-        };
-        match event {
-            OriginEvent::Dirty { .. } => {
-                if publish {
-                    push_session_event(shared, generation, WorkerEvent::Document(document));
-                }
-            }
-            OriginEvent::Action { action, .. } => match parse_action(&action) {
-                Ok(action) => push_session_event(
-                    shared,
+        OriginEvent::Action { action, snapshot } => sync_captured_snapshot(
+            executable,
+            process,
+            config,
+            shared,
+            snapshot,
+            |generation, document| {
+                Ok(SourceEvent::Action(ActionUpdate {
                     generation,
-                    WorkerEvent::Source(SourceEvent::Action(ActionUpdate {
-                        generation,
-                        action,
-                        document,
-                    })),
-                ),
-                Err(error) => {
-                    fail_process(process, shared, Some(generation), error);
-                    return;
-                }
+                    action: parse_action(&action)?,
+                    document,
+                }))
             },
-            OriginEvent::Barrier { id, .. } => push_session_event(
-                shared,
-                generation,
-                WorkerEvent::Source(SourceEvent::Barrier(BarrierUpdate {
+        ),
+        OriginEvent::Barrier { id, snapshot } => sync_captured_snapshot(
+            executable,
+            process,
+            config,
+            shared,
+            snapshot,
+            |generation, document| {
+                Ok(SourceEvent::Barrier(BarrierUpdate {
                     generation,
                     id,
                     document,
-                })),
-            ),
-        }
-        if recovered {
-            reader_replaced = true;
-            break;
+                }))
+            },
+        ),
+    }
+}
+
+/// Accepts a live snapshot only after the Tutor captures Neovim made before it ran.
+///
+/// Neovim runs the snapshot request after the keys already in its typeahead, so the snapshot can
+/// be newer than an action or barrier those keys captured. The response shares one ordered RPC
+/// stream with their notifications, so they are queued by the time it arrives: every queued event
+/// no newer than the snapshot is handled first, and the dirty events among them are superseded.
+fn sync_live_snapshot(
+    executable: &Path,
+    process: &mut Option<RpcProcess>,
+    config: &mut Option<SessionConfig>,
+    shared: &Arc<Mutex<WorkerShared>>,
+) -> ControlFlow<()> {
+    let candidate = process
+        .as_mut()
+        .ok_or_else(|| "Neovim session is unavailable".to_string())
+        .and_then(RpcProcess::snapshot);
+    if let (Ok(snapshot), Some(current)) = (&candidate, process.as_ref()) {
+        let earlier = {
+            let reader_shared = current.shared();
+            let mut reader = reader_shared.lock().expect("Neovim reader lock");
+            let count = reader
+                .origin_events
+                .iter()
+                .take_while(|event| event_changedtick(event) <= snapshot.changedtick)
+                .count();
+            reader.origin_events.drain(..count).collect::<Vec<_>>()
+        };
+        for event in earlier {
+            if sync_origin_event(executable, process, config, shared, event, true).is_break() {
+                return ControlFlow::Break(());
+            }
         }
     }
-    if !reader_replaced && let Some(error) = error {
-        fail_process(
-            process,
-            shared,
-            config.as_ref().map(|config| config.generation),
-            error,
-        );
+    let Some((document, recovered, publish)) =
+        handle_snapshot(executable, process, config, shared, candidate)
+    else {
+        return ControlFlow::Break(());
+    };
+    let Some(generation) = config.as_ref().map(|config| config.generation) else {
+        return ControlFlow::Break(());
+    };
+    if publish {
+        push_session_event(shared, generation, WorkerEvent::Document(document));
+    }
+    if recovered {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
+}
+
+fn sync_captured_snapshot(
+    executable: &Path,
+    process: &mut Option<RpcProcess>,
+    config: &mut Option<SessionConfig>,
+    shared: &Arc<Mutex<WorkerShared>>,
+    notified: NotifiedSnapshot,
+    source: impl FnOnce(SessionGeneration, DocumentUpdate) -> Result<SourceEvent, String>,
+) -> ControlFlow<()> {
+    let candidate = process
+        .as_mut()
+        .ok_or_else(|| "Neovim session is unavailable".to_string())
+        .and_then(|process| process.resolve_notified_snapshot(notified));
+    let Some((document, recovered, _publish)) =
+        handle_snapshot(executable, process, config, shared, candidate)
+    else {
+        return ControlFlow::Break(());
+    };
+    let Some(generation) = config.as_ref().map(|config| config.generation) else {
+        return ControlFlow::Break(());
+    };
+    match source(generation, document) {
+        Ok(source) => push_session_event(shared, generation, WorkerEvent::Source(source)),
+        Err(error) => {
+            fail_process(process, shared, Some(generation), error);
+            return ControlFlow::Break(());
+        }
+    }
+    if recovered {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
     }
 }
 
@@ -926,6 +996,86 @@ mod tests {
             assert!(Instant::now() < deadline, "Neovim startup timed out");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn fake_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "interview-worker-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+
+    fn fake_snapshot(line: &str, changedtick: u64) -> Value {
+        map([
+            ("lines", array([Value::String(line.into())])),
+            ("eol", Value::Bool(true)),
+            ("mode", Value::String("n".into())),
+            ("tick", Value::Unsigned(changedtick)),
+        ])
+    }
+
+    /// Responses to a session start's RPC requests; the last one carries the initial snapshot.
+    fn fake_startup_responses(initial_snapshot: Value) -> [Value; 7] {
+        let api = array([
+            Value::Unsigned(7),
+            map([
+                (
+                    "version",
+                    map([
+                        ("api_level", Value::Unsigned(11)),
+                        ("api_compatible", Value::Unsigned(11)),
+                        ("api_prerelease", Value::Bool(false)),
+                    ]),
+                ),
+                ("ui_options", array([Value::String("ext_linegrid".into())])),
+            ]),
+        ]);
+        [
+            rpc_response(1, api),
+            rpc_response(2, Value::Nil),
+            rpc_response(3, Value::Nil),
+            rpc_response(4, Value::Unsigned(1)),
+            rpc_response(5, Value::Unsigned(1)),
+            rpc_response(6, Value::Nil),
+            rpc_response(7, initial_snapshot),
+        ]
+    }
+
+    fn fake_dirty(changedtick: u64) -> Value {
+        array([
+            Value::Unsigned(2),
+            Value::String("tutor_dirty".into()),
+            array([Value::Unsigned(1), Value::Unsigned(changedtick)]),
+        ])
+    }
+
+    /// A `tutor_action` or `tutor_barrier` notification for a capture of solution buffer 1.
+    fn fake_capture(method: &str, origin: Value, changedtick: u64, capture_id: u64) -> Value {
+        array([
+            Value::Unsigned(2),
+            Value::String(method.into()),
+            array([
+                origin,
+                Value::Unsigned(1),
+                Value::Unsigned(changedtick),
+                Value::String("n".into()),
+                Value::Unsigned(capture_id),
+                Value::String("none".into()),
+            ]),
+        ])
+    }
+
+    fn fake_writes(messages: &[Value]) -> String {
+        messages
+            .iter()
+            .map(|message| format!("sleep 0.02\nprintf '{}'\n", shell_encoded(message)))
+            .collect()
     }
 
     #[test]
@@ -1162,88 +1312,15 @@ mod tests {
 
     #[test]
     fn rpc_source_notifications_are_delivered_before_following_eof_failure() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "interview-worker-notify-eof-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = fake_root("notify-eof");
         let executable = root.join("fake-nvim");
-        let api = array([
-            Value::Unsigned(7),
-            map([
-                (
-                    "version",
-                    map([
-                        ("api_level", Value::Unsigned(11)),
-                        ("api_compatible", Value::Unsigned(11)),
-                        ("api_prerelease", Value::Bool(false)),
-                    ]),
-                ),
-                ("ui_options", array([Value::String("ext_linegrid".into())])),
-            ]),
-        ]);
-        let initial_snapshot = map([
-            ("lines", array([Value::String("saved".into())])),
-            ("eol", Value::Bool(true)),
-            ("mode", Value::String("n".into())),
-            ("tick", Value::Unsigned(1)),
-        ]);
-        let action = array([
-            Value::Unsigned(2),
-            Value::String("tutor_action".into()),
-            array([
-                Value::String("test".into()),
-                Value::Unsigned(1),
-                Value::Unsigned(2),
-                Value::String("n".into()),
-                Value::Unsigned(1),
-                Value::String("none".into()),
-            ]),
-        ]);
-        let action_snapshot = map([
-            ("lines", array([Value::String("processed-action".into())])),
-            ("eol", Value::Bool(true)),
-            ("mode", Value::String("n".into())),
-            ("tick", Value::Unsigned(2)),
-        ]);
-        let barrier = array([
-            Value::Unsigned(2),
-            Value::String("tutor_barrier".into()),
-            array([
-                Value::Unsigned(9),
-                Value::Unsigned(1),
-                Value::Unsigned(3),
-                Value::String("n".into()),
-                Value::Unsigned(2),
-                Value::String("none".into()),
-            ]),
-        ]);
-        let barrier_snapshot = map([
-            ("lines", array([Value::String("processed-barrier".into())])),
-            ("eol", Value::Bool(true)),
-            ("mode", Value::String("n".into())),
-            ("tick", Value::Unsigned(3)),
-        ]);
-        let messages = [
-            rpc_response(1, api),
-            rpc_response(2, Value::Nil),
-            rpc_response(3, Value::Nil),
-            rpc_response(4, Value::Unsigned(1)),
-            rpc_response(5, Value::Unsigned(1)),
-            rpc_response(6, Value::Nil),
-            rpc_response(7, initial_snapshot),
-            action,
-            rpc_response(8, action_snapshot),
-            barrier,
-            rpc_response(9, barrier_snapshot),
-        ]
-        .iter()
-        .map(|message| format!("sleep 0.02\nprintf '{}'\n", shell_encoded(message)))
-        .collect::<String>();
+        let messages = fake_writes(&fake_startup_responses(fake_snapshot("saved", 1)))
+            + &fake_writes(&[
+                fake_capture("tutor_action", Value::String("test".into()), 2, 1),
+                rpc_response(8, fake_snapshot("processed-action", 2)),
+                fake_capture("tutor_barrier", Value::Unsigned(9), 3, 2),
+                rpc_response(9, fake_snapshot("processed-barrier", 3)),
+            ]);
         fs::write(
             &executable,
             format!(
@@ -1491,6 +1568,158 @@ mod tests {
         assert_eq!(barrier.id, 43);
         assert_eq!(barrier.document.text, "Zx!\n");
         assert!(barrier.document.changedtick > back.document.changedtick);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn live_snapshot_is_accepted_after_tutor_captures_neovim_sent_before_it() {
+        let root = fake_root("live-order");
+        let requests = root.join("requests");
+        let executable = root.join("fake-nvim");
+        // The worker drains dirty(3) alone and asks for a live snapshot. Neovim answers only after
+        // its typeahead: <Space>b captures "Zx" at tick 3, then A! reaches "Zx!" at tick 4.
+        let startup = fake_writes(&fake_startup_responses(fake_snapshot("x", 2)))
+            + &fake_writes(&[fake_dirty(3)]);
+        let typeahead_then_live = fake_writes(&[
+            fake_capture("tutor_action", Value::String("back".into()), 3, 1),
+            fake_dirty(4),
+            rpc_response(8, fake_snapshot("Zx!", 4)),
+        ]);
+        let capture = fake_writes(&[rpc_response(9, fake_snapshot("Zx", 3))]);
+        fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+if [ "${{1-}}" = --version ]; then printf 'NVIM v0.11.5\n'; exit 0; fi
+exec 3<&0
+cat <&3 > '{requests}' &
+wait_for_request() {{
+  tries=0
+  until [ "$(grep -a -o -F "$1" '{requests}' | wc -l)" -ge "$2" ]; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 500 ]; then exit 1; fi
+    sleep 0.01
+  done
+}}
+{startup}wait_for_request 'synthetic solution snapshot is unavailable' 2
+{typeahead_then_live}wait_for_request 'synthetic solution captures are unavailable' 1
+{capture}exit 0
+"#,
+                requests = requests.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://live-order.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut sequence = Vec::new();
+        let mut failed = false;
+        while !failed {
+            for event in worker.poll().events {
+                sequence.push(match event {
+                    WorkerEvent::Started(result) => {
+                        result.unwrap();
+                        "started".to_string()
+                    }
+                    WorkerEvent::Document(document) => {
+                        format!("document {:?} {}", document.text, document.changedtick)
+                    }
+                    WorkerEvent::Source(SourceEvent::Action(update)) => format!(
+                        "{:?} {:?} {}",
+                        update.action, update.document.text, update.document.changedtick
+                    ),
+                    WorkerEvent::Source(SourceEvent::Barrier(update)) => {
+                        format!("barrier {}", update.id)
+                    }
+                    WorkerEvent::Warning(warning) => format!("warning {warning}"),
+                    WorkerEvent::Failed(error) => {
+                        failed = true;
+                        if error.contains("MessagePack stream") {
+                            "eof".to_string()
+                        } else {
+                            format!("failed {error}")
+                        }
+                    }
+                });
+            }
+            assert!(
+                Instant::now() < deadline,
+                "live snapshot ordering timed out: {sequence:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            sequence,
+            [
+                r#"document "x\n" 2"#,
+                "started",
+                r#"Back "Zx\n" 3"#,
+                r#"document "Zx!\n" 4"#,
+                "eof",
+            ]
+        );
+        worker.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn paste_snapshot_is_accepted_after_a_tutor_action_typed_before_it() {
+        let executable = resolve_executable(None).unwrap();
+        let worker = Worker::start(executable);
+        worker
+            .start_session(
+                "x\n".into(),
+                "interview://paste-order.py".into(),
+                "python".into(),
+                20,
+                8,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        wait_until_started(&worker, deadline);
+
+        worker.input("iZ<Esc><Space>t".into()).unwrap();
+        worker.paste("!".into()).unwrap();
+
+        let mut action = None;
+        let mut latest: Option<DocumentUpdate> = None;
+        while action.is_none()
+            || latest.as_ref().map(|document| document.text.as_str()) != Some("Z!x\n")
+        {
+            let poll = worker.poll();
+            latest = poll.document.or(latest);
+            for event in poll.events {
+                match event {
+                    WorkerEvent::Source(SourceEvent::Action(update)) => action = Some(update),
+                    WorkerEvent::Failed(error) => {
+                        panic!("paste after Tutor action failed: {error}")
+                    }
+                    WorkerEvent::Document(_)
+                    | WorkerEvent::Started(_)
+                    | WorkerEvent::Source(SourceEvent::Barrier(_))
+                    | WorkerEvent::Warning(_) => {}
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "paste after Tutor action timed out"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let action = action.unwrap();
+        assert_eq!(action.action, TutorAction::Test);
+        assert_eq!(action.document.text, "Zx\n");
+        assert!(latest.unwrap().changedtick > action.document.changedtick);
         worker.shutdown();
     }
 
